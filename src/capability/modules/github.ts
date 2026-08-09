@@ -74,6 +74,16 @@ function buildAppAuth(config: Config): GitHubAppAuth {
   return auth;
 }
 
+/**
+ * The issue/comment body, from `--body <b>` or piped stdin (`--body-stdin`). Stdin is the one that
+ * matters: an issue body is long markdown, which has no business travelling through argv (the same
+ * reason `beckett ticket create` reads its body that way).
+ */
+async function readIssueBody(flags: Record<string, string | boolean>): Promise<string> {
+  if (flags["body-stdin"]) return (await Bun.stdin.text()).trim();
+  return typeof flags.body === "string" ? flags.body : "";
+}
+
 function quietLogger(): Logger {
   const quiet = { info() {}, warn() {}, debug() {}, error() {}, child() { return quiet; } } as unknown as Logger;
   return quiet;
@@ -173,6 +183,26 @@ const PrReviewArgs = z.object({
   number: z.number().int().positive("github.pr-review needs a PR number"),
   event: z.enum(["APPROVE", "REQUEST_CHANGES", "COMMENT"]).optional(),
   body: z.string().optional(),
+});
+
+const IssueCreateArgs = z.object({
+  repo: z.string().trim().min(1, "github.issue-create needs an owner/name repo"),
+  title: z.string().trim().min(1, "github.issue-create needs a title"),
+  /** Markdown body; optional because a one-line issue is a legitimate issue. */
+  body: z.string().optional(),
+  labels: z.array(z.string()).optional(),
+});
+
+const IssueListArgs = z.object({
+  repo: z.string().trim().min(1, "github.issue-list needs an owner/name repo"),
+  state: z.enum(["open", "closed", "all"]).optional(),
+  limit: z.number().int().positive().max(100).optional(),
+});
+
+const IssueCommentArgs = z.object({
+  repo: z.string().trim().min(1, "github.issue-comment needs an owner/name repo"),
+  number: z.number().int().positive("github.issue-comment needs an issue number"),
+  body: z.string().trim().min(1, "github.issue-comment needs a body"),
 });
 
 const PushArgs = z.object({
@@ -513,6 +543,33 @@ export const createGithubExtension: ExtensionFactory = ({ config }): Extension =
         examples: ["approve PR 42 with a note that it looks good"],
       },
       {
+        id: "github.issue-create",
+        description:
+          "Open an issue on a GitHub repository — a title, a markdown body, optional labels. Use " +
+          "when someone asks to file/report something on a repo (a bug, feedback, a request) " +
+          "rather than to change its code.",
+        actionClass: ActionClass.HANDSHAKE_GATED,
+        input: IssueCreateArgs,
+        examples: ["open an issue on frgmt0/pixe about the methodology feedback"],
+      },
+      {
+        id: "github.issue-list",
+        description:
+          "List a repository's issues, filtered by state (open by default). A pure read — use to " +
+          "answer \"what's open on that repo?\" before filing or commenting.",
+        input: IssueListArgs,
+        examples: ["what issues are open on frgmt0/pixe?"],
+      },
+      {
+        id: "github.issue-comment",
+        description:
+          "Post a comment on an existing issue. Use when asked to reply to, follow up on, or add " +
+          "detail to a specific issue number.",
+        actionClass: ActionClass.HANDSHAKE_GATED,
+        input: IssueCommentArgs,
+        examples: ["comment on issue 7 of frgmt0/pixe that the fix is out"],
+      },
+      {
         id: "github.push",
         description:
           "Push a local worktree's ref up to a remote branch on a repo. The most consequential gh " +
@@ -579,6 +636,25 @@ export const createGithubExtension: ExtensionFactory = ({ config }): Extension =
             });
             return { ok: true, data: { reviewed: true, repo: a.repo, number: a.number } };
           }
+          case "github.issue-create": {
+            if (!call.origin?.userId) return { ok: false, error: "github: opening an issue needs an authenticated authorized request" };
+            const a = call.args as z.infer<typeof IssueCreateArgs>;
+            const data = await buildGh(config, undefined).createIssue(a.repo, {
+              title: a.title, body: a.body ?? "", labels: a.labels,
+            });
+            return { ok: true, data };
+          }
+          case "github.issue-list": {
+            const a = call.args as z.infer<typeof IssueListArgs>;
+            const issues = await buildGh(config, undefined).listIssues(a.repo, { state: a.state, limit: a.limit });
+            return { ok: true, data: { repo: a.repo, state: a.state ?? "open", count: issues.length, issues } };
+          }
+          case "github.issue-comment": {
+            if (!call.origin?.userId) return { ok: false, error: "github: commenting on an issue needs an authenticated authorized request" };
+            const a = call.args as z.infer<typeof IssueCommentArgs>;
+            const data = await buildGh(config, undefined).commentOnIssue(a.repo, a.number, a.body);
+            return { ok: true, data };
+          }
           case "github.push": {
             if (!call.origin?.userId) return { ok: false, error: "github: pushing needs an authenticated authorized request" };
             const a = call.args as z.infer<typeof PushArgs>;
@@ -594,13 +670,14 @@ export const createGithubExtension: ExtensionFactory = ({ config }): Extension =
     },
 
     // --- v5 facets, carried through unchanged ---
-    cliHelp: "gh repo|pr|push|app",
+    cliHelp: "gh repo|pr|issue|push|app",
     skillDoc: ".claude/skills/github/SKILL.md",
     cliVerbs: [
       {
         name: "gh",
         summary:
-          "repo create/star, PR create/merge/close/status/review, branch push, app identity/installations",
+          "repo create/star, PR create/merge/close/status/review, issue create/list/comment, " +
+          "branch push, app identity/installations",
         usage: CLI_USAGE,
         run: runGh,
       },

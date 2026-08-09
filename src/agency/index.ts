@@ -406,8 +406,10 @@ export interface PublishResult {
 }
 
 /**
- * Beckett's GitHub agency surface (Spec 07 §3). All PR/issue/review ops shell out to the
+ * Beckett's GitHub agency surface (Spec 07 §3). The PR/review ops shell out to the
  * `gh` CLI with `GH_TOKEN` set per-invocation (stateless, single credential — Spec 07 §3.2);
+ * the star and issue ops call the REST API directly with the same resolved credential (no
+ * subprocess: the token is already in hand, and a long markdown body never belongs in argv);
  * `git push` uses plain git with a credential helper that reads the PAT from the *environment*
  * (`$GITHUB_PAT`) so the token never appears in argv. Most ops are FREE; the caller GATES
  * `mergePR` behind {@link Agency.perform}.
