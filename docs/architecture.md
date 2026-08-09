@@ -9,12 +9,16 @@ conversation: a Haiku front desk that reads, banters, and routes, and a Sonnet m
 files, and steers. Work is a **Job** — one row with a `runner` column (`agent | human | shell`);
 everything that happens to it is an **Event** — one append-only row. **Doctrine** is the in-repo
 Claude Code plugin (agents, skills, hooks, one small in-process MCP server) that tells the model
-side how to behave. There is no external tracker, no poller, no outbox, no sidecar JSON: a write
-to the `job` table fires an in-process emitter, and the scheduler is a function called on that
-emit and on boot. The whole repo is ~11.9k lines, down from ~118k (≈71k code + 47k test). The full mechanics live in
+side how to behave. A **Trigger** is a standing rule a human armed — the one thing that files a
+Job with nobody typing ([initiative.md](initiative.md)). There is no external tracker, no outbox,
+no sidecar JSON, and no poller in the dispatch path: a write to the `job` table fires an in-process
+emitter, and the scheduler is a function called on that emit and on boot. The design declares
+exactly one tick — the trigger evaluator's 60-second pass, which schedules nothing but
+initiative. The whole repo is ~12.2k lines, down
+from ~125k (≈75k code + 50k test). The full mechanics live in
 [orchestration.md](orchestration.md); this doc is the shape and the map.
 
-## The seven concepts
+## The eight concepts
 
 Everything durable is built from exactly these. Nothing else has a name; when a source or an old
 doc uses another term (ticket, task, stage, dispatcher, concierge), it maps here.
@@ -24,9 +28,10 @@ doc uses another term (ticket, task, stage, dispatcher, concierge), it maps here
 | **Job** | One row in SQLite: `parent`, `deps[]`, a runner, a cast, a budget, a state. Absorbs ticket, task `#42.1`, stage, DAG node, review cycle, design gate, basm arm, branch name, Discord card key. |
 | **Event** | One append-only row `(job_id, kind, payload, cost_usd, tokens, ts)`. Absorbs the spend/dispatch journals, both outboxes, comment cursors, poll snapshots, and the pending-steer store. |
 | **Runner** | The *kind* of executor: `agent \| human \| shell`. A column, not a class hierarchy. A human gate is a row the Supervisor has no code path to spawn. |
-| **Supervisor** | The one Bun process. Owns the DB, the scheduler, preflight, and the SDK sessions. |
+| **Supervisor** | The one Bun process. Owns the DB, the scheduler, preflight, the trigger evaluator, and the SDK sessions. |
 | **Wire** | The Discord adapter. Gateway in; replies, `-# filed jN` lines, and card edits out. |
 | **Seats** | Haiku front desk + Sonnet mind, sharing one `persona.md`. The only things that speak. |
+| **Trigger** | One row (`t3`): a standing rule a human armed — `schedule \| watch \| signal` — that files a Job when its condition goes true. Absorbs the routine scheduler, its store, its rate limiter, and the dream pass's bespoke budget. The only path to a Job with no human turn. |
 | **Doctrine** | The in-repo Claude Code plugin: `agents/`, `skills/`, hooks, one in-process MCP server. |
 
 **One identity rail.** A Job's id is a short opaque ref — `j7`, `j7.1`, `j7.1.2` (child = dotted
@@ -37,17 +42,22 @@ spent ~1,147 lines (`src/task/`) hiding one from humans; with one rail there is 
 **Five job states, and they will never grow:** `open · running · done · failed · cancelled`.
 "Ready" is derived. Everything finer — parked, in-review, design gate, launch-refused, crashed —
 is a job, a `hold` string, or an event kind. v0's lesson: adding one gate stage cost a global enum
-migration; here it costs one row with `runner='human'`.
+migration; here it costs one row with `runner='human'`. Initiative — a whole new way for work to
+begin — cost two tables, one job column, and six event kinds; it added **zero** states and zero
+runner kinds, which is the rule doing its job.
 
 ## Process model
 
 Everything below the model layer is **one process**:
 
 - `beckett.service`, a `systemd --user` unit under the `beckett` account, `Restart=always`.
-  systemd owns liveness — not cloud Routines, not session-scoped cron, not a watchdog agent.
+  systemd owns liveness — not cloud Routines, not session-scoped cron, not a watchdog agent — and
+  it owns *only* liveness: trigger scheduling stays inside the Supervisor, so a fire time, its
+  cooldown, and its dedupe key live in the one store instead of in unit files
+  ([initiative.md](initiative.md)).
 - Inside it: the Wire (discord.js gateway), both Seat drivers, the store, the emitter + scheduler,
-  the preflight cache, the in-process MCP server, and in-process hooks. No control socket, no bus:
-  modules call each other.
+  the trigger evaluator, the preflight cache, the in-process MCP server, and in-process hooks. No
+  control socket, no bus: modules call each other.
 - Agent work runs as **SDK `query()` sessions** — children owned by the Supervisor, each pinned to
   a worktree (`cwd` persisted on the job row, because resume is cwd-sensitive), each with
   `maxBudgetUsd` and `--max-turns` as spawn-time rails. Steering is SDK streaming stdin with an
@@ -65,28 +75,32 @@ persistence, runs dying with sessions, no stdin); `claude --resume` survives onl
 
 ## System diagram
 
+Two inbound paths, not one. The human turn is the left column; **initiative** is the right, and
+it reaches the Supervisor the same way — by writing a row ([initiative.md](initiative.md)).
+
 ```
-                                Discord
-                                   │ messages, replies, 👍
-                     ┌─────────────▼──────────────┐
-                     │            Wire            │  gateway in · replies out
-                     │ cards / -# filed jN edits  │◀─────────────────┐
-                     └──────┬──────────────▲──────┘   job/event rows │ (code, zero tokens)
-                 human turns│              │seat replies             │
-              ┌─────────────▼──────┐       │                         │
-              │        Seats       │───────┘                         │
-              │  front desk (Haiku)│                                 │
-              │  mind (Sonnet)     │                                 │
-              └─────────┬──────────┘                                 │
-                        │ job.create / job.say  (typed MCP, zod)     │
-   ┌────────────────────▼────────────────────────────────────────────┴───┐
-   │                           Supervisor (one Bun process,              │
-   │                            systemd --user, user `beckett`)          │
-   │                                                                     │
-   │   ~/.beckett/beckett.db ──emit──▶ scheduler ──▶ preflight ──▶ spawn │
-   │   job · event · kv · health        ready-rule    health cache       │
-   │                                    policy table  MRCR guard         │
-   └──────┬──────────────────────┬─────────────────────────┬─────────────┘
+              Discord                               clock · store predicate · local signal
+              │ messages, replies, 👍                                  │
+   ┌──────────▼─────────────────┐                ┌────────────────────▼─────────────────────┐
+   │            Wire            │                │                 Triggers                 │
+   │ cards / -# filed jN edits  │◀───────────┐   │ t3: armed · posture · spec · budget_usd  │
+   └──────────┬──────────────▲──┘            │   │ cooldown · max_per_day · fire_key        │
+   human turns│              │seat replies   │   │ evaluated in code, never by a model: one │
+   ┌──────────▼─────────┐    │               │   │ indexed query over these same rows, or   │
+   │        Seats       │────┘               │   │ one probe. nothing true = zero tokens.   │
+   │  front desk (Haiku)│                    │   └────────────────────┬─────────────────────┘
+   │  mind (Sonnet)     │                    │    act ─▶ files a job  │  one txn writes the
+   └──────────┬─────────┘                    │    ask ─▶ a human gate │  fire row and the
+              │ job.create / job.say         │             first      │  job row together;
+              │ (typed MCP, zod)             │                        │  a dup fire_key
+   ┌──────────▼──────────────────────────────┴────────────────────────▼─────────────────────┐
+   │                              Supervisor (one Bun process,                              │
+   │                             systemd --user, user `beckett`)                            │
+   │                                                                                        │
+   │   ~/.beckett/beckett.db ─emit─▶ scheduler ─▶ admission ─▶ preflight ─▶ spawn           │
+   │   job · event · kv · health     ready-rule   initiative   health cache                 │
+   │   trigger · trigger_fire        policy table cap + ledger MRCR guard                   │
+   └──────┬──────────────────────┬─────────────────────────┬────────────────────────────────┘
           │ runner='agent'       │ runner='shell'          │ runner='human'
    ┌──────▼───────────┐   ┌──────▼──────────┐       ┌──────▼──────────┐
    │ SDK query()      │   │ verify jobs:    │       │ never spawned;  │
@@ -106,16 +120,19 @@ the gap they compensated for no longer exists.
 ## The store
 
 `~/.beckett/beckett.db` — SQLite, WAL, one writer (the Supervisor), nightly `VACUUM INTO`,
-`beckett doctor db` on boot. Four tables replace v0's **nine** sidecar stores
+`beckett doctor db` on boot. Six tables replace v0's **nine** sidecar stores
 (`poll-snapshot.json`, `comment-cursors.json`, `dispatcher-state.json`, `advance-outbox.jsonl`,
-`publish-outbox.jsonl`, `events/dispatch.jsonl`, `spend.jsonl`, `tasks.json`, `github-prs.json`):
+`publish-outbox.jsonl`, `events/dispatch.jsonl`, `spend.jsonl`, `tasks.json`, `github-prs.json`)
+plus the routine store, the watch seen-set, and the dream ledger:
 
 | Table | Role |
 |---|---|
 | `job` | The board. Full schema in [orchestration.md](orchestration.md): id/parent, intent (prose, verbatim, never parsed), criteria, runner, cast, `deps[]`, `join_policy`, `budget_usd`, origin channel, state, `hold`, `session_id`/`worktree`/`wip_sha`, result. |
 | `event` | Append-only ledger: steers (with `delivered_at`), beats, spend (tokens + `cost_usd` per result frame), and the outcome taxonomy — `never_ran`, `launch_failed`, `crashed` are distinct kinds *the moment they happen*, never a post-hoc heuristic. The job table is reconstructible from it. |
 | `kv` | Small maps: thread-attach (`&j7`), the 30-day `OPS-N`/`#N.x` alias map from migration. |
-| `health` | The preflight cache, keyed `(harness, provider)`: `healthy | cooldown_until | blocked` + reason. Fed by classed failure events and by cheap zero-spawn probes at boot and every 10 min. |
+| `health` | The preflight cache, keyed `(harness, provider)`: `healthy \| cooldown_until \| blocked` + reason. Fed by classed failure events and by cheap zero-spawn probes at boot and every 10 min. |
+| `trigger` | Standing rules a human armed (`t3`): kind, spec, posture, cast, per-fire budget, cooldown, daily cap, veto count. The only thing that files a Job with no human turn — see [initiative.md](initiative.md). |
+| `trigger_fire` | One row per evaluated fire, `PRIMARY KEY (trigger_id, fire_key)`. The idempotency guarantee is that constraint, not a check: the fire row and the job row are one transaction, so a repeat is a failed insert and no second job exists. Refusals are rows too (`job_id IS NULL`), which is what makes "why *didn't* you" a query. |
 
 Two structural rules keep it honest. First: **no serialization pretending to be a data model** —
 v0 smuggled casts, deps, projects, and branches as six fenced code blocks regex-parsed out of a
@@ -123,7 +140,10 @@ markdown description, where a typo'd cast silently degraded to `{}`; v1 creates 
 typed `job.create` MCP tool that zod-rejects bad input at the boundary, and briefs are *rendered
 from* rows, never parsed back. Second: **append-only where history matters** — the event table is
 never updated, so the audit trail, the spend rollup (one SQL sum), and the quality stats all read
-the same rows the Supervisor acts on. Nothing is inferred twice.
+the same rows the Supervisor acts on. Nothing is inferred twice. `trigger_fire` is the one table
+with a rejecting constraint, and that is exactly why it isn't folded into `event`: a ledger that
+can refuse a write is worse than one with duplicates, so the *claim* lives in its own small,
+prunable table and `event` keeps recording everything forever.
 
 ## Doctrine: the plugin
 
@@ -138,8 +158,14 @@ One Claude Code plugin in-repo. Behavior for the model side is data, not orchest
   quorum joins, budgets, and human gates are the default expressive power of job rows now, so the
   compiler for a DSL the dispatcher never executed has nothing to compile to.
 - **hooks (in-process)** — the scope guard as `canUseTool`, the done-gate, the 120s WIP-commit.
-  No subprocess hooks: the Supervisor registers them directly on its own sessions.
-- **MCP (in-process)** — the tiny `job.*` / `channel.window` toolset for the Seats, plus memory,
+  No subprocess hooks: the Supervisor registers them directly on its own sessions. A job with
+  `origin_trigger` set gets a narrower toolset by construction: no `trigger.*` verbs (so a
+  self-started job can never arm another rule), no send-as-a-person surface, and `gh` admin verbs
+  denied — three of the doctrine's four direct-go items as absences rather than as sentences a
+  model has to remember; the fourth, an explicit hold, is refused before the job exists
+  ([initiative.md](initiative.md)).
+- **MCP (in-process)** — the tiny `job.*` / `trigger.propose` / `channel.window` toolset for the
+  Seats, plus memory,
   jingle, deploy, image, and the browser handoff for workers. Heavy MCP (jingle/gh/browser) is
   scoped to workers only — never loaded on a Seat, because a fat toolset on the conversational
   seat was a tens-of-thousands-of-tokens standing tax (see
@@ -158,8 +184,9 @@ Targets, not measurements — they are the build's size contract and they sum to
 
 | Module | LOC | What it is / replaces |
 |---|---:|---|
-| `store/` | 500 | schema, typed accessors, migrations, `doctor db` — job · event · kv · health |
-| `supervisor/` | 950 | scheduler, ready-rule, policy table, boot resume, stall watchdog — replaces the 4,158-line dispatcher + 585-line poller |
+| `store/` | 500 | schema, typed accessors, migrations, `doctor db` — job · event · kv · health · trigger · trigger_fire |
+| `supervisor/` | 950 | scheduler, ready-rule, policy table, boot resume, stall watchdog — replaces the 4,174-line dispatcher + 585-line poller |
+| `initiative/` | 300 | trigger evaluator: the predicate registry, humanized fire times, fire-key dedupe, the act-or-ask downgrade rules, the daily ledger — replaces `src/routine/` (3,573 with its module) and the dream pass's bespoke budget |
 | `run/` | 600 | SDK driver: spawn, stream, steer + echo-ack, structured output, budget — replaces `src/drivers/` (110KB) |
 | `run/terra.ts` | 200 | second driver behind the same Runner interface; opt-in lane, behind preflight |
 | `preflight/` | 250 | health cache, zero-spawn probes, MRCR context-budget guard |
@@ -172,9 +199,14 @@ Targets, not measurements — they are the build's size contract and they sum to
 | `memory/` | 1,200 | moss recall graph (kept; daemon plumbing trimmed) |
 | `browser/` | 1,500 | BetterWright lane (kept; see [betterwright.md](betterwright.md)) |
 | `jingle/` + deploy/site/image | 1,200 | credential vault glue and the delivery hands |
-| `cli/` | 550 | `beckett job/plan/say/spend/status/attach/doctor` |
+| `cli/` | 550 | `beckett job/plan/say/spend/status/attach/doctor/why/initiative/signal` |
 | Doctrine plugin | ~600 md | `agents/`, `skills/`, prompts, `persona.md` — data, not code |
-| **Total** | **≈11,850 + 600 md** | from ~118k (≈71k code + 47k test) |
+| **Total** | **≈12,150 + 600 md** | from ~125k (≈75k code + 50k test) |
+
+`beckett why <jN>` is the one verb added purely for legibility: it prints the trigger, the
+evidence that was true at fire time, who armed the rule, and what it cost — all from rows, and it
+exists because [discord.md](discord.md)'s ninth acceptance conversation stops being answerable by
+"you asked me to" the moment initiative ships.
 
 ## Old → new: what absorbed each deleted subsystem
 
@@ -182,21 +214,21 @@ Targets, not measurements — they are the build's size contract and they sum to
 |---|---|
 | bored tracker + HTTP adapter + bridge-flow hack (`src/bored/`, 358) | deleted — the `job` table *is* the board; no external lifecycle to fake with two-gate workflow translations |
 | poller (`src/tracker/poll.ts`, 585) + `poke`/`observe`/`onAdvance` | deleted — DB write → in-process emitter → scheduler function call |
-| dispatcher (`src/dispatch/dispatcher.ts`, 4,158) | `supervisor/` — a ready-rule and one failure-policy table; roughly a third of the dispatcher was durability bookkeeping the store now gives for free |
+| dispatcher (`src/dispatch/dispatcher.ts`, 4,174) | `supervisor/` — a ready-rule and one failure-policy table; roughly a third of the dispatcher was durability bookkeeping the store now gives for free |
 | stage registry (`stages.ts`, 864) | Doctrine `agents/` prompts + the deterministic casting table |
 | worker spawn (`spawn.ts`, 576) + `src/drivers/` | `run/` on the Agent SDK; terra as a 200-line second driver |
 | advance-outbox + publish-outbox (427) | Event rows + the `runner='shell'` verify job's bounded retry (1m/5m/30m) — the courier *concept* deleted, its semantics kept |
 | fenced-block metadata (`tracker/cast.ts`, 365) | the typed `job.create` boundary; `validateCasting`'s refusal posture survives as zod |
 | task/branch registry (`src/task/`, 1,147) | the identity rail — `j7` is already the branch, worktree, session, and card key |
-| nine sidecar stores | four tables in `beckett.db` |
-| concierge monolith (`src/concierge/index.ts`, 7,271) | `frontdesk/` + `mind/` (600 each) for the human turns; Wire card edits as code for the ~2,000 daily progress turns that never needed a model |
+| nine sidecar stores | six tables in `beckett.db` |
+| concierge monolith (`src/concierge/index.ts`, 7,656) | `frontdesk/` + `mind/` (600 each) for the human turns; Wire card edits as code for the ~2,000 daily progress turns that never needed a model |
 | capability registry + ext contract (`src/capability/` + `src/ext/`, ~2,007) | the Doctrine plugin — CLI-verb/bus/prompt-block composition was plumbing for problems the SDK-native shape doesn't have |
 | basm `.b` DSL + skill | job rows: `deps[]`, `join_policy`, `budget_usd`, `runner='human'` |
 | INT board / design gate | an ordinary job tree with a `runner='human'` gate row — zero tokens parked, restart-inert by construction |
 | quick runner (`src/quick/` + module, 527) | a direct `run/` spawn; the errand-sizing doctrine survives in the `quick` skill |
-| routine scheduler (`src/routine/` + module, 3,573) | `systemd --user` timers + skill invocations; the humanized-fire-time doctrine survives, the hand-rolled scheduler/store does not |
-| staffing watchdog | deleted — with the poller gone, the ready-rule is the only scheduling authority |
-| dream (`src/dream/`, 1,663) | deferred — not in the v1 map; if revived, one nightly skill invocation, not custom budget/spike machinery |
+| routine scheduler (`src/routine/` + module, 3,573) | `trigger` rows + the ~300-line evaluator in `initiative/` — one clock, one store, one ledger. The humanized-fire-time doctrine and the hard 1/hr·3/24h cap survive as columns (`cooldown_secs`, `max_per_day`); the hand-rolled scheduler, its store, and its separate rate limiter do not. **Not** systemd timers: a fire time whose cooldown and dedupe key live in a unit file is a tenth sidecar ([initiative.md](initiative.md)) |
+| staffing watchdog | deleted — with the poller gone, the ready-rule is the only scheduling authority (the trigger evaluator's 60s tick schedules nothing but initiative) |
+| dream (`src/dream/`, 1,663) | deferred — not in the v1 map. Its walls were right and its output was deliberately evidence rather than work; if revived it is one `schedule` trigger filing one ordinary job on the ordinary ledger, not custom budget/spike machinery |
 | voice transport (`src/discord/voice/`, 909) | stays in-tree, unwired, documented as deferred |
 | federation (`src/discord/federation.ts` + caps) | deferred — single-owner desktop install first |
 | ~11k+ test lines | die with their subjects; the ported pure modules bring their tests with them |

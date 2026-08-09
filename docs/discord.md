@@ -5,7 +5,8 @@ gets a reply in its voice, and if the ask is real work, one grey subtext line un
 the only proof anything was filed. Everything else — the coding, the reviewing, the deciding —
 happens off-channel and reports back through one editable card. v1 keeps that feel exactly and
 rebuilds the machinery under it. See [orchestration.md](orchestration.md) for the Job/Event/Runner
-model this surface files into, and [token-efficiency.md](token-efficiency.md) for why the Wire is
+model this surface files into, [initiative.md](initiative.md) for the one case where a card appears
+with nobody having typed, and [token-efficiency.md](token-efficiency.md) for why the Wire is
 the single biggest lever in the concierge cost attack.
 
 **The Wire** is the Discord adapter: gateway in, cards out. **Seats** are the two agents that
@@ -84,6 +85,14 @@ guess. v1 ports them rather than re-deriving them.
   Why: caps are backstops, not rations — the classifier is the real gate; these only exist to
   guarantee termination.
 
+  **Ambient is speaking unprompted, never working unprompted.** The playbook rule it ports —
+  *offer, don't commit; no task on an ambient turn* — survives verbatim in v1: an ambient turn may
+  float an offer and nothing else, and the acceptance is an ordinary human turn that files ordinary
+  work. Starting work with nobody typing is a different mechanism with a different gate
+  ([initiative.md](initiative.md)): a trigger a human armed, evaluated in code rather than by a
+  classifier. Conflating the two would mean the model that decides whether a joke lands also
+  decides whether a branch gets cut.
+
 ---
 
 ## The Wire: gateway in, cards out
@@ -99,7 +108,9 @@ already the product; a research-preview integration would be a bet this design t
 **Card edits are code, never model turns.** Every top-level job gets one self-editing Components
 V2 card, driven straight off `job`/`event` rows with no reconciler in between: a sentence of state
 in Beckett's voice, the latest beat, spend, a PR/preview link once one exists, and two buttons
-(*take a look* → jumps to the gate anchor, *stop*). The card is not a table and not a log — it's
+(*take a look* → jumps to the gate anchor, *stop*). A job with `origin_trigger` set carries an
+`unprompted · t3` marker in its header, so "did someone ask for this?" is answered by looking
+rather than by remembering. The card is not a table and not a log — it's
 one object that *is* the job, edited in place as the rows change. This is the mechanism that
 removes progress-rendering from the model's token bill entirely: in the old design, every worker
 milestone became a concierge turn; in v1, a milestone is a DB write, an in-process emitter fire,
@@ -239,6 +250,15 @@ hold-and-cancel staleness gate both apply to gates exactly as they apply to any 
 turn: an amendment to a still-open ask supersedes it cleanly, and a stale reply generated just
 before someone answers gets caught before it posts.
 
+**One exception, and it runs the other way: a gate Beckett raised on its own initiative expires.**
+A gate a human is waiting on parks forever because the answer is still worth having whenever it
+comes. A gate that exists because a trigger fired is holding *decayed evidence* — "main was red
+four days ago, want me to look?" is not a question, it's clutter, and a channel that accumulates
+unanswered "should I?" cards learns to scroll past all of them, including the ones that matter.
+So an initiative gate is `cancelled` at 48 hours with an event and no further message; the
+per-trigger `gate_ttl_h=0` opts out for evidence that genuinely doesn't decay. See
+[initiative.md](initiative.md) and [orchestration.md](orchestration.md) §3.9/§3.14.
+
 The same "reply with a secret, and the reply gets deleted before it's read" pattern used for
 password/OTP handling (§invariants) is the template for any future credential-bearing human gate —
 see [computer-use.md](computer-use.md) for the browser-agent flow that actually exercises it today.
@@ -248,9 +268,13 @@ see [computer-use.md](computer-use.md) for the browser-agent flow that actually 
 ## What v1 deliberately does not do
 
 - **No per-tool-call posts.** A worker emits at most one beat per meaningful milestone; the card
-  shows the latest one. Beckett interrupts the channel for exactly three things beyond the reply
-  itself — a gate, a failure it can't resolve on its own, and delivery. Every new Discord feature
-  proposal gets checked against that list before it ships; this is the single biggest risk to the
+  shows the latest one. Beckett interrupts the channel for exactly four things beyond the reply
+  itself — a gate, a failure it can't resolve on its own, delivery, and **work it started on its
+  own**. That fourth one was added by [initiative.md](initiative.md) and it is the least
+  negotiable of the four: one line naming the trigger and the evidence
+  (*"nobody asked — main's been red since 13:40, i'm on it"*), because an unprompted start nobody
+  announced is indistinguishable from a rogue process. Every new Discord feature proposal gets
+  checked against that list before it ships; this is the single biggest risk to the
   token-efficiency story from the Discord side, bigger than any rate limit.
 - **No always-listening voice.** The voice transport (join/leave, per-speaker segmentation,
   barge-in) stays in the tree, unwired, documented as deferred — not because it's unfinished
@@ -291,3 +315,11 @@ miniature; everything above exists so these ten go well.
    what actually happened, never a plausible reconstruction.
 10. **Truthful post-crash state.** After a restart, Beckett reports exactly what survived and
     resumes from it — never a silent from-scratch restart, never a claimed memory it doesn't have.
+
+These ten gate the cutover, and initiative is not among them on purpose: no trigger is armed until
+after the cut ([migration.md](migration.md) step 10), so nothing in the release gate can depend on
+it. Arming has its own three-conversation gate — a quiet week costs nothing, a true condition fires
+exactly once, and the kill is total and survives a restart — in [initiative.md](initiative.md).
+When a trigger *is* armed, conversation 9 gets harder in the one way that matters: the answer to
+"why did you do that" is no longer "you asked me to," and `beckett why j12` has to produce the
+trigger, the evidence, who armed it, and what it cost, all from rows.

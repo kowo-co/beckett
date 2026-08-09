@@ -300,6 +300,32 @@ critical fable jobs stay at $18.72–$18.93 median by design — that cost buys 
 not a target to shrink. Review stays at $1.44 median on sonnet, unchanged, because it already earns
 its keep.
 
+## Initiative: the one spend with nobody watching
+
+Unprompted work ([initiative.md](initiative.md)) is the only cost in the system that accrues while
+nobody is at a keyboard, so it gets its own ceiling and its own line on the bill rather than a
+share of somebody else's.
+
+The idle case is free by construction, which is what makes it affordable to leave a trigger armed:
+a `watch` predicate is one indexed SQL query over `job`/`event` or one registered shell probe with
+a 10s timeout — **never a model** — so a tick on which nothing is true costs zero tokens, not
+"approximately zero." A heartbeat that *thinks* was rejected for exactly this reason: a model turn
+on a timer is a standing bill for a usually-empty result, and it is the cost shape this whole doc
+exists to refuse.
+
+When a trigger does fire, the job bills to the worker ledger like any other, under four ceilings:
+`budget_usd` per fire (default $2.00, riding the ordinary `maxBudgetUsd` spawn rail),
+`cooldown_secs` (3600) and `max_per_day` (3) on the trigger row, and **`initiative_daily_usd`
+(default $5.00)** — one SQL sum over events joined to `origin_trigger IS NOT NULL` in the last 24h.
+That ceiling **fails closed**, the deliberate inversion of the budget gate above: a stuck check on
+asked-for work is an outage, a stuck check on unprompted work is silence.
+
+The seat band ($250–400/mo) is unchanged by any of this — the Seats do not run when a trigger
+fires, because the evaluator is code. And because `origin_trigger` is a column on `job`,
+"what did initiative spend this week" is a `WHERE` clause on the ledger that already exists rather
+than a fourth accounting system: v0 had `spend.jsonl`, the routine store, the watch post history,
+and the dream budget, and could not answer that question at all.
+
 Every one of these targets is measured the same way the v0 baseline was: real spend Events, summed
 from `~/.beckett/beckett.db`, priced from a rate table that's kept current — not assumed, not
 carried forward from a stale config file. See [orchestration.md](orchestration.md) for how Jobs are

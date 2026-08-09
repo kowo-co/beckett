@@ -12,17 +12,21 @@ recursive row that absorbs ticket, task, stage, DAG node, review cycle, and gate
 (the only ledger). A **Wire** adapter speaks Discord: gateway in, cards out, card edits rendered
 by code rather than model turns. Two concierge **Seats** share one persona — a Haiku front desk
 that reads and banters, a Sonnet mind that decides and files. All doctrine (agents, skills,
-hooks, one in-process MCP server) ships as one Claude Code plugin in this repo. There is no
-ticket tracker, no poller, no dispatcher: a Job's id (`j7`, `j7.1`) *is* the git branch, the
-worktree, the session name, the Discord card, and the ref a human types.
+hooks, one in-process MCP server) ships as one Claude Code plugin in this repo. A **Trigger** is
+the one door through which work starts with nobody typing — a standing rule a human armed, which
+files an ordinary Job. There is no ticket tracker, no dispatcher, and no poller in the dispatch
+path — the one declared tick in the design is the trigger evaluator's, and it schedules nothing but
+initiative. A Job's id (`j7`, `j7.1`) *is* the git branch, the worktree, the session name, the
+Discord card, and the ref a human types.
 
 ## Read in this order
 
 | Doc | What it settles |
 |---|---|
-| [`vision.md`](vision.md) | Why v1 exists, the five commitments, what Beckett refuses to be |
-| [`orchestration.md`](orchestration.md) | **The core contract.** Jobs, states, every mechanic (steering, review, deps, resume, budgets, gates, casting), the concierge cost attack, risk register |
-| [`architecture.md`](architecture.md) | The seven concepts as a system: process model, the one store, module map with LOC targets, old→new absorption table |
+| [`vision.md`](vision.md) | Why v1 exists, the six commitments, what Beckett refuses to be |
+| [`orchestration.md`](orchestration.md) | **The core contract.** Jobs, states, every mechanic (steering, review, deps, resume, budgets, gates, casting, initiative), the concierge cost attack, risk register |
+| [`architecture.md`](architecture.md) | The eight concepts as a system: process model, the one store, module map with LOC targets, old→new absorption table |
+| [`initiative.md`](initiative.md) | Unprompted work: trigger sources, the act-or-ask gate as rows, budgets and rate limits, idempotency, the audit trail, every off switch |
 | [`migration.md`](migration.md) | The 90% cut as an executable plan: disposition table, build order, cutover, acceptance checklist |
 | [`token-efficiency.md`](token-efficiency.md) | The economics doctrine: measured v0 baseline, ranked waste sources and their by-construction fixes, the casting ladder, cost targets |
 | [`discord.md`](discord.md) | The invariants that make Beckett feel like a colleague, the Wire design, platform limits, surfaces kept/added/cut |

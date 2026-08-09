@@ -1,20 +1,28 @@
 # Migration
 
-This is the executable plan for the cut described in [orchestration.md](orchestration.md) and
-[architecture.md](architecture.md): what deletes, what survives, in what order, and what "done"
-means. It is not a narrative — it is the checklist the cut is run against.
+This is the executable plan for the cut described in [orchestration.md](orchestration.md),
+[architecture.md](architecture.md), and [initiative.md](initiative.md): what deletes, what
+survives, in what order, and what "done" means. It is not a narrative — it is the checklist the
+cut is run against.
 
 ## The cut in numbers
 
-`src/` on this branch is **117,837 lines** (70,851 code + 46,986 test). v1 lands at **≈11,850
+`src/` on this branch is **125,470 lines** (74,971 code + 50,499 test). v1 lands at **≈12,150
 lines of code + ~600 lines of doctrine markdown** — the module list in [architecture.md](architecture.md)’s repo map — a
 **~90% cut**, tests included, because the tests that die are the ones whose subjects die with
 them.
 
+Those numbers moved while this design sat unbuilt: the first draft of this set measured 117,837
+lines (70,851 + 46,986), and v0 has added **~7,600 lines** since — `concierge/index.ts` alone grew
+385 and `dispatcher.ts` 16. That is not an embarrassment to bury in a footnote, it is the
+argument: the subsystems this plan deletes are the ones still accruing, and every month the cut is
+deferred it gets bigger. The percentage is unchanged because the growth is on the *numerator* of
+what gets deleted.
+
 The single largest deletions:
 
-- `src/concierge/index.ts` — 7,271 lines, one monolith, replaced by two ~600-line seats
-- `src/dispatch/dispatcher.ts` — 4,158 lines, one state machine, replaced by a 950-line Supervisor
+- `src/concierge/index.ts` — 7,656 lines, one monolith, replaced by two ~600-line seats
+- `src/dispatch/dispatcher.ts` — 4,174 lines, one state machine, replaced by a 950-line Supervisor
 - `src/task/` — 1,965 lines (incl. tests), a registry that existed to hide the tracker from
   humans, deleted outright because there is nothing left to hide
 - `src/tracker/` — 1,377 lines (incl. tests) of poller, bored bridge, and fenced-block parsing
@@ -40,7 +48,7 @@ disagree.
 | `src/tracker/types.ts` | 244 | **REWRITE** | `store/` — the `job` table DDL + typed accessors |
 | `src/tracker/cast.ts` | 365 | **DELETE**, ~50 lines survive | `mcp/` (`job.create` zod schema) + `supervisor/` (casting table) |
 | `src/tracker/presets.ts` | 142 | **KEEP**, near-verbatim | `supervisor/` — `presets.json`, read fresh at file time |
-| `src/dispatch/dispatcher.ts` | 4,158 | **DELETE**, ~10-15% survives as policy | `supervisor/` — scheduler, ready-rule, policy table, boot resume, watchdog |
+| `src/dispatch/dispatcher.ts` | 4,174 | **DELETE**, ~10-15% survives as policy | `supervisor/` — scheduler, ready-rule, policy table, boot resume, watchdog |
 | `src/dispatch/stages.ts` | 864 | **REWRITE** smaller | Doctrine `agents/` (prompt builders → subagent defs) + `supervisor/` (casting table) |
 | `src/dispatch/spawn.ts` | 576 | **DELETE** | `run/` — Agent SDK driver: spawn, stream, steer+echo-ack, structured out, budget |
 | `src/dispatch/advance-outbox.ts` + `publish-outbox.ts` | 427 | **DELETE**, semantics survive | job model — publish is a `runner='shell'` verify child with its own retry (no standalone outbox) |
@@ -52,7 +60,9 @@ disagree.
 | `src/shell/main.ts` | 1,098 | **REWRITE** much smaller | folds into `supervisor/`'s boot path + a thin entrypoint — no 15-callback wiring layer |
 | `src/spend.ts` | 242 | **DELETE** as a file, ledger becomes rows | `store/` (event rows carry `cost_usd`/`tokens`) + `supervisor/` (budget hold/ask policy) |
 | `src/progress/journal.ts` | 240 | **DELETE**, folds into event stream | `store/` — event rows are the journal; Wire renders beats off them |
-| `src/concierge/index.ts` | 7,271 | **DELETE** | `frontdesk/` (600, Haiku seat) + `mind/` (600, Sonnet seat) |
+| `src/concierge/index.ts` | 7,656 | **DELETE** | `frontdesk/` (600, Haiku seat) + `mind/` (600, Sonnet seat) |
+| `src/routine/` | 2,281 (+1,398 test) + `capability/modules/routines.ts` 1,292 | **DELETE**, doctrine survives | `initiative/` (300) + `trigger`/`trigger_fire` rows — humanized fire times and the 1/hr·3/24h cap become columns, the scheduler/store/rate-limiter do not survive as code ([initiative.md](initiative.md)) |
+| `src/dream/` | 1,663 (+936 test) | **DELETE**, deferred as a feature | — not in the v1 map; if revived it is one `schedule` trigger filing one ordinary job, on the ordinary ledger |
 | `src/discord/*` | 5,331 (+4,793 test) | **KEEP**, mostly verbatim | `wire/` — gateway, relay, cards, filed-line, thread-attach, hold-and-cancel |
 | `src/drivers/claude.ts` + `base.ts`/`proc.ts` | portion of 3,351 | **DELETE**, replaced natively | `run/` — Agent SDK `query()` sessions replace `claude -p` subprocess driving |
 | `src/drivers/codex.ts`, `src/drivers/pi.ts` + cooldown/failure/preflight-probe | portion of 3,351 (+test) | **DELETE outright** | — casting narrows to claude-family + `run/terra.ts` (200 LOC, opt-in, behind preflight) |
@@ -81,6 +91,11 @@ disagreed, synthesis wins):
 - **`journal.ts` doesn't survive as a file.** Its job — a private per-ticket play-by-play — is
   now just the `event` table queried by `beckett status`; there is no separate `beckett journal`
   verb in the v1 CLI list.
+- **The routine scheduler does not become systemd timers.** An earlier pass of this set mapped
+  `src/routine/` onto `systemd --user` timers plus skill invocations. That puts the fire time, the
+  cooldown, and the dedupe key outside `beckett.db` — a tenth sidecar written in unit files, in a
+  design whose whole thesis is one store. The Supervisor is already a long-lived process; it owns
+  trigger scheduling and systemd owns liveness only ([initiative.md](initiative.md)).
 - **codex and pi drivers delete outright**, not conditionally. The inventory kept them "if
   multi-harness casting is kept." Synthesis's casting table (orchestration.md §3.13) names exactly
   two driver lanes — claude-family via the Agent SDK, and terra — so the old general-purpose
@@ -89,7 +104,7 @@ disagreed, synthesis wins):
 
 ## Build order
 
-Nine steps, in dependency order. Each says what must exist first, whether it runs alongside v0 or
+Ten steps, in dependency order. Each says what must exist first, whether it runs alongside v0 or
 requires it, and what rolling back looks like at that point.
 
 1. **Land the store.** `beckett.db` (`job`/`event`/`kv`/`health`) + typed accessors beside v0, no
@@ -149,10 +164,23 @@ requires it, and what rolling back looks like at that point.
 
 9. **Feel pass + retire compensators.** Hold-and-cancel gate, beat tuning, gate-nudge-once; run
    the ten-conversations acceptance checklist live; with the poller gone, verify the ready-rule is
-   the only scheduling authority; delete `poke`/`observe`/`onAdvance` and the staffing watchdog.
+   the only scheduling authority in the dispatch path; delete `poke`/`observe`/`onAdvance` and the
+   staffing watchdog.
    Last on purpose — it's the step that certifies nothing is quietly still polling. The
    compensator code (§ below, "what v1 done means") only gets deleted after there's live proof
    nothing calls it, not before.
+
+10. **Arm initiative, one trigger at a time.** Land `trigger`/`trigger_fire`, the ~300-line
+    evaluator, and `beckett initiative`/`why`/`signal`; delete `src/routine/` and `src/dream/`
+    with their tests. Then arm exactly one trigger — `job_stuck`, `posture='ask'` — and leave it
+    there for a week against [initiative.md](initiative.md)'s three-conversation gate: a quiet
+    week shows zero attributable tokens in the ledger, a true condition produces exactly one job,
+    and `beckett initiative off` mid-fire kills it and survives a restart with the latch intact.
+    **Deliberately after everything else**, including the feel pass. Unprompted work is the worst
+    possible first customer for machinery nobody has watched under load, and every ceiling in the
+    initiative design (`max_per_day`, the daily ledger, `max_initiative_workers=1`) is only
+    meaningful once the spend Events it reads are the ones the live system writes. Rollback is one
+    command and is the same command a human uses in anger: `beckett initiative off`.
 
 ## Host migration: VPS → Omarchy
 
@@ -200,7 +228,8 @@ concrete home before step 5 (the cutover) can run:
 - [ ] **Spend caps are enforced, not just logged** — `budget_usd` subtree ceiling, `maxBudgetUsd`
       spawn-time rail, conversational overrun gate (§3.7)
 - [ ] **Human gates cost zero tokens while parked** — `runner='human'` rows are never spawned; one
-      nudge at 24h, then silence forever (§3.9)
+      nudge at 24h, then silence forever for a gate a human is waiting on, and expiry at
+      `gate_ttl_h` (48h) for one Beckett raised on its own initiative (§3.9, §3.14)
 - [ ] **Cancel is clean and reversible** — subtree cancel, branch kept and pruned after 7 days, the
       hold-and-cancel staleness re-check (§3.10)
 - [ ] **Failure ladders are bounded** — one policy table drives stall/rate-limit/auth/substantive
@@ -209,10 +238,16 @@ concrete home before step 5 (the cutover) can run:
       (§3.12)
 - [ ] **Casting economics hold** — terra stays behind preflight, haiku runs every non-code job,
       escalation happens at most once per job (§3.13)
-- [ ] **No poll survives** — the ready-rule is the only scheduling authority; `poke`/`observe`/
-      `onAdvance`/the staffing watchdog are deleted, not dormant (build order step 9)
+- [ ] **No poll survives in the dispatch path** — the ready-rule is the only scheduling authority;
+      `poke`/`observe`/`onAdvance`/the staffing watchdog are deleted, not dormant (build order
+      step 9). The trigger evaluator's 60s tick is the one named exception and it schedules
+      nothing but initiative (orchestration.md §0, §3.14)
 - [ ] **The concierge cost bar is hit** — $250–400/mo, each lever in step 8 measured independently
       against [token-efficiency.md](token-efficiency.md)'s dollar model
+- [ ] **Unprompted work is bounded, announced, and killable** — a trigger is armed only through a
+      human gate, fires idempotently on `(trigger_id, fire_key)`, is capped by `cooldown_secs` /
+      `max_per_day` / `initiative_daily_usd` / `max_initiative_workers`, announces itself in one
+      line, and dies to `beckett initiative off` — latched (build order step 10, §3.14)
 
 Every box above is a row or a column on `job`/`event`, not a new subsystem — that's the point of
 the cut. When all of them are checked and the ten-conversations checklist passes live, `docs/`

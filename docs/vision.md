@@ -7,7 +7,7 @@ room, decides how much effort a request deserves, and either answers in a senten
 builds the thing — in your voice, on your infrastructure, in your channel.
 
 v1 exists because v0 built the wrong half of that sentence. It got the Discord feel right and
-the engineering wrong: a rigid ticket tracker (`bored`) and a 4,158-line dispatcher stood
+the engineering wrong: a rigid ticket tracker (`bored`) and a 4,174-line dispatcher stood
 between every request and the work, smuggling structure through markdown, polling every 5
 seconds for state it could have known instantly, and burning a full spawn cycle on 43% of pi
 implement runs that were never going to do anything. `bored` dies in v1. Orchestration moves
@@ -16,7 +16,7 @@ worktrees, hooks, skills — because the market has now built and hardened the e
 Beckett v0 hand-rolled badly. See [orchestration.md](orchestration.md) for the replacement and
 [migration.md](migration.md) for how we get from here to there.
 
-## The five commitments
+## The six commitments
 
 These are not values to feel good about. Each one is a testable product principle: a claim
 that should be falsifiable by looking at spend Events, latency logs, or a Discord transcript.
@@ -98,9 +98,39 @@ per job that's also the branch name, the worktree, and what a human types — no
 identities to hide from people. Workers never speak in channel; every visible sentence comes
 from the seats sharing one `persona.md`, so personality structurally cannot leak. A steer
 landing on finished work gets an honest answer about what already happened, never a bare "ok,
-updated." Beckett interrupts for exactly three things: a gate, a failure it can't resolve, and
-delivery. The acceptance bar is a live ten-conversation checklist, not a vibe — see
-[discord.md](discord.md).
+updated." Beckett interrupts for exactly four things: a gate, a failure it can't resolve,
+delivery, and work it started on its own. The acceptance bar is a live ten-conversation
+checklist, not a vibe — see [discord.md](discord.md).
+
+### 6. Initiative
+
+**v0 counter-example:** v0 could talk unprompted, dream unprompted, and post unprompted, and
+could not *work* unprompted — and it built that limitation three separate times. `src/routine/`
+(3,573 lines with its capability module) had a humanized clock, a seen-set, and a hard 1/hour
+3/24h post cap, and could only post; `src/dream/` (1,663 lines) had its own budget, its own
+ledger, and an overnight spike walled into a branch that could never merge; ambient interjection
+had a classifier and burst caps and a playbook rule that says in as many words *offer, don't
+commit*. Three clocks, three stores, three budgets, and no answer to "main is red and nobody is
+awake."
+
+**v1 stance:** one door. A **Trigger** is a durable row a human armed; when its condition goes
+true it files an ordinary Job, and everything downstream — scheduling, budget, review, cancel,
+the card, the ledger — is the machinery that already exists. Three trigger kinds (a humanized
+clock, a store predicate, a local signal), and the predicate is **SQL or a registered probe,
+never a model**, so a quiet day costs zero tokens and every firing is replayable. The act-or-ask
+gate is rows the store enforces, not judgment a model re-derives per turn: an `act` posture is a
+ceiling the evaluator may only downgrade. Idempotency is a UNIQUE constraint, not a check — the
+`trigger_fire` row and the `job` row are the same write. Ceilings are concrete ($5/day across all
+initiative, one concurrent self-started job, strictly lowest priority) and the kill is one
+latched command. Full design in [initiative.md](initiative.md).
+
+**Why this is a sixth commitment and not a paragraph inside coworker feel.** Folding it into feel
+would make it a vibe, and the point of this list is that each entry is falsifiable against rows.
+Initiative is the most falsifiable of the six: a quiet week must show zero attributable tokens in
+the Event ledger, a true condition must produce exactly one job, and `beckett why j12` must name
+the trigger, the evidence, who armed it, and what it cost. It is also the only commitment whose
+failure mode is *Beckett doing something nobody wanted*, which is a different class of risk from
+the other five and deserves its own heading rather than a clause in someone else's.
 
 ## What v1 is not
 
@@ -142,7 +172,7 @@ incumbents aren't building for.
 
 ## The core bets, honestly
 
-Three decisions carry the most risk in this design. Naming them here is the point — a vision
+Four decisions carry the most risk in this design. Naming them here is the point — a vision
 doc that doesn't admit what could be wrong isn't one.
 
 **Betting the substrate on Claude Code / Agent SDK.** v1 deletes ~90% of v0's hand-rolled
@@ -168,12 +198,23 @@ structurally cannot match, and that it's worth the operational weight of owning 
 instead of renting elasticity. The honest risk: no autoscaling, no geographic redundancy, and an
 outage is the owner's hardware problem — see [omarchy.md](omarchy.md).
 
+**Betting that initiative belongs in the store, not in a model.** Unprompted work is gated by
+rows — an armed trigger, a code predicate, a fire key, a daily ledger — and no model decides
+whether to start. The bet is that a fixed registry of seven predicates plus a local `signal` verb
+covers enough of what a colleague would actually notice to be worth having. The honest risk: it
+is the least *alive*-feeling version of proactivity anyone could ship, and if the predicates never
+match what people care about, initiative is dead weight with a config file. The fallback is named
+and deliberately unattractive — one haiku evaluator job per day, capped, on its own ledger line —
+because the failure we are refusing to risk is a model that wakes itself up. See
+[initiative.md](initiative.md).
+
 ## How to read the rest of this set
 
 Start here for *why*; the rest is *how*. [orchestration.md](orchestration.md) is the
 authoritative design — the job/event model, the mechanics, the migration order — and everything
 else hangs off it. [architecture.md](architecture.md) covers the store and process model in
-implementation detail. [token-efficiency.md](token-efficiency.md) decomposes the concierge cost
+implementation detail. [initiative.md](initiative.md) covers the one path by which work starts
+without a human turn. [token-efficiency.md](token-efficiency.md) decomposes the concierge cost
 attack. [computer-use.md](computer-use.md) and [betterwright.md](betterwright.md) cover the
 hands: desktop and browser respectively. [omarchy.md](omarchy.md) covers the machine Beckett
 runs on. [discord.md](discord.md) covers the surface — what the owner actually sees and types.

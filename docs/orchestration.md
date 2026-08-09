@@ -1,13 +1,14 @@
 # Orchestration
 
 This is the core v1 design contract — the document v1 is implemented from. It replaces the
-bored-backed ticket queue, the 4,158-line dispatcher, the 585-line poller, and the nine sidecar
+bored-backed ticket queue, the 4,174-line dispatcher, the 585-line poller, and the nine sidecar
 stores with a single Supervisor process, one SQLite file, and a Job tree executed as Claude
 Agent SDK sessions. Process-level and module-level detail lives in [architecture.md](architecture.md);
 the order of operations for getting from v0 to here is [migration.md](migration.md); the cost
-rationale behind the casting and seat choices is [token-efficiency.md](token-efficiency.md).
+rationale behind the casting and seat choices is [token-efficiency.md](token-efficiency.md); the
+one path by which a Job is created without a human turn is [initiative.md](initiative.md).
 
-## 0. The whole design in seven concepts
+## 0. The whole design in eight concepts
 
 Everything below is built from exactly these. Nothing else is durable, nothing else has a name.
 
@@ -16,16 +17,18 @@ Everything below is built from exactly these. Nothing else is durable, nothing e
 | **Job** | One row in one SQLite table: a node with `parent`, `deps[]`, a runner, a cast, a budget, a state. | ticket · task `#42.1` · stage · DAG node · review cycle · design gate · basm arm · workflow node · branch name · Discord card key |
 | **Event** | One row in one append-only table `(job_id, kind, payload, cost_usd, tokens, ts)`. | spend.jsonl · dispatch.jsonl · journal · advance-outbox · publish-outbox · comment-cursors · poll-snapshot · dispatcher-state · pending-steer store |
 | **Runner** | The *kind* of thing that executes a Job: `agent` \| `human` \| `shell`. A column, not a class hierarchy. | INT design-review park · parkForHuman · publish outbox · preflight probes |
-| **Supervisor** | One long-lived Bun process under systemd as user `beckett`. Owns the DB, the scheduler, the preflight health cache, and the Agent SDK sessions. | dispatcher (4,158 lines) · poller (585) · WorkerManager · staffing watchdog · shell/main wiring |
+| **Supervisor** | One long-lived Bun process under systemd as user `beckett`. Owns the DB, the scheduler, the preflight health cache, the trigger evaluator, and the Agent SDK sessions. | dispatcher (4,174 lines) · poller (585) · WorkerManager · staffing watchdog · shell/main wiring |
 | **Wire** | The Discord adapter: gateway in, replies/cards out. Card edits are code, never model turns. | `src/discord/*` + concierge relay (mostly kept verbatim) |
-| **Seats** | Two concierge seats sharing one `persona.md`: a **Haiku front desk** (reads, banters, routes) and a **Sonnet mind** (decides, files, steers). | concierge/index.ts (7,271 lines) · ambient triage on the expensive seat |
+| **Seats** | Two concierge seats sharing one `persona.md`: a **Haiku front desk** (reads, banters, routes) and a **Sonnet mind** (decides, files, steers). | concierge/index.ts (7,656 lines) · ambient triage on the expensive seat |
+| **Trigger** | One row: a standing rule a human armed, which files a Job when its condition goes true. Three kinds — `schedule` · `watch` · `signal`. Full design in [initiative.md](initiative.md). | routine scheduler + its store, rate limiter, and humanized clock (`src/routine/`, 3,573) · the dream pass's bespoke budget (`src/dream/`, 1,663) |
 | **Doctrine** | One Claude Code plugin in-repo: `agents/`, `skills/`, `hooks/`, one small in-process MCP server. | stages.ts prompt builders · casting presets · scope guard · persona |
 
 Four ground rules follow from the concepts:
 
 - **One durable store: `~/.beckett/beckett.db`** (SQLite, WAL, one writer). Tables: `job`,
-  `event`, `kv` (thread-attach map, alias map), `health` (preflight cache). Nine sidecar stores
-  become one file with real transactional and fsync discipline.
+  `event`, `kv` (thread-attach map, alias map), `health` (preflight cache), plus `trigger` and
+  `trigger_fire` for initiative (§3.14). Nine sidecar stores become one file with real
+  transactional and fsync discipline.
 - **One identity rail.** A Job's id is a short opaque ref — `j7`, `j7.1`, `j7.1.2` (child =
   dotted suffix of parent). That same string is the git branch, the worktree dir, the session
   name, the Discord card key, and what a human types. No second public ref, no hidden `OPS-N`.
@@ -37,7 +40,10 @@ Four ground rules follow from the concepts:
   back.
 - **No compensators.** No poller means no `poke()`, no `observe()`, no `onAdvance`. Writes to
   `job` fire an in-process emitter; the scheduler is a function called on that emit and on boot.
-  Dispatch latency is a function call, not a poll interval.
+  Dispatch latency is a function call, not a poll interval. **One deliberate exception, outside
+  the dispatch path:** the trigger evaluator's 60-second tick, for conditions that are true
+  *because* nothing was written (§3.14). It is one `setInterval` and one indexed query, it gates
+  nothing but initiative, and it is named here rather than hidden.
 
 ## 1. Chosen shape — and the shapes we refused
 
@@ -74,7 +80,8 @@ CREATE TABLE job (
   join_policy  TEXT,                   -- null | 'all' | 'quorum:2' | 'first'
   repo         TEXT, target_branch TEXT,
   budget_usd   REAL,                   -- subtree ceiling
-  origin       TEXT,                   -- discord channel/message id
+  origin       TEXT,                   -- discord channel/message id — where this reports
+  origin_trigger TEXT REFERENCES trigger(id),  -- NULL = a human asked; else WHY this exists (§3.14)
   state        TEXT NOT NULL,          -- open | running | done | failed | cancelled
   hold         TEXT,                   -- NULL = schedulable; non-NULL = reason, zero tokens
   session_id   TEXT, worktree TEXT, wip_sha TEXT,
@@ -229,7 +236,10 @@ construction — the Supervisor has no code path that starts them. The Wire post
 ordinary message in the origin channel ("design's up — good to build?"); a prose reply, a
 thumbs-up reaction on the anchor, or a channel-level "yeah go ahead" (resolved against the
 single oldest open gate) flips the row. **One nudge at 24h, then silence forever** — parked is
-a legitimate resting state and the card just says so.
+a legitimate resting state and the card just says so. **One exception, in the other direction:**
+a gate Beckett raised on its own initiative expires (`cancelled`) at 48h, because the evidence
+that justified the ask decays and a stack of week-old "should I?" cards is how a channel learns
+to ignore Beckett — §3.14, per-trigger override `gate_ttl_h=0` for evidence that doesn't.
 
 ### 3.10 Cancel
 
@@ -290,6 +300,89 @@ Front-load judgment, execute cheap — the fix for the 31%-bounce / 2.2×-escala
 - Casting is a small deterministic table plus presets consulted at file time — removed from
   the concierge's judgment entirely, which is what makes the Sonnet mind safe (next section).
 
+### 3.14 Initiative — the one path to a Job with no human turn
+
+Everything above starts with a human message. This is the exception, and it is the only one.
+[initiative.md](initiative.md) is the full design; the orchestration-level contract is here,
+and where the two disagree this section wins.
+
+A **Trigger** (`t3` — the same identity-rail shape as `j7`) is a durable row: a kind
+(`schedule` | `watch` | `signal`), a spec, a fixed cast, a per-fire budget, a cooldown, a daily
+cap, a reporting channel, and a `posture` of `act` or `ask`. Two tables and one job column carry
+it — no new job states, no new runner kind:
+
+```sql
+CREATE TABLE trigger      (id, name, kind, spec, posture, armed, armed_by, armed_job,
+                           channel, cast, intent, budget_usd, cooldown_secs, max_per_day,
+                           gate_ttl_h, veto_count, probe_errors, last_fired_at,
+                           created_at, updated_at);
+CREATE TABLE trigger_fire (trigger_id, fire_key, job_id, outcome, evidence, ts,
+                           PRIMARY KEY (trigger_id, fire_key));   -- the idempotency guarantee
+-- job.origin_trigger is the one new job column; it is already in §2's schema above.
+```
+
+**Who creates the job: the Supervisor, never a model.** A `watch` predicate is one indexed SQL
+query over `job`/`event` or one registered shell probe (10s timeout, non-zero exit means false),
+drawn from a fixed in-tree registry. A model neither writes predicates nor evaluates them, so a
+tick on which nothing is true costs zero tokens and every firing is replayable from rows.
+
+**Arming is a human gate, always.** The mind may *propose* a trigger (`trigger.propose`, typed
+MCP, same zod boundary as `job.create`), which writes the row `armed=0` and files an ordinary
+`runner='human'` job holding the proposal — zero tokens parked, restart-inert (§3.9). A 👍 or a
+prose yes flips the gate and sets `armed=1` in the same transaction. `beckett initiative arm` is
+the CLI equivalent; the owner at a terminal is the direct go. **A job may never arm a trigger** —
+the `trigger.*` verbs are absent from an initiative job's toolset, which is what keeps a runaway
+from being expressible.
+
+**What state it starts in.** On a fire, one transaction writes the `trigger_fire` row and the
+`job` row together — `state='open'`, `hold=NULL`, `origin_trigger='t3'`, `origin` = the trigger's
+channel, cast and `budget_usd` copied off the trigger, `intent` rendered from the trigger template
+plus the evidence. Because `(trigger_id, fire_key)` is a primary key, a duplicate fire fails the
+transaction and **no job is created**: acting and recording that it acted are one write. With
+`posture='ask'` the same transaction files a `runner='human'` gate as the parent and the work job
+as a child with `deps=[gate]`, so nothing spawns until a human answers.
+
+**Effective posture is computed from rows, never judged by a model.** `posture` is a ceiling; the
+evaluator may only downgrade `act` → `ask` (confirm-before-cast cast, repo outside `owned_repos`,
+fire budget over `act_without_asking_usd`, brief targeting a `deny_paths` entry) or refuse the
+fire outright (latch off, not armed, cooldown or daily cap, initiative ledger exhausted, or any
+job the predicate names sitting under a human-set `hold`). Refusals are rows too — `job_id IS
+NULL`, `outcome='refused:<reason>'` — so "why didn't you" is a query.
+
+**Admission, before preflight.** The scheduler admits an initiative job only when the
+`max_workers` semaphore has a free slot *and* no human-originated job is ready and waiting;
+`max_initiative_workers` defaults to 1. A blocked initiative job takes `hold='initiative:
+<reason>'` at zero tokens rather than spawning and refunding. Unprompted work is strictly the
+lowest priority in the system.
+
+**Ceilings.** `cooldown_secs` (3600) and `max_per_day` (3) on the trigger row; `budget_usd` per
+fire (2.00) becomes the job's subtree ceiling and rides the ordinary `maxBudgetUsd` spawn rail;
+`initiative_daily_usd` (5.00) is one SQL sum over events joined to `origin_trigger IS NOT NULL`
+in the last 24h. **The initiative budget check fails closed** — the deliberate inversion of
+§3.7's fail-open rule, because a stuck gate on asked-for work is an outage and a stuck gate on
+unprompted work is silence.
+
+**How it reports.** An `act` fire posts one line in the trigger's channel naming the trigger and
+the evidence — *"nobody asked — main's been red since 13:40, i'm on it"* — and opens the ordinary
+self-editing card with an `unprompted · t3` marker. Everything after that is an ordinary job:
+beats, review child, failure ladder, WIP checkpoints, boot resume, publish gating. Spend carries
+`origin_trigger`, so `beckett spend --initiative` is a `WHERE` clause and unprompted cost can
+never hide inside asked-for cost.
+
+**How a human kills it.** `beckett job cancel j12` / *"stop"* / the card's **stop** button cancels the
+job subtree exactly as §3.10 describes (branch kept, 7-day prune). `beckett initiative off t3`
+disarms the rule and keeps the row so the history stays readable. `beckett initiative off` is the
+hard kill: every trigger disarmed, every initiative job cancelled, and a **latch** in `kv` that
+the evaluator checks first and that nothing but a human clears — not a restart, not a config
+reload, not a job. Two human cancels of one trigger's jobs auto-disarm it (`veto_count`), because
+the calibration doctrine's "wrong the same way twice is a defect" is worth a column rather than a
+paragraph in a prompt.
+
+**When it is evaluated.** On the same emitter that drives the scheduler (for `watch` predicates
+whose subject a write touched), once on boot after the resume pass, and on a 60-second tick for
+conditions that are true because *nothing* was written. That tick is the single named exception
+to *no compensators* (§0) and it gates nothing but initiative.
+
 ## 4. The concierge cost attack: ~$2,090/mo → $250–400/mo
 
 **Baseline mechanics:** ~$70/day ≈ ~2,150 turns/day on an Opus seat re-reading a ~160k warm
@@ -342,6 +435,7 @@ The v0 inventory's non-negotiable list, row by row, against where it lives in v1
 | Bounded failure ladders | one policy table (§Failure ladders) |
 | Publish gating (OPS-30, OPS-185) | verify shell child + bounded retries + `target_branch` funnel (§Publish gating) |
 | Casting economics (#156/#159) | deterministic cast table, preflight, MRCR guard (§Casting, §Preflight) |
+| Scheduled/proactive work (routines, humanized fire times, the 1/hr·3/24h post cap) | `trigger` rows, one evaluator, one ledger (§3.14, [initiative.md](initiative.md)) — the cadence and cap doctrine survives, the three separate clocks and stores do not |
 
 ## 6. Discord surface
 
@@ -352,8 +446,10 @@ null-means-post-nothing contract; one self-editing card per top-level job driven
 off `job`/`event` rows with no reconciler — the card reads the same rows the Supervisor acts
 on, so "what actually happened" is never inferred; workers emit ≤1 beat per meaningful
 milestone via an MCP call and **never speak in channel** — every human-visible sentence is
-authored by the Seats sharing one `persona.md`; Beckett interrupts for exactly three things —
-a gate, a failure it can't resolve, delivery. The only visible change from v0: the ref you see
+authored by the Seats sharing one `persona.md`; Beckett interrupts for exactly four things —
+a gate, a failure it can't resolve, delivery, and work it started on its own (§3.14; an
+unprompted start that isn't announced is indistinguishable from a rogue process, which is why
+that fourth one is the least negotiable of the four). The only visible change from v0: the ref you see
 is the ref that exists (`j7`, no `OPS-42`/`#42.1` shadow pair); a 30-day `kv` alias map keeps
 old refs resolving, then drops. The ten-conversations checklist in discord.md is the release
 gate for cutover.
@@ -370,7 +466,7 @@ their GA paths, one line each:
 | TaskList/TaskCreate board (session-scoped persistence) | not used | the `job` table is the board |
 | Workflow tool / dynamic workflows (runs die with the session; no mid-run human input) | not used | job trees express the same shapes durably |
 | Agent teams / SendMessage-across-sessions (experimental) | not used | streaming stdin into Supervisor-owned sessions |
-| Cloud Routines (beta), session-scoped cron (7-day expiry) | not used for liveness | systemd `Restart=always` + timer own liveness |
+| Cloud Routines (beta), session-scoped cron (7-day expiry) | not used, for liveness *or* for scheduled work | systemd `Restart=always` owns liveness; the Supervisor's own trigger evaluator owns cadence, so a fire time and its cooldown stay in the one store (§3.14) |
 
 Operational risks:
 
@@ -386,6 +482,12 @@ Operational risks:
 | Concurrency | one semaphore (`max_workers`, default 3) + per-repo serialization — far under native caps, no SDK-side limits to reason about |
 | Mind context pressure | no channel window, no repo, no diffs on the seat; 60k rotation; sidecar-free rehydrate from board summary |
 | SDK subscription-auth terms | personal use as documented; the API-key path is a config flip |
+| A trigger re-fires on a still-true condition | `(trigger_id, fire_key)` PRIMARY KEY — the fire row and the job row are one transaction, so a duplicate is a failed insert, not a second job (§3.14) |
+| Initiative spends with nobody watching | per-fire `budget_usd`, `cooldown_secs`, `max_per_day`, and a `$5/day` ledger ceiling that **fails closed**; `beckett spend --initiative` is its own line on the bill |
+| Initiative starves asked-for work | admitted only behind every ready human-originated job; `max_initiative_workers=1` |
+| Armed triggers accrete until nobody remembers them | `max_armed_triggers=8`; arming past it refuses and names the coldest; `beckett initiative list` shows last-fired plus hit/veto counts |
+| A trigger keeps proposing something the owner doesn't want | two human cancels auto-disarm (`veto_count`); the calibration doctrine becomes a column |
+| The trigger evaluator's 60s tick becomes the new poller | it gates only initiative, runs one indexed query, and is named in §0 as the single exception; the dispatch path stays emitter-driven and migration step 9 still certifies that |
 
 ## 8. Migration
 
@@ -396,7 +498,9 @@ behind a flag with a week of dual-write against quantitative acceptance bars (ou
 the measured baselines, spend and latency Events side-by-side); then cut the ticket rails,
 flip the identity rail to `jN` with the 30-day alias map, re-point Doctrine, and attack the
 concierge cost in lever order — each lever measured, the front-desk cutover reverting if it
-does not show its ~3× expensive-seat turn reduction.
+does not show its ~3× expensive-seat turn reduction. Initiative is armed **last**, one trigger
+at a time, against its own three-conversation gate ([initiative.md](initiative.md)): unprompted
+work on unproven machinery is the worst possible first customer.
 
 ## Appendix — rejected alternatives
 
@@ -426,7 +530,7 @@ does not show its ~3× expensive-seat turn reduction.
 - **basm `.b` DSL**: its shapes are now the default expressive power of job rows; the compiler
   is deleted.
 - **Agent teams / cloud Routines / session-scoped cron as liveness**: experimental, beta, or
-  expiring; systemd owns liveness.
+  expiring; systemd owns liveness, and the Supervisor owns cadence (§3.14).
 - **Slash commands + a button-heavy surface**: chat-only is the feel; two buttons max on a card.
 - **`-# started` receipt wording**: technically truer now that dispatch is same-tick, but
   *filed* is the product's word; feel continuity beats semantic pedantry.
@@ -434,3 +538,22 @@ does not show its ~3× expensive-seat turn reduction.
   bounded retry policy.
 - **A single global brain session**: makes ingress, cost, and compaction one shared failure
   variable; per-channel Seats plus a Supervisor process bound every blast radius.
+- **A heartbeat that thinks** (a model turn on a timer deciding what to do): a standing bill for
+  a usually-empty result, and its decisions can't be diffed. Predicates are SQL or a registered
+  probe; the fired/refused row is the point.
+- **Model-authored predicates**: the store is the only thing that can refuse initiative, and a
+  model that writes its own refusal criteria is not a gate.
+- **Triggers as job rows** (`runner='timer'`): a Job completes, a trigger doesn't; one never-`done`
+  row breaks the ready-rule, budget rollup, the card, and boot resume to save a table.
+- **Triggers in `kv`**: serialization pretending to be a data model, one ground rule after the
+  rule forbidding it.
+- **systemd timers as the trigger clock**: fire time, cooldown, and dedupe key outside the one
+  store — a tenth sidecar written in unit files. systemd owns liveness; the Supervisor owns
+  scheduling.
+- **A model-evaluated act-or-ask gate**: a permission check whose behavior varies with context
+  length is not a permission check.
+- **Jobs arming triggers**: the runaway case; enforced by absence from the toolset, not by a rule.
+- **Inbound webhooks in v1**: deferred with a named path (HMAC behind the existing tunnel), not
+  rejected — `signal` already covers every producer running on the box.
+- **A separate initiative budget pool**: v0 had four accounting systems and couldn't say what a
+  day cost; `origin_trigger` makes it a `WHERE` clause on the ledger that already exists.

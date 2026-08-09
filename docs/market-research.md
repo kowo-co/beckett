@@ -154,12 +154,12 @@ Botpress/Voiceflow builds, Quickchat, eesel) are moderation/support/chat only �
 | Claude Code | Adopt the GA primitives wholesale (`query()`, streaming input, resume, worktrees, hooks, skills) instead of hand-rolling — this is the whole v1 thesis; the preview tier (Agent Teams, Dynamic Workflows, `--bg` fleets) is explicitly rejected (see [`orchestration.md`](orchestration.md) §7); token burn is linear in fleet size, so effort-tiering per job matters |
 | Claude Tag | One identity, one memory, staged *visible* work anyone can pick up; learn the "company" (the Discord server) passively from its channels |
 | OpenHands | Stay open/self-hosted/model-agnostic as identity, not just architecture |
-| Jules | Task-count quotas as a legible self-limit (n tasks/day) rather than raw token caps |
+| Jules | Task-count quotas as a legible self-limit (n tasks/day) rather than raw token caps — taken literally as `max_per_day` on a trigger row ([initiative.md](initiative.md)) |
 | Lindy | Credit-style metering for non-code errands; Autopilot-style dedicated browser VM — [BetterWright](betterwright.md) is Beckett's version, kept as a named capability |
 | Dust | Ground answers in the owner's actual corpus (repos, channels, docs) before generating |
 | Viktor | Breadth: ops/reports/errands in-channel, not just code — coworker means "whatever the team needs" |
 | Agent Team (coupon.dev) | Credential isolation pattern (secrets injected outside the agent sandbox — the jingle keychain is the same idea; keep it); read-only reviewer role; role-mention UX in Discord |
-| OpenClaw | Personality + persistent memory + heartbeat/cron proactivity as the emotional core; onboarding wizard + `doctor` self-diagnostics for a self-hosted product |
+| OpenClaw | Personality + persistent memory + heartbeat/cron proactivity as the emotional core; onboarding wizard + `doctor` self-diagnostics for a self-hosted product. **Taken, with the mechanism inverted:** [initiative.md](initiative.md) keeps the emotional core (Beckett notices things) and refuses the heartbeat-that-thinks — a trigger's condition is SQL or a registered probe, never a model turn on a timer, so a quiet day costs zero tokens and every firing is replayable from rows |
 
 ## 5. Gaps a self-hosted, Discord-native, personality-forward Beckett can own
 
