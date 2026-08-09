@@ -384,6 +384,43 @@ export interface PublishResult {
  * (`$GITHUB_PAT`) so the token never appears in argv. Most ops are FREE; the caller GATES
  * `mergePR` behind {@link Agency.perform}.
  */
+/** What `beckett gh issue create` sends — a title, an (optionally long, markdown) body, labels. */
+export interface IssueCreateParams {
+  title: string;
+  body?: string;
+  labels?: string[];
+}
+
+/** One issue as the list verb reports it (pull requests are filtered out — they are not issues). */
+export interface IssueSummary {
+  number: number;
+  title: string;
+  state: string;
+  url: string;
+  author: string;
+  labels: string[];
+  comments: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** The result of opening an issue — the two things a caller actually needs back. */
+export interface CreatedIssue {
+  repo: string;
+  number: number;
+  url: string;
+  title: string;
+  state: string;
+}
+
+/** The result of commenting on an issue. */
+export interface IssueCommentResult {
+  repo: string;
+  number: number;
+  commentId: number;
+  url: string;
+}
+
 export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCardReader, GitHubActivityReader {
   private readonly runner: (
     cmd: string[],
@@ -424,7 +461,16 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
    * {@link ensureCreds} at the top of each operation, so a long-running daemon never hands a
    * subprocess an expired token.
    */
-  private resolved: { token: string; username: string } | null = null;
+  private resolved: {
+    token: string;
+    username: string;
+    /**
+     * The permissions the minted installation token actually carries (App auth only — a PAT
+     * reports none). Kept so a write can refuse with "the installation lacks Issues: Write"
+     * BEFORE GitHub answers with an opaque 403 "Resource not accessible by integration".
+     */
+    permissions?: Record<string, string>;
+  } | null = null;
 
   /**
    * Availability check + token resolution in one. `target` (a repo, or an owner) selects WHICH
@@ -439,7 +485,7 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
     if (this.opts.app) {
       const scope = target ?? { owner: this.publishingOwner() };
       const minted = await this.opts.app.token(scope);
-      this.resolved = { token: minted.token, username: "x-access-token" };
+      this.resolved = { token: minted.token, username: "x-access-token", permissions: minted.permissions };
       return;
     }
     this.resolved = { token: this.opts.pat, username: this.opts.account };
