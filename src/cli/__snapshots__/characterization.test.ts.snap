@@ -519,7 +519,7 @@ exports[`cli: gh: bare prints usage 1`] = `
 {
   "exit": 1,
   "stderr": 
-"error: usage: beckett gh repo create|star|unstar | pr create|merge|close|status|review | push | land | preflight | app status|installations|repos|diagnose|install-url
+"error: usage: beckett gh repo create|star|unstar | pr create|merge|close|status|review | issue create|list|comment | push | land | preflight | app status|installations|repos|diagnose|install-url
 "
 ,
   "stdout": "",
@@ -575,6 +575,72 @@ exports[`cli: gh: pr status without repo prints usage 1`] = `
   "exit": 1,
   "stderr": 
 "error: usage: beckett gh pr status <num> --repo <owner/name>
+"
+,
+  "stdout": "",
+}
+`;
+
+exports[`cli: gh: issue without an action prints usage 1`] = `
+{
+  "exit": 1,
+  "stderr": 
+"error: usage: beckett gh issue create <owner/repo> --title <t> [--body <b> | --body-stdin] [--label <l> ...] | issue list <owner/repo> [--state open|closed|all] [--limit N] | issue comment <owner/repo> <number> [--body <b> | --body-stdin]
+"
+,
+  "stdout": "",
+}
+`;
+
+exports[`cli: gh: issue create without a repo prints usage 1`] = `
+{
+  "exit": 1,
+  "stderr": 
+"error: usage: beckett gh issue create <owner/repo> --title <t> [--body <b> | --body-stdin] [--label <l> ...] | issue list <owner/repo> [--state open|closed|all] [--limit N] | issue comment <owner/repo> <number> [--body <b> | --body-stdin]
+"
+,
+  "stdout": "",
+}
+`;
+
+exports[`cli: gh: issue create without a title prints usage 1`] = `
+{
+  "exit": 1,
+  "stderr": 
+"error: usage: beckett gh issue create <owner/repo> --title <t> [--body <b> | --body-stdin] [--label <l> ...] | issue list <owner/repo> [--state open|closed|all] [--limit N] | issue comment <owner/repo> <number> [--body <b> | --body-stdin]
+"
+,
+  "stdout": "",
+}
+`;
+
+exports[`cli: gh: issue list with a bad --state is refused 1`] = `
+{
+  "exit": 1,
+  "stderr": 
+"error: beckett gh issue list: --state must be one of open|closed|all
+"
+,
+  "stdout": "",
+}
+`;
+
+exports[`cli: gh: issue list with a bad --limit is refused 1`] = `
+{
+  "exit": 1,
+  "stderr": 
+"error: beckett gh issue list: --limit must be an integer from 1 to 100
+"
+,
+  "stdout": "",
+}
+`;
+
+exports[`cli: gh: issue comment without a number prints usage 1`] = `
+{
+  "exit": 1,
+  "stderr": 
+"error: usage: beckett gh issue create <owner/repo> --title <t> [--body <b> | --body-stdin] [--label <l> ...] | issue list <owner/repo> [--state open|closed|all] [--limit N] | issue comment <owner/repo> <number> [--body <b> | --body-stdin]
 "
 ,
   "stdout": "",

@@ -172,7 +172,8 @@ test("github/dns/deploy/mail register and advertise their capabilities with real
   const catalog = registry.catalog();
   expect(catalog.map((e) => e.capabilityId)).toEqual([
     "github.repo-create", "github.repo-star", "github.pr-open", "github.pr-merge",
-    "github.pr-close", "github.pr-status", "github.pr-review", "github.push",
+    "github.pr-close", "github.pr-status", "github.pr-review",
+    "github.issue-create", "github.issue-list", "github.issue-comment", "github.push",
     "dns.list", "dns.upsert", "dns.remove",
     "deploy.list", "deploy.create", "deploy.remove",
     "mail.inbox", "mail.send", "mail.list", "mail.read",
@@ -195,6 +196,9 @@ test("outward capabilities carry non-FREE catalog postures; reads stay FREE", ()
   expect(posture.get("github.push")).toBe(ActionClass.ALWAYS_ASK);
   expect(posture.get("github.pr-merge")).toBe(ActionClass.HANDSHAKE_GATED);
   expect(posture.get("github.pr-status")).toBe(ActionClass.FREE);
+  expect(posture.get("github.issue-create")).toBe(ActionClass.HANDSHAKE_GATED);
+  expect(posture.get("github.issue-comment")).toBe(ActionClass.HANDSHAKE_GATED);
+  expect(posture.get("github.issue-list")).toBe(ActionClass.FREE);
   expect(posture.get("deploy.create")).toBe(ActionClass.HANDSHAKE_GATED);
   expect(posture.get("deploy.list")).toBe(ActionClass.FREE);
   expect(posture.get("mail.send")).toBe(ActionClass.HANDSHAKE_GATED);
@@ -285,7 +289,7 @@ test("asCapability projects the phase-4 organs' v5 facets (incl. the worker-appe
   // Manifest action-class stays FREE so the CLI spine slot is byte-identical.
   expect(github.actionClass).toBe(ActionClass.FREE);
   expect(github.id).toBe("github");
-  expect(github.cliHelp).toBe("gh repo|pr|push|app");
+  expect(github.cliHelp).toBe("gh repo|pr|issue|push|app");
   expect(github.cliVerbs.map((v) => v.name)).toEqual(["gh"]);
   // The worker-append promptBlocks must survive the projection (the characterization suite
   // never exercises workerSystemAppend, so a drop would be silent).
