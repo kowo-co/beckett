@@ -405,15 +405,6 @@ export interface PublishResult {
   prUrl?: string;
 }
 
-/**
- * Beckett's GitHub agency surface (Spec 07 §3). The PR/review ops shell out to the
- * `gh` CLI with `GH_TOKEN` set per-invocation (stateless, single credential — Spec 07 §3.2);
- * the star and issue ops call the REST API directly with the same resolved credential (no
- * subprocess: the token is already in hand, and a long markdown body never belongs in argv);
- * `git push` uses plain git with a credential helper that reads the PAT from the *environment*
- * (`$GITHUB_PAT`) so the token never appears in argv. Most ops are FREE; the caller GATES
- * `mergePR` behind {@link Agency.perform}.
- */
 /** What `beckett gh issue create` sends — a title, an (optionally long, markdown) body, labels. */
 export interface IssueCreateParams {
   title: string;
@@ -1387,9 +1378,12 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
     }
     if (res.status === 403) {
       return new Error(
-        `cannot ${op}: the GitHub App installation covering ${repo} is not allowed to write issues ` +
-          `there (403: ${detail}). Grant "Issues — Read and write" in the app's settings, then accept ` +
-          `the updated permissions on the installation.`,
+        this.opts.app
+          ? `cannot ${op}: the GitHub App installation covering ${repo} is not allowed to write issues ` +
+            `there (403: ${detail}). Grant "Issues — Read and write" in the app's settings, then accept ` +
+            `the updated permissions on the installation.`
+          : `cannot ${op}: the configured GITHUB_PAT is not allowed to write issues on ${repo} ` +
+            `(403: ${detail}) — it needs the repo/issues scope, and write access to that repository.`,
       );
     }
     if (res.status === 404) {
@@ -1469,7 +1463,7 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
   async listIssues(repo: string, p: { state?: IssueState; limit?: number } = {}): Promise<IssueSummary[]> {
     const slug = splitRepo(repo);
     const state = p.state ?? "open";
-    const limit = Math.min(Math.max(Math.trunc(p.limit ?? 30), 1), 100);
+    const limit = Number.isFinite(p.limit) ? Math.min(Math.max(Math.trunc(p.limit!), 1), 100) : 30;
     const raw = await this.issuesApi<
       Array<{
         number: number;
