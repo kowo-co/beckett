@@ -135,7 +135,7 @@ export const SPINE: SpineEntry[] = [
   },
   {
     id: "github",
-    cliHelp: "gh repo|pr|push",
+    cliHelp: "gh repo|pr|issue|push",
     verbs: [{ name: "gh", load: ext(async (d) => (await import("../capability/modules/github.ts")).createGithubExtension(d), "gh") }],
   },
   {

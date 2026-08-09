@@ -1,6 +1,6 @@
 ---
 name: github
-description: Use whenever you touch GitHub — creating a repo, pushing a branch, opening/merging/reviewing a PR, or getting installed on someone's repo. Always go through `beckett gh ...`; never call raw `gh`/`git push` and never run `gh auth`.
+description: Use whenever you touch GitHub — creating a repo, pushing a branch, opening/merging/reviewing a PR, filing or answering an issue, or getting installed on someone's repo. Always go through `beckett gh ...`; never call raw `gh`/`git push` and never run `gh auth`.
 ---
 
 # github
@@ -36,11 +36,15 @@ through `beckett gh` — either a curated verb or the `raw` passthrough (both in
 | Check PR is green | `beckett gh pr status <num> --repo <owner/name>` |
 | Comment / review | `beckett gh pr review <num> --repo <owner/name> --event COMMENT\|APPROVE\|REQUEST_CHANGES --body "<b>"` |
 | Merge a PR | `beckett gh pr merge <num> --repo <owner/name> [--strategy squash\|merge\|rebase]` |
+| File an issue | `beckett gh issue create <owner/repo> --title "<t>" [--body "<b>" \| --body-stdin] [--label <l> …]` |
+| Read issues | `beckett gh issue list <owner/repo> [--state open\|closed\|all] [--limit N]` |
+| Answer an issue | `beckett gh issue comment <owner/repo> <number> [--body "<b>" \| --body-stdin]` |
 | See your own identity/reach | `beckett gh app status` / `installations` / `repos` / `diagnose` / `install-url` |
 | **Anything else** | `beckett gh raw -- <any gh args>` (see below) |
 
 All output is JSON on stdout. `--private` is the default for `repo create`; pass `--public` to
-override.
+override. Issue bodies are long markdown — pipe them in (`… | beckett gh issue create <owner/repo>
+--title "<t>" --body-stdin`) rather than fighting quoting in argv.
 
 ## Token mechanics (why things are the way they are)
 
@@ -82,7 +86,7 @@ You cannot install yourself. There is no API for it. The link is the whole move.
 ## Anything the table doesn't cover: `beckett gh raw`
 
 The curated verbs are a convenience layer, not the whole of `gh`. For anything they don't cover —
-releases, issues, gists, labels, workflow runs, `gh api`, arbitrary flags — forward it verbatim to
+releases, gists, labels, workflow runs, `gh api`, arbitrary flags — forward it verbatim to
 the real `gh` binary with the token already injected:
 
 ```
@@ -95,7 +99,7 @@ stream live and gh's exit code is propagated. Examples:
 
 - `beckett gh raw -- release create v6.0.4 --generate-notes --repo kowo-co/beckett`
 - `beckett gh raw -- api repos/kowo-co/beckett/rulesets --paginate`
-- `beckett gh raw -- issue list --repo kowo-co/beckett`
+- `beckett gh raw -- issue close 12 --repo kowo-co/beckett` (open/list/comment have curated verbs)
 
 This is `beckett`'s sanctioned passthrough, **not** the bare `gh` binary — the one rule still
 holds: reach for `beckett gh raw`, never a bare `gh`, and never `gh auth …`. Prefer a curated verb
