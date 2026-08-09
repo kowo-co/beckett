@@ -31,18 +31,25 @@ import type { Capability, CapabilityDeps } from "../index.ts";
 import {
   GITHUB_UNCONFIGURED_NOTE,
   GitHubCli,
+  type IssueState,
   githubAuth,
   githubConfigured,
   loadIdentity,
 } from "../../agency/index.ts";
 import { GitHubAppAuth, appInstallUrl } from "../../github/app.ts";
-import { fail, out, parse } from "../../cli/io.ts";
+import { collectFlag, fail, out, parse } from "../../cli/io.ts";
 import { buildGitHubPublishingGuidance } from "../../dispatch/publishing-guidance.ts";
 import type { Config, Logger, MergeStrategy, ReviewParams } from "../../types.ts";
 
 const CLI_USAGE =
-  "beckett gh repo create|star|unstar | pr create|merge|close|status|review | push | land | " +
+  "beckett gh repo create|star|unstar | pr create|merge|close|status|review | " +
+  "issue create|list|comment | push | land | " +
   "preflight | app status|installations|repos|diagnose|install-url";
+
+const ISSUE_USAGE =
+  "usage: beckett gh issue create <owner/repo> --title <t> [--body <b> | --body-stdin] [--label <l> ...] | " +
+  "issue list <owner/repo> [--state open|closed|all] [--limit N] | " +
+  "issue comment <owner/repo> <number> [--body <b> | --body-stdin]";
 
 const LAND_USAGE =
   "usage: beckett gh land --repo <owner/name> --head <branch> --title <t> [--base main] [--body <b>] " +
@@ -332,6 +339,39 @@ export const createGithubExtension: ExtensionFactory = ({ config }): Extension =
         out({ reviewed: true, repo, number: n });
       }
       fail("usage: beckett gh pr create|merge|close|status|review <num> --repo <owner/name> ...");
+    }
+
+    // `beckett gh issue …` — file/read/answer issues on any repo the app is installed on (#14).
+    // The repo is POSITIONAL here (not the pr verbs' `--repo`): an issue is always opened somewhere
+    // named out loud, never "whatever repo this cwd happens to be".
+    if (sub === "issue") {
+      const action = _[0];
+      const repo = _[1] ? String(_[1]) : "";
+      if (action === "create") {
+        if (!repo || typeof flags.title !== "string") fail(ISSUE_USAGE);
+        // `--label a --label b` and `--label a,b` both work; `parse` keeps only a flag's LAST value,
+        // so the repeats come straight off argv (the same read `collectFlag` exists for).
+        const labels = collectFlag(rest, "label").flatMap((l) => l.split(",")).map((l) => l.trim()).filter(Boolean);
+        out(await gh.createIssue(repo, { title: String(flags.title), body: await readIssueBody(flags), labels }));
+      }
+      if (action === "list") {
+        if (!repo) fail(ISSUE_USAGE);
+        const state = flags.state === undefined ? "open" : String(flags.state);
+        if (!["open", "closed", "all"].includes(state)) fail("beckett gh issue list: --state must be one of open|closed|all");
+        let limit = 30;
+        if (flags.limit !== undefined) {
+          limit = Number(flags.limit);
+          if (!Number.isInteger(limit) || limit < 1 || limit > 100) fail("beckett gh issue list: --limit must be an integer from 1 to 100");
+        }
+        const issues = await gh.listIssues(repo, { state: state as IssueState, limit });
+        out({ repo, state, count: issues.length, issues });
+      }
+      if (action === "comment") {
+        const n = Number(_[2]);
+        if (!repo || !Number.isInteger(n) || n < 1) fail(ISSUE_USAGE);
+        out(await gh.commentOnIssue(repo, n, await readIssueBody(flags)));
+      }
+      fail(ISSUE_USAGE);
     }
 
     if (sub === "push") {

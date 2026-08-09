@@ -307,6 +307,34 @@ export function parseRepoNwo(url: string): string | null {
   return /^[^/]+\/[^/]+$/.test(nwo) ? nwo : null;
 }
 
+/** Which issues the list verb asks for (GitHub's own `state` filter). */
+export type IssueState = "open" | "closed" | "all";
+
+/**
+ * Validate `owner/name` and hand back the normalized slug for a REST path — the same shape check
+ * {@link GitHubCli.setRepoStar} makes, so `beckett gh issue create ./typo` is refused locally
+ * rather than turned into a request for a repo nobody owns.
+ */
+function splitRepo(repo: string): string {
+  const match = repo
+    .trim()
+    .match(/^([A-Za-z0-9][A-Za-z0-9-]{0,38})\/([A-Za-z0-9][A-Za-z0-9_.-]{0,99})$/);
+  if (!match) throw new Error("repo must be in owner/name form");
+  return `${match[1]}/${match[2]}`;
+}
+
+/** GitHub's own `message` for a failed response, falling back to the body then the status text. */
+async function githubErrorMessage(res: Response): Promise<string> {
+  const text = (await res.text().catch(() => "")).trim();
+  try {
+    const body = JSON.parse(text) as { message?: unknown };
+    if (typeof body?.message === "string" && body.message) return body.message;
+  } catch {
+    /* non-JSON error body — fall through to the raw text */
+  }
+  return text || res.statusText || "unknown error";
+}
+
 /** A copy of `process.env` with API-auth/endpoint overrides removed (src/env.ts). */
 function sanitizedEnv(): Record<string, string | undefined> {
   return childEnv();
@@ -1298,6 +1326,189 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
     }
     this.opts.logger.info("PR closed", { repo, number: n });
     return { repo, number: n, state: "CLOSED" };
+  }
+
+  /**
+   * The one authenticated REST round-trip every issue verb makes (#14). Issues ride the same
+   * credential chain as the PR verbs — {@link ensureCreds} resolves the installation covering
+   * `repo` and mints ITS token — but go straight to the API rather than through a `gh` subprocess:
+   * the token is already in hand, and a long markdown body has no business travelling via argv.
+   *
+   * Two things the pr verbs don't need happen here, because GitHub's own answers are useless to a
+   * human: a permission PRE-check (the app can be installed with Issues unset, which GitHub reports
+   * as a bare `403 Resource not accessible by integration`), and {@link issueFailure}, which turns
+   * the remaining 403/404s into a sentence naming which of the two causes it actually was.
+   */
+  private async issuesApi<T>(
+    op: string,
+    repo: string,
+    path: string,
+    init: { method?: string; body?: unknown; notFound?: string } = {},
+  ): Promise<T> {
+    const slug = splitRepo(repo);
+    await this.ensureCreds(op, { repo: slug });
+    const method = init.method ?? "GET";
+    const permissions = this.resolved?.permissions;
+    if (permissions && method !== "GET" && permissions.issues !== "write") {
+      throw new Error(
+        `cannot ${op}: the GitHub App installation covering ${slug} does not have Issues: Write ` +
+          `(its issues permission is ${permissions.issues ?? "not granted"}). Grant "Issues — Read and ` +
+          `write" in the app's settings, then accept the updated permissions on the installation.`,
+      );
+    }
+    const res = await this.fetchImpl(`${this.opts.apiBase.replace(/\/$/, "")}${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${this.credential.token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "beckett",
+        ...(init.body === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+    });
+    if (!res.ok) throw await this.issueFailure(op, slug, res, init.notFound);
+    return (await res.json()) as T;
+  }
+
+  /**
+   * GitHub's refusal, translated. The failures that actually happen on the issues API are "the app
+   * isn't installed on this repo (or the repo isn't in its selection)" and "the installation has no
+   * Issues: Write" — reported as a bare `404 Not Found` and a bare `403 Resource not accessible by
+   * integration`, which tell a human nothing about which one to fix. For the 404 we ask the app
+   * itself ({@link GitHubAppAuth.diagnoseAccess}, the same triage `beckett gh app diagnose` runs).
+   */
+  private async issueFailure(op: string, repo: string, res: Response, notFound?: string): Promise<Error> {
+    const detail = await githubErrorMessage(res);
+    if (res.status === 401) {
+      return new Error(`cannot ${op}: GitHub rejected Beckett's credential (401: ${detail})`);
+    }
+    if (res.status === 403) {
+      return new Error(
+        `cannot ${op}: the GitHub App installation covering ${repo} is not allowed to write issues ` +
+          `there (403: ${detail}). Grant "Issues — Read and write" in the app's settings, then accept ` +
+          `the updated permissions on the installation.`,
+      );
+    }
+    if (res.status === 404) {
+      const access = await this.describeUnreachable(repo);
+      return new Error(`cannot ${op}: ${notFound ? `${notFound}, or ` : ""}${access}`);
+    }
+    if (res.status === 410) {
+      return new Error(`cannot ${op}: issues are disabled on ${repo} (410: ${detail})`);
+    }
+    return new Error(`cannot ${op}: GitHub returned ${res.status}${detail ? ` — ${detail}` : ""}`);
+  }
+
+  /**
+   * Why a repo came back 404 to an installation token, in words. Best-effort: the diagnosis is
+   * itself a network call, so a failure there falls back to naming both possibilities rather than
+   * masking the original error.
+   */
+  private async describeUnreachable(repo: string): Promise<string> {
+    const owner = repo.split("/")[0]!;
+    const generic =
+      `Beckett's GitHub App cannot see ${repo} — it is either not installed on ${owner} or ${repo} ` +
+      `is not in the installation's repository selection`;
+    if (!this.opts.app) return generic;
+    try {
+      const diagnosis = await this.opts.app.diagnoseAccess({ owner, repo });
+      switch (diagnosis.status) {
+        case "not-installed":
+          return `Beckett's GitHub App is not installed on ${owner} — install it: ${diagnosis.installUrl}`;
+        case "repo-not-selected":
+          return (
+            `Beckett's GitHub App is installed on ${owner} but ${repo} is not in its repository ` +
+            `selection — add it: ${diagnosis.installUrl}`
+          );
+        case "repo-not-selected-or-missing":
+          return (
+            `Beckett's GitHub App is installed on ${owner}, but ${repo} is not in its repository ` +
+            `selection (or does not exist) — add it: ${diagnosis.installUrl}`
+          );
+        case "no-such-owner":
+          return `there is no GitHub account called ${owner}`;
+        case "ok":
+          return (
+            `the installation covers ${repo}, so this is not an access problem — the issue number ` +
+            `may not exist, or issues may be turned off on that repository`
+          );
+      }
+    } catch {
+      /* the diagnosis is a courtesy; never let it replace the failure it was explaining */
+    }
+    return generic;
+  }
+
+  /**
+   * Open an issue (#14). FREE at this layer, like {@link openPR}: an issue is speech on someone
+   * else's repo, and the CLI/capability surface above decides who may say it. Returns the two
+   * things a caller needs back — the number and the html_url.
+   */
+  async createIssue(repo: string, p: IssueCreateParams): Promise<CreatedIssue> {
+    const title = p.title.trim();
+    if (!title) throw new Error("create issue: a title is required");
+    const labels = (p.labels ?? []).map((l) => l.trim()).filter(Boolean);
+    const slug = splitRepo(repo);
+    const created = await this.issuesApi<{ number: number; html_url: string; title: string; state: string }>(
+      `create an issue on ${slug}`,
+      slug,
+      `/repos/${slug}/issues`,
+      { method: "POST", body: { title, body: p.body ?? "", ...(labels.length ? { labels } : {}) } },
+    );
+    this.opts.logger.info("issue opened", { repo: slug, number: created.number, url: created.html_url });
+    return { repo: slug, number: created.number, url: created.html_url, title: created.title, state: created.state };
+  }
+
+  /**
+   * List a repo's issues (#14). A pure read. GitHub's issues endpoint also returns pull requests
+   * (a PR IS an issue there) — they are dropped, because nobody asking for issues means PRs.
+   */
+  async listIssues(repo: string, p: { state?: IssueState; limit?: number } = {}): Promise<IssueSummary[]> {
+    const slug = splitRepo(repo);
+    const state = p.state ?? "open";
+    const limit = Math.min(Math.max(Math.trunc(p.limit ?? 30), 1), 100);
+    const raw = await this.issuesApi<
+      Array<{
+        number: number;
+        title?: string;
+        state?: string;
+        html_url?: string;
+        user?: { login?: string };
+        labels?: Array<{ name?: string } | string>;
+        comments?: number;
+        created_at?: string;
+        updated_at?: string;
+        pull_request?: unknown;
+      }>
+    >(`list issues on ${slug}`, slug, `/repos/${slug}/issues?state=${state}&per_page=${limit}`);
+    return raw
+      .filter((i) => i.pull_request === undefined)
+      .map((i) => ({
+        number: i.number,
+        title: i.title ?? "",
+        state: i.state ?? "",
+        url: i.html_url ?? "",
+        author: i.user?.login ?? "",
+        labels: (i.labels ?? []).map((l) => (typeof l === "string" ? l : (l.name ?? ""))).filter(Boolean),
+        comments: i.comments ?? 0,
+        createdAt: i.created_at ?? "",
+        updatedAt: i.updated_at ?? "",
+      }));
+  }
+
+  /** Comment on an existing issue (#14) — speech, like {@link reviewPR}, so FREE at this layer. */
+  async commentOnIssue(repo: string, n: number, body: string): Promise<IssueCommentResult> {
+    if (!body.trim()) throw new Error("comment on issue: a body is required (pass --body or --body-stdin)");
+    const slug = splitRepo(repo);
+    const posted = await this.issuesApi<{ id: number; html_url: string }>(
+      `comment on ${slug}#${n}`,
+      slug,
+      `/repos/${slug}/issues/${n}/comments`,
+      { method: "POST", body: { body }, notFound: `issue #${n} does not exist on ${slug}` },
+    );
+    this.opts.logger.info("issue commented", { repo: slug, number: n, url: posted.html_url });
+    return { repo: slug, number: n, commentId: posted.id, url: posted.html_url };
   }
 
   /** Whether a PR's status checks are all green (Spec 07 §3.6) — the pre-handshake gate. */
