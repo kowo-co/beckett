@@ -51,6 +51,7 @@ import { excludeFromGit, installScaffoldingGuardHook, SCAFFOLDING_DIR } from "..
 import { scopeGuardSpec } from "../hooks/scope-guard.ts";
 import { renderClaudeSettings } from "../hooks/registry.ts";
 import { buildResumeBrief } from "./resume-brief.ts";
+import { gatherEnvBootstrap } from "./env-bootstrap.ts";
 import { defaultEffortFor, stageRegistry, type StageView } from "./stages.ts";
 
 // =======================================================================================
@@ -443,11 +444,21 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<TicketWorkerHa
     await installScaffoldingGuardHook(workspace);
     const { doneSchemaPath, settingsPath, mcpConfigPath } = writeWorkerMeta(workspace, scopeGuardPath, scope.ownedGlobs);
 
+    // Environment bootstrap: a spawn-time workspace snapshot appended to implement/rework (and
+    // unknown-stage fallback) briefs so the worker's first turns never rediscover the obvious.
+    // Best-effort by contract — gatherEnvBootstrap never throws and each git call is time-capped.
+    // Resume spawns skip it: the resumed session already carries the workspace context.
+    const stageDef = stages.get(stage);
+    const envBootstrap =
+      !resumeSessionId && (stageDef === undefined || stageDef.wantsEnvBootstrap === true)
+        ? await gatherEnvBootstrap(workspace, { branch, baseRef })
+        : undefined;
+
     const spec: SpawnSpec = {
       workerId: id,
       prompt: resumeSessionId
         ? buildResumeBrief(ticket, stage, baseRef, steering)
-        : stages.prompt(stage, { ticket, baseRef, steering, reviewDiff }),
+        : stages.prompt(stage, { ticket, baseRef, steering, reviewDiff, envBootstrap }),
       systemAppend: stages.systemAppend(stage, { ticket, config, baseRef }),
       workspace,
       scope,
