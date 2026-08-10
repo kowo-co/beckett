@@ -347,6 +347,15 @@ export const configFragments = {
       // one-line additionalContext notice injected so the model can route around slow
       // operations (faster alternative / background it). 0 disables the hook entirely.
       worker_slow_tool_s: nonNegInt.default(30),
+      // Worker browser home. false (default): every worker gets its own cold BETTERWRIGHT_HOME
+      // under its git-excluded scaffolding — no credential vault, cookie jar, or config is
+      // shared with any other worker, and a login one worker saved cannot autofill in another.
+      // true: one shared home at <beckettDir>/worker-browser with a per-workspace
+      // BETTERWRIGHT_PROFILE — warm session daemon, shared browser-binary cache and artifacts,
+      // separate cookie jars — but betterwright's vault is home-scoped, so a credential saved
+      // once (typed-login capture is on by default) fills in EVERY worker's profile. Turn it on
+      // only when every worker is trusted with every stored credential.
+      worker_browser_shared_home: z.boolean().default(false),
       // Staffing watchdog grace (issue #9): a ticket that is in a staffable/running state
       // (in_progress / in_review / design) but has NO live worker, mid-spawn reservation, queued
       // spawn, or scheduled retry for this many seconds is silently wedged — the reconciliation

@@ -810,6 +810,12 @@ export interface Config {
      *  PostToolUse additionalContext notice so the model can route around slow operations.
      *  0 disables the hook. Default 30. */
     worker_slow_tool_s: number;
+    /** Worker browser home. false (default): a cold private BETTERWRIGHT_HOME per worker, so no
+     *  credential vault, cookie jar, or config crosses between workers. true: one shared home at
+     *  `<beckettDir>/worker-browser` with a per-workspace `BETTERWRIGHT_PROFILE` — warm daemon,
+     *  shared binary cache/artifacts, separate cookie jars — but the vault is home-scoped, so any
+     *  credential one worker saves autofills in all of them. */
+    worker_browser_shared_home: boolean;
     /** Staffing-watchdog grace (s): a ticket in a staffable state with no live worker, mid-spawn
      *  reservation, queued spawn, or scheduled retry for this long is re-staffed once (logged),
      *  then parked in todo with a comment if that also fails. 0 disables. Default 120 (issue #9). */

@@ -160,6 +160,25 @@ A tripped lease (over its own growth allowance) stays tripped until release; the
 regardless of which lease pushed it there. #96 verification confirmed true parallelism: two named leases
 acquired simultaneously, one held mid-navigation, the other's independent session completed first.
 
+## Worker browsers: cold homes vs. one shared home
+
+Ticket workers do not use the daemon's browser lane at all — each worker gets its own betterwright MCP server
+(`.beckett/betterwright-mcp.json`, a direct exec of Beckett's pinned `node_modules/.bin/betterwright`). What
+that server's `BETTERWRIGHT_HOME` points at is the `[supervise] worker_browser_shared_home` knob, and the
+trade is credentials against warmth:
+
+| `worker_browser_shared_home` | Home | What is shared | What is not |
+|---|---|---|---|
+| **`false` (default)** | a cold private home under each worker's git-excluded `.beckett/betterwright` | only the browser binary cache (keyed off `os.homedir()`, not the home) | vault, cookies, config, session daemon, artifacts — a credential one worker saves is unreachable from every other worker |
+| `true` | one shared home at `<beckettDir>/worker-browser`, identity split by `BETTERWRIGHT_PROFILE=wk-<12 hex of the workspace path>` | warm session daemon, config, artifacts, binary cache — and **the vault** | cookie jars and profile locks stay per workspace |
+
+The shared home is the faster arrangement, but betterwright's vault is home-scoped and its typed-login capture
+is on by default: "a credential saved once fills in any profile" ([upstream `sessions.md`]). Sharing the home
+therefore turns cross-worker credential reuse from impossible into default-on autofill — every worker can
+silently authenticate as any account any other worker ever logged into. Leave it off unless every worker on
+the box is trusted with every stored credential. The direct-exec of Beckett's pinned binary is unaffected by
+the knob: workers never resolve betterwright against their own project either way.
+
 ---
 
 ## Benchmarks
@@ -225,8 +244,8 @@ Two findings were **blocked on upstream** at benchmark time (no Chromium launch-
 no GPU), and renderer/raster thread caps defaulting to many-core sizing on a
 4-core box. **Unblocked since betterwright 1.7.1**, which added a `chromiumArgs` constructor option (extra Chromium
 switches appended to the managed launch args; identity/proxy/profile switches rejected) plus a
-`BETTERWRIGHT_CHROMIUM_ARGS` host env var — Beckett exposes it via the `BECKETT_BROWSER_CHROMIUM_ARGS`
-config knob. Warm-browser reuse across leases was also considered and **rejected on
+`BETTERWRIGHT_CHROMIUM_ARGS` host env var — Beckett drives it from the `[quick] browser_chromium_args`
+knob in `config.toml`. Warm-browser reuse across leases was also considered and **rejected on
 security-posture grounds** — Beckett tears down and relaunches per lease specifically so escaped JS state can't
 leak between runs; reuse would need an upstream per-session hard reset provably equivalent to a fresh process
 before it's safe to revisit.

@@ -14,6 +14,7 @@ worker_hard_cap_s = 3600
 worker_stall_s = 300
 worker_checkpoint_s = 120
 worker_slow_tool_s = 30
+worker_browser_shared_home = false
 staffing_watchdog_s = 120
 max_repeated_stall_fingerprints = 2
 max_rework_cycles = 3

@@ -24,29 +24,50 @@ function tempDir(prefix: string): string {
 }
 
 describe("workerMcpServerConfig", () => {
-  const config = workerMcpServerConfig({
+  const shared = workerMcpServerConfig({
     beckettRoot: "/opt/beckett",
     sharedHome: "/var/lib/beckett/worker-browser",
+    scaffoldingDir: "/home/beckett/Projects/widget/.beckett",
+    workspace: "/home/beckett/Projects/widget",
+  });
+  const cold = workerMcpServerConfig({
+    beckettRoot: "/opt/beckett",
+    sharedHome: null,
+    scaffoldingDir: "/home/beckett/Projects/widget/.beckett",
     workspace: "/home/beckett/Projects/widget",
   });
 
-  test("directly execs Beckett's pinned binary — no npx, no prefix flags", () => {
-    expect(config.command).toBe("/opt/beckett/node_modules/.bin/betterwright");
-    expect(config.command.startsWith("/")).toBe(true);
-    expect(config.args).toEqual(["mcp"]);
-    expect(config.args).not.toContain("--no-install");
-    expect(config.args).not.toContain("--prefix");
-    expect(config.command).not.toBe("npx");
+  test("directly execs Beckett's pinned binary — no npx, no prefix flags — either way", () => {
+    for (const config of [shared, cold]) {
+      expect(config.command).toBe("/opt/beckett/node_modules/.bin/betterwright");
+      expect(config.command.startsWith("/")).toBe(true);
+      expect(config.args).toEqual(["mcp"]);
+      expect(config.args).not.toContain("--no-install");
+      expect(config.args).not.toContain("--prefix");
+      expect(config.command).not.toBe("npx");
+    }
   });
 
-  test("shares one home and isolates identity with a named profile", () => {
-    expect(config.env.BETTERWRIGHT_HOME).toBe("/var/lib/beckett/worker-browser");
-    expect(config.env.BETTERWRIGHT_HEADLESS).toBe("1");
-    expect(config.env.BETTERWRIGHT_PROFILE).toMatch(/^wk-[0-9a-f]{12}$/);
+  test("shared home on: one home, identity isolated by a named profile", () => {
+    expect(shared.env.BETTERWRIGHT_HOME).toBe("/var/lib/beckett/worker-browser");
+    expect(shared.env.BETTERWRIGHT_HEADLESS).toBe("1");
+    expect(shared.env.BETTERWRIGHT_PROFILE).toMatch(/^wk-[0-9a-f]{12}$/);
+  });
+
+  test("shared home off (the default): a cold private home, no shared vault, no profile", () => {
+    // Byte-identical to the pre-shared-home scaffolding: home under the worker's own
+    // .beckett/, headless, and nothing else — so no credential can cross workers.
+    expect(cold.env).toEqual({
+      BETTERWRIGHT_HOME: "/home/beckett/Projects/widget/.beckett/betterwright",
+      BETTERWRIGHT_HEADLESS: "1",
+    });
+    expect(cold.env.BETTERWRIGHT_HOME).not.toBe(shared.env.BETTERWRIGHT_HOME);
   });
 
   test("sets no Obscura env — the unsandboxed server discovers ~/.betterwright/obscura itself", () => {
-    expect(Object.keys(config.env).filter((k) => k.startsWith("BETTERWRIGHT_OBSCURA"))).toEqual([]);
+    for (const config of [shared, cold]) {
+      expect(Object.keys(config.env).filter((k) => k.startsWith("BETTERWRIGHT_OBSCURA"))).toEqual([]);
+    }
   });
 });
 
@@ -86,7 +107,7 @@ describe("direct exec of the installed betterwright binary", () => {
 });
 
 describe("writeWorkerMeta", () => {
-  test("writes the MCP config and creates the shared browser home", () => {
+  test("shared home on: writes the MCP config and creates the shared browser home", () => {
     const repoRoot = tempDir("bw-meta-repo-");
     const sharedHome = join(tempDir("bw-meta-state-"), "worker-browser");
 
@@ -94,8 +115,23 @@ describe("writeWorkerMeta", () => {
 
     const written = JSON.parse(readFileSync(mcpConfigPath, "utf8"));
     expect(written.mcpServers.betterwright).toEqual(
-      workerMcpServerConfig({ beckettRoot, sharedHome, workspace: repoRoot }),
+      workerMcpServerConfig({ beckettRoot, sharedHome, scaffoldingDir: join(repoRoot, ".beckett"), workspace: repoRoot }),
     );
     expect(existsSync(sharedHome)).toBe(true);
+  });
+
+  test("shared home off: the home is the worker's own scaffolding, and nothing shared is created", () => {
+    const repoRoot = tempDir("bw-meta-repo-cold-");
+    const stateDir = tempDir("bw-meta-state-cold-");
+    const sharedHome = join(stateDir, "worker-browser");
+
+    const { mcpConfigPath } = writeWorkerMeta(repoRoot, join(repoRoot, "guard.ts"), [], join(repoRoot, "awareness.ts"), 0, null);
+
+    const written = JSON.parse(readFileSync(mcpConfigPath, "utf8"));
+    expect(written.mcpServers.betterwright.env).toEqual({
+      BETTERWRIGHT_HOME: join(repoRoot, ".beckett", "betterwright"),
+      BETTERWRIGHT_HEADLESS: "1",
+    });
+    expect(existsSync(sharedHome)).toBe(false);
   });
 });

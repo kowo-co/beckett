@@ -267,10 +267,21 @@ export function workerBrowserProfileName(workspace: string): string {
   return `wk-${createHash("sha256").update(resolve(workspace)).digest("hex").slice(0, 12)}`;
 }
 
-/** The betterwright MCP server entry for one worker's .beckett/betterwright-mcp.json. */
+/**
+ * The betterwright MCP server entry for one worker's .beckett/betterwright-mcp.json.
+ *
+ * `sharedHome` is null unless `supervise.worker_browser_shared_home` is on. Off (the default)
+ * every worker gets a COLD private home under its own scaffolding: betterwright's vault is
+ * home-scoped, so nothing one worker saves — typed-login capture is on by default upstream —
+ * can autofill in another. On, all workers share one home (warm session daemon, shared browser
+ * binary cache and artifacts) and isolate identity with a named per-workspace profile instead.
+ */
 export function workerMcpServerConfig(options: {
   beckettRoot: string;
-  sharedHome: string;
+  /** `<beckettDir>/worker-browser` when the shared home is enabled, else null. */
+  sharedHome: string | null;
+  /** The worker's own `.beckett/` scaffolding dir — the cold home's parent. */
+  scaffoldingDir: string;
   workspace: string;
 }): { command: string; args: string[]; env: Record<string, string> } {
   return {
@@ -281,10 +292,18 @@ export function workerMcpServerConfig(options: {
     command: join(options.beckettRoot, "node_modules", ".bin", "betterwright"),
     args: ["mcp"],
     env: {
-      // One shared home: vault, artifacts, and config are shared across workers;
-      // identity isolation comes from the named profile below, not a cold home.
-      BETTERWRIGHT_HOME: options.sharedHome,
-      BETTERWRIGHT_PROFILE: workerBrowserProfileName(options.workspace),
+      ...(options.sharedHome
+        ? {
+            // One shared home: vault, artifacts, and config are shared across workers;
+            // identity isolation comes from the named profile below, not a cold home.
+            BETTERWRIGHT_HOME: options.sharedHome,
+            BETTERWRIGHT_PROFILE: workerBrowserProfileName(options.workspace),
+          }
+        : {
+            // Cold private home: profile AND vault stay under the worker's git-excluded
+            // scaffolding, so no credential is reachable from any other worker.
+            BETTERWRIGHT_HOME: join(options.scaffoldingDir, "betterwright"),
+          }),
       BETTERWRIGHT_HEADLESS: "1",
       // No BETTERWRIGHT_OBSCURA_* here: this server is unsandboxed, so implicit
       // discovery finds ~/.betterwright/obscura when deploy installed it and
@@ -308,7 +327,8 @@ export function writeWorkerMeta(
   ownedGlobs: string[],
   runtimeAwarenessPath: string,
   slowToolMs: number,
-  sharedBrowserHome: string,
+  /** `<beckettDir>/worker-browser` when the shared worker browser home is enabled, else null. */
+  sharedBrowserHome: string | null,
 ): { doneSchemaPath: string; settingsPath: string; mcpConfigPath: string } {
   const metaDir = join(repoRoot, SCAFFOLDING_DIR);
   mkdirSync(metaDir, { recursive: true });
@@ -323,10 +343,11 @@ export function writeWorkerMeta(
   const doneSchemaPath = join(metaDir, "done-schema.json");
   writeFileSync(doneSchemaPath, JSON.stringify(DONE_SCHEMA, null, 2));
 
-  // Claude Code starts this stdio server for each worker. One shared betterwright home, one
-  // named profile per workspace — separate cookie jars, shared vault/artifacts/binary cache.
+  // Claude Code starts this stdio server for each worker. By default its betterwright home is
+  // cold and private to the worker's scaffolding (no shared vault); with the shared home on,
+  // one home plus a named profile per workspace — separate cookie jars, shared everything else.
   const mcpConfigPath = join(metaDir, "betterwright-mcp.json");
-  mkdirSync(sharedBrowserHome, { recursive: true });
+  if (sharedBrowserHome) mkdirSync(sharedBrowserHome, { recursive: true });
   writeFileSync(
     mcpConfigPath,
     JSON.stringify(
@@ -335,6 +356,7 @@ export function writeWorkerMeta(
           betterwright: workerMcpServerConfig({
             beckettRoot: join(import.meta.dir, "..", ".."),
             sharedHome: sharedBrowserHome,
+            scaffoldingDir: metaDir,
             workspace: repoRoot,
           }),
         },
@@ -491,7 +513,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<TicketWorkerHa
       scope.ownedGlobs,
       runtimeAwarenessPath,
       config.supervise.worker_slow_tool_s * 1000,
-      join(buildPaths(config).beckettDir, "worker-browser"),
+      config.supervise.worker_browser_shared_home
+        ? join(buildPaths(config).beckettDir, "worker-browser")
+        : null,
     );
 
     // Environment bootstrap: a spawn-time workspace snapshot appended to implement/rework (and
