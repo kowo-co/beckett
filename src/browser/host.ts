@@ -87,6 +87,9 @@ function decodeSettings(): BrowserHostSettings {
     !parsed.artifactsRoot.startsWith("/") ||
     !Array.isArray(attachmentRoots) ||
     attachmentRoots.some((root) => typeof root !== "string" || !root.startsWith("/")) ||
+    (parsed.chromiumArgs !== undefined &&
+      (!Array.isArray(parsed.chromiumArgs) || parsed.chromiumArgs.some((arg) => typeof arg !== "string"))) ||
+    (parsed.parkBackgroundPages !== undefined && typeof parsed.parkBackgroundPages !== "boolean") ||
     typeof parsed.headless !== "boolean" ||
     numeric.some((value) => typeof value !== "number" || !Number.isFinite(value) || value <= 0)
   ) {

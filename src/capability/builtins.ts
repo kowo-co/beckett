@@ -539,6 +539,14 @@ export const configFragments = {
       browser_eval_timeout_ms: posInt.default(60_000),
       browser_max_output_chars: browserOutputChars.default(24_000),
       browser_question_wait_secs: posInt.default(3_600),
+      // Extra Chromium switches appended to BetterWright's managed launch args (betterwright
+      // 1.7.1 chromiumArgs). Defaults disable GPU/software-raster churn on a headless GPU-less
+      // server. Switches BetterWright owns (proxy, --headless, --fingerprint*, …) are rejected
+      // by the library at launch; duplicates are dropped and reported in run warnings.
+      browser_chromium_args: z.array(z.string().min(1)).default(["--disable-gpu", "--disable-software-rasterizer"]),
+      // Quiet each session's pages between executions (pause page script/animations while the
+      // model thinks). BetterWright's own default is true; kept explicit and configurable here.
+      browser_park_background_pages: z.boolean().default(true),
       // Default roots are the run artifacts plus paths.imagesDir. This opt-in list
       // can widen attachment reads, including '/' for deliberately broad access.
       browser_attach_roots: z.array(browserAttachmentRoot).default([]),

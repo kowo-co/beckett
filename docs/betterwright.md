@@ -224,6 +224,10 @@ security-posture grounds** — Beckett tears down and relaunches per lease speci
 leak between runs; reuse would need an upstream per-session hard reset provably equivalent to a fresh process
 before it's safe to revisit.
 
+**Update (1.7.1):** upstream shipped `chromiumArgs` passthrough. Beckett now passes
+`quick.browser_chromium_args` (default `["--disable-gpu", "--disable-software-rasterizer"]`)
+plus `parkBackgroundPages: true` through the constructor.
+
 ### `--disable-gpu` shim — negative result (#95)
 
 Follow-on test of a lever that *does* exist locally (`CLOAKBROWSER_BINARY_PATH`, a shim `exec`ing real Chrome
@@ -290,7 +294,7 @@ below.
 | Model/effort fixed flat for every browser leg regardless of task shape | A browser-step casting table (below), same front-load-judgment/execute-cheap principle as [orchestration.md §3.13](orchestration.md) |
 | Two nested bubblewrap sandboxes in the legacy path | Gone with the legacy backend — BetterWright's own sandboxed worker is the only per-script isolation layer needed |
 | Cold lease-acquire (~1.5–1.7s) pays on every dispatch | Not eliminated — rejected on security-posture grounds at the daemon level. Mitigated at the orchestration layer: batch related sub-tasks into one Job dispatch instead of several separate calls, each paying its own acquire/release. Pre-warmed pool is open, not adopted |
-| GPU-process overhead (~0.23–0.25 CPU-s/run) | Still blocked on upstream Chromium-args passthrough; not fixed, scheduled for periodic re-check |
+| GPU-process overhead (~0.23–0.25 CPU-s/run) | Fixed: 1.7.1 chromiumArgs passthrough, wired as `quick.browser_chromium_args` (default disables the GPU process) |
 | Hand-maintained `--ro-bind` dependency list in the sandbox mount config | Not fixed; carried forward as a known maintenance surface |
 
 ---

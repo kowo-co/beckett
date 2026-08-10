@@ -222,6 +222,11 @@ export function createBetterWrightRuntime(
     // sandbox.
     headless: settings.headless,
     defaultTimeout: Math.max(5, Math.ceil(settings.evalTimeoutMs / 1_000)),
+    // Host-level Chromium tuning (1.7.1): appended to the managed launch args. Config-owned;
+    // the zod default disables the GPU process on this GPU-less host (docs/betterwright.md #92).
+    ...(settings.chromiumArgs !== undefined ? { chromiumArgs: settings.chromiumArgs } : {}),
+    // Explicit, not implied: park pages between executions so idle tabs stop burning CPU.
+    parkBackgroundPages: settings.parkBackgroundPages ?? true,
     // Pin the open private-network and loopback defaults explicitly so Beckett's
     // local/intranet access survives future upgrades.
     policy: new NetworkPolicy({ allowLoopback: true, allowPrivateNetwork: true }),

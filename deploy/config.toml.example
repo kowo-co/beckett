@@ -137,6 +137,8 @@ browser_navigation_timeout_ms = 30000
 browser_eval_timeout_ms = 60000
 browser_max_output_chars = 24000
 browser_question_wait_secs = 3600
+browser_chromium_args = ["--disable-gpu", "--disable-software-rasterizer"]
+browser_park_background_pages = true
 browser_attach_roots = []
 
 [announce]

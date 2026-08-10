@@ -153,6 +153,10 @@ export interface BrowserHostSettings {
   maxOutputChars: number;
   /** Global configured roots; each lease adds its own artifactsDir at attachment time. */
   attachmentRoots?: string[];
+  /** Extra Chromium switches for the BetterWright-managed launch (betterwright backend only). */
+  chromiumArgs?: string[];
+  /** Quiet session pages between executions (betterwright backend only; default true). */
+  parkBackgroundPages?: boolean;
 }
 
 interface ActiveLease extends BrowserLease {
@@ -246,6 +250,8 @@ export function browserHostSettings(config: Config): BrowserHostSettings {
     navigationTimeoutMs: config.quick.browser_navigation_timeout_ms,
     evalTimeoutMs: config.quick.browser_eval_timeout_ms,
     maxOutputChars: config.quick.browser_max_output_chars,
+    chromiumArgs: config.quick.browser_chromium_args,
+    parkBackgroundPages: config.quick.browser_park_background_pages,
     attachmentRoots: [...new Set([resolve(paths.imagesDir), ...config.quick.browser_attach_roots])],
   };
 }

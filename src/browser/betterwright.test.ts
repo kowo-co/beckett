@@ -147,6 +147,30 @@ test("two leases acquired back to back are both live, each on its own session", 
   }
 });
 
+test("constructor receives configured chromiumArgs and an explicit parkBackgroundPages", async () => {
+  const fake = new FakeBetterWright();
+  let seen: Record<string, unknown> | undefined;
+  const settings = { ...settingsFor(), chromiumArgs: ["--disable-gpu"], parkBackgroundPages: false };
+  const runtime = createBetterWrightRuntime(settings, quietLog, {
+    createBrowser: (options) => { seen = options as Record<string, unknown>; return fake; },
+  });
+  try {
+    expect(seen?.chromiumArgs).toEqual(["--disable-gpu"]);
+    expect(seen?.parkBackgroundPages).toBe(false);
+  } finally { await runtime.stop(); }
+});
+test("parkBackgroundPages defaults to an explicit true when settings omit it", async () => {
+  const fake = new FakeBetterWright();
+  let seen: Record<string, unknown> | undefined;
+  const runtime = createBetterWrightRuntime(settingsFor(), quietLog, {
+    createBrowser: (options) => { seen = options as Record<string, unknown>; return fake; },
+  });
+  try {
+    expect(seen?.parkBackgroundPages).toBe(true);
+    expect("chromiumArgs" in (seen ?? {})).toBe(false);
+  } finally { await runtime.stop(); }
+});
+
 test("calls within one lease stay strictly ordered", async () => {
   const gate = deferred<void>();
   const fake = new FakeBetterWright(async (call) => {

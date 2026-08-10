@@ -1015,6 +1015,10 @@ export interface Config {
     browser_max_output_chars: number;
     /** How long a screenshot-backed user question may remain parked before expiring. */
     browser_question_wait_secs: number;
+    /** Extra Chromium switches appended to BetterWright's managed launch args. */
+    browser_chromium_args: string[];
+    /** Quiet each session's pages between executions (betterwright default is also true). */
+    browser_park_background_pages: boolean;
     /** Extra absolute roots whose validated media files a browser run may attach. */
     browser_attach_roots: string[];
   };
