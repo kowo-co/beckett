@@ -71,7 +71,7 @@ function manualScheduler() {
   };
 }
 
-function harness(overrides: { channel?: string | null } = {}) {
+function harness(overrides: { channel?: string | null; channelThrows?: Error } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "beckett-cards-"));
   const statePath = join(dir, "progress-cards.json");
   const g = fakeGateway();
@@ -81,7 +81,10 @@ function harness(overrides: { channel?: string | null } = {}) {
     createProgressCardService({
       gateway: g.gateway,
       statePath,
-      resolveChannel: () => (overrides.channel === undefined ? "chan-1" : overrides.channel),
+      resolveChannel: () => {
+        if (overrides.channelThrows) throw overrides.channelThrows;
+        return overrides.channel === undefined ? "chan-1" : overrides.channel;
+      },
       logger: quiet,
       now: () => clock,
       schedule: timers.schedule,
@@ -284,6 +287,17 @@ describe("ProgressCardService", () => {
     try {
       await h.service.observe(ev("implement", "started"));
       expect(h.g.posts).toHaveLength(0);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  test("a channel lookup that throws never rejects observe", async () => {
+    const h = harness({ channelThrows: new Error("registry unreadable") });
+    try {
+      await h.service.observe(ev("implement", "started"));
+      expect(h.g.posts).toHaveLength(0);
+      expect(h.g.edits).toHaveLength(0);
     } finally {
       h.cleanup();
     }

@@ -360,6 +360,10 @@ export class ProgressCardService {
       } catch (error) {
         this.logger.debug("progress card post failed", { ticket: record.state.ref, error: String(error) });
       }
+    } catch (error) {
+      // Delivery must never reject: observe() and the enqueue chain both hang off this promise,
+      // and a card failure may not surface as an unhandled rejection in the dispatch loop.
+      this.logger.warn("progress card delivery failed", { ticket: record.state.ref, error: String(error) });
     } finally {
       if (record.state.terminal) {
         record.pending?.cancel();
