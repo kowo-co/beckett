@@ -1089,6 +1089,10 @@ export class Dispatcher {
       ticketId: ticket.id,
       ticketRef: ticket.branchRef ? `#${ticket.branchRef}` : ticket.identifier,
       branchRef: gitBranchForTicket(ticket),
+      // Card routing (progress.cards_as_code). Stamped only when the flag is on so the on-disk
+      // dispatch.jsonl stays byte-identical with the feature off. Optional-chained: hand-built
+      // test configs may predate the `progress` key.
+      ...(this.config.progress?.cards_as_code && ticket.originChannel ? { channel: ticket.originChannel } : {}),
       stage,
       outcome,
       message,

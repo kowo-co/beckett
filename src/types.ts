@@ -1065,6 +1065,11 @@ export interface Config {
      *  (Beckett's own project checkout — the loops a dream can pair are Beckett's own). */
     spike_repo: string;
   };
+  /** Zero-token progress cards: CODE posts/edits one status message per active ticket in the
+   *  ticket's origin channel, driven by dispatch events — no model turn. Default off. */
+  progress: {
+    cards_as_code: boolean;
+  };
 }
 
 // =======================================================================================

@@ -39,6 +39,7 @@ import { boredBaseUrl } from "../bored/client.ts";
 import { createTrackerPoller, type TrackerPoller } from "../tracker/poll.ts";
 import { BECKETT_COMMENT_MARKER, createDispatcher, type Dispatcher } from "../dispatch/dispatcher.ts";
 import { createStagesExtension, stageViewOf } from "../dispatch/stages.ts";
+import { createProgressCardService, type ProgressCardService } from "../progress/cards.ts";
 import { createGitHubPrPoller, type GitHubPrPoller } from "../github/poll.ts";
 import { createGitHubActivityPoller, type GitHubActivityPoller } from "../github/activity.ts";
 import { parsePrUrl } from "../github/types.ts";
@@ -449,6 +450,26 @@ async function boot(): Promise<BootedSystem> {
 
   // 4. Dispatcher — consumes PollEvents, owns the worker lifecycle. Its workers' granular event
   //    streams are mirrored into each ticket's Discord thread via the Concierge's progress hub.
+  // Zero-token progress cards (progress.cards_as_code, default off): CODE keeps one status
+  // message per active ticket in the ticket's origin channel, edited straight off the dispatch
+  // event bus — no Concierge involvement, honoring "the Concierge and the poll-dispatch loop
+  // never call each other directly". Channel: the event's stamped originChannel, else the task
+  // registry's thread/origin (same precedent as the PR re-watch loop below).
+  const progressCards: ProgressCardService | null = config.progress.cards_as_code
+    ? createProgressCardService({
+        gateway,
+        statePath: join(beckettDir, "progress-cards.json"),
+        resolveChannel: (event) => {
+          if (event.channel) return event.channel;
+          const hit =
+            tasks.findByTicket(event.ticketId) ??
+            tasks.findByTicket(event.ticketRef.replace(/^#/, ""));
+          return hit ? hit.task.threadId ?? hit.task.originChannelId ?? null : null;
+        },
+        logger: logger.child("progress-cards"),
+      })
+    : null;
+
   const dispatcher = createDispatcher({
     client,
     clients: [...clients.values()],
@@ -465,7 +486,12 @@ async function boot(): Promise<BootedSystem> {
     // OPS-167: append before relaying to Discord. `postDispatchEvent` is deliberately not awaited
     // by the bus, so gateway outages degrade to an on-disk timeline rather than blocking dispatch.
     dispatchEventsPath: join(paths.eventsDir, "dispatch.jsonl"),
-    dispatchLiveSink: (event) => concierge.postDispatchEvent(event),
+    dispatchLiveSink: (event) => {
+      // Fire-and-forget: a card hiccup must never delay the digest relay, and neither is awaited
+      // by the bus. Flag off ⇒ progressCards is null and this is behaviorally identical.
+      if (progressCards) void progressCards.observe(event);
+      return concierge.postDispatchEvent(event);
+    },
     runtimeStatePath: join(beckettDir, "dispatcher-state.json"),
     spendLedgerPath: paths.spend,
     // Harness health probe (issue #17): a dead harness (binary gone, login expired) becomes one
