@@ -83,6 +83,56 @@ describe("browser MCP", () => {
     expect(content[1]?.text).not.toContain("42");
   });
 
+  test("the tool schema declares optional note and timeoutMs and still requires only code", () => {
+    expect(BROWSER_TOOL_DEFINITION.inputSchema.required).toEqual(["code"]);
+    expect(BROWSER_TOOL_DEFINITION.inputSchema.properties.note.maxLength).toBe(300);
+    expect(BROWSER_TOOL_DEFINITION.inputSchema.properties.timeoutMs.maximum).toBe(300000);
+  });
+
+  test("forwards note and a clamped timeout to the evaluator", async () => {
+    const recorded: { code: string; options?: { note?: string; timeoutMs?: number } }[] = [];
+    const deps = {
+      evaluate: async (code: string, options?: { note?: string; timeoutMs?: number }) => {
+        recorded.push({ code, options });
+        return emptyEval;
+      },
+    };
+    await handleMcpRequest({
+      jsonrpc: "2.0",
+      id: 20,
+      method: "tools/call",
+      params: {
+        name: "betterwright_browser",
+        arguments: { code: "return 1", note: "  Signing in  ", timeoutMs: 120_000 },
+      },
+    }, deps);
+    expect(recorded.at(-1)?.options).toEqual({ note: "Signing in", timeoutMs: 120_000 });
+
+    await handleMcpRequest({
+      jsonrpc: "2.0",
+      id: 21,
+      method: "tools/call",
+      params: { name: "betterwright_browser", arguments: { code: "return 1", timeoutMs: 999 } },
+    }, deps);
+    expect(recorded.at(-1)?.options).toEqual({ timeoutMs: 1_000 });
+
+    await handleMcpRequest({
+      jsonrpc: "2.0",
+      id: 22,
+      method: "tools/call",
+      params: { name: "betterwright_browser", arguments: { code: "return 1", timeoutMs: 10_000_000 } },
+    }, deps);
+    expect(recorded.at(-1)?.options).toEqual({ timeoutMs: 300_000 });
+
+    await handleMcpRequest({
+      jsonrpc: "2.0",
+      id: 23,
+      method: "tools/call",
+      params: { name: "betterwright_browser", arguments: { code: "return 1", note: 42 as never } },
+    }, deps);
+    expect(recorded.at(-1)?.options).toEqual({});
+  });
+
   test("rejects oversized evaluator programs before the daemon boundary", async () => {
     const response = await handleMcpRequest({
       jsonrpc: "2.0",

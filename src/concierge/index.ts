@@ -77,7 +77,7 @@ import { loadMaintainers, resolveMaintainerPending } from "../discord/maintainer
 import { childEnv as strippedChildEnv } from "../env.ts";
 import type { QuickRun, QuickRunner } from "../quick/index.ts";
 import type { AgentDefinition } from "../agent/types.ts";
-import type { BrowserRuntime } from "../browser/runtime.ts";
+import { MAX_BROWSER_EVAL_CALL_TIMEOUT_MS, MAX_BROWSER_EVAL_NOTE_CHARS, type BrowserRuntime } from "../browser/runtime.ts";
 import {
   redactSecretText,
   redactSecretValues,
@@ -4499,6 +4499,13 @@ export class Concierge {
               if (!runId || !controlToken || !code.trim()) {
                 return { ok: false, error: "browser.eval needs its run capability and JavaScript code" };
               }
+              const note = typeof req.args.note === "string" && req.args.note.trim()
+                ? req.args.note.trim().slice(0, MAX_BROWSER_EVAL_NOTE_CHARS)
+                : undefined;
+              const timeoutArg = req.args.timeoutMs;
+              const timeoutMs = typeof timeoutArg === "number" && Number.isSafeInteger(timeoutArg) && timeoutArg > 0
+                ? Math.min(timeoutArg, MAX_BROWSER_EVAL_CALL_TIMEOUT_MS)
+                : undefined;
               // Keychain injection (issue #58): the browser agent's runs reference credentials as
               // `secrets.<field>`; the values are resolved here — below the model's transcript —
               // prefixed onto the script, and scrubbed from everything that flows back up.
@@ -4514,7 +4521,7 @@ export class Concierge {
                 return { ok: false, error: `keychain secrets are unavailable for this run: ${(error as Error).message}` };
               }
               try {
-                const data = await this.browserRuntime.evaluate(runId, injected, controlToken);
+                const data = await this.browserRuntime.evaluate(runId, injected, controlToken, { note, timeoutMs });
                 const payload = secretValues.length > 0 ? redactSecretValues(data, secretValues) : data;
                 const activePage = payload.pages.find((page) => page.active) ?? payload.pages[0];
                 this.browserAgent?.recordEval(runId, {

@@ -36,6 +36,7 @@ import { runBrowserEvaluator } from "./evaluator-runner.ts";
 import { laneStorageQuotaMib, resolveLaneStorageBytes } from "./storage-quota.ts";
 import type { BrowserHostRequest, BrowserHostResponse, BrowserHostMethod } from "./host.ts";
 import type {
+  BrowserEvalCallOptions,
   BrowserEvalResult,
   BrowserCheckpoint,
   BrowserBudgetOverrides,
@@ -821,7 +822,7 @@ export function createIsolatedBrowserRuntime(deps: CreateIsolatedBrowserRuntimeD
       }
     },
 
-    async evaluate(runId, code, controlToken) {
+    async evaluate(runId, code, controlToken, options?: BrowserEvalCallOptions) {
       const current = requireLease(runId);
       requireControlToken(current, controlToken);
       if (!code.trim()) throw new Error(`${backend} browser needs non-empty JavaScript`);
@@ -834,10 +835,16 @@ export function createIsolatedBrowserRuntime(deps: CreateIsolatedBrowserRuntimeD
             // BetterWright owns the sandboxed snippet worker and persistent
             // browser session inside the isolated host. No Playwright/CDP
             // session crosses back into Beckett's evaluator process.
+            const callTimeoutMs = options?.timeoutMs;
             const result = await rpc(
               "evaluate",
-              { runId, code },
-              settings.evalTimeoutMs + settings.actionTimeoutMs + 5_000,
+              {
+                runId,
+                code,
+                ...(options?.note ? { note: options.note } : {}),
+                ...(callTimeoutMs ? { timeoutMs: callTimeoutMs } : {}),
+              },
+              Math.max(settings.evalTimeoutMs, callTimeoutMs ?? 0) + settings.actionTimeoutMs + 5_000,
             ) as BrowserEvalResult;
             evaluations++;
             totalEvalMs += result.elapsedMs;

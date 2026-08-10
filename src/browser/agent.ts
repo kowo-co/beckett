@@ -18,6 +18,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { buildPaths } from "../paths.ts";
 import { childEnv } from "../env.ts";
 import type { Config, Logger } from "../types.ts";
+import { MAX_BROWSER_EVAL_CALL_TIMEOUT_MS } from "./runtime.ts";
 import type { BrowserRuntime } from "./runtime.ts";
 import type { KeychainEntrySecrets, KeychainReader } from "../secret/keychain-read.ts";
 
@@ -688,7 +689,7 @@ export function createBrowserAgent(deps: CreateBrowserAgentDeps): BrowserAgent {
     // isn't dropped under `--strict-mcp-config` when a busy host slows the cold bun import.
     if (!env.MCP_TIMEOUT) env.MCP_TIMEOUT = String(MCP_STARTUP_TIMEOUT_MS);
     if (!env.MCP_TOOL_TIMEOUT) {
-      env.MCP_TOOL_TIMEOUT = String(config.quick.browser_eval_timeout_ms + 60_000);
+      env.MCP_TOOL_TIMEOUT = String(Math.max(config.quick.browser_eval_timeout_ms, MAX_BROWSER_EVAL_CALL_TIMEOUT_MS) + 60_000);
     }
     return env;
   }

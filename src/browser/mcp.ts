@@ -11,7 +11,7 @@
 import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { callBus } from "../shell/control-bus.ts";
-import type { BrowserEvalResult } from "./runtime.ts";
+import { MAX_BROWSER_EVAL_CALL_TIMEOUT_MS, MAX_BROWSER_EVAL_NOTE_CHARS, type BrowserEvalResult } from "./runtime.ts";
 
 const TOOL_NAME = "betterwright_browser";
 const MAX_CODE_CHARS = 100_000;
@@ -36,6 +36,17 @@ export const BROWSER_TOOL_DEFINITION = {
         description: "BetterWright browser JavaScript body. Use return to send useful data back.",
         maxLength: MAX_CODE_CHARS,
       },
+      note: {
+        type: "string",
+        maxLength: 300,
+        description: "Short present-tense status line for anyone watching this run (e.g. 'Signing in to GitHub'). Shown on the live view; never executed.",
+      },
+      timeoutMs: {
+        type: "integer",
+        minimum: 1000,
+        maximum: 300000,
+        description: "Per-call timeout override in milliseconds for one slow action (big page load, long download). Defaults to the host eval timeout.",
+      },
     },
     required: ["code"],
     additionalProperties: false,
@@ -50,7 +61,7 @@ interface JsonRpcRequest {
 }
 
 interface McpDeps {
-  evaluate(code: string): Promise<BrowserEvalResult>;
+  evaluate(code: string, options?: { note?: string; timeoutMs?: number }): Promise<BrowserEvalResult>;
   maxOutputChars?: number;
 }
 
@@ -98,8 +109,15 @@ export async function handleMcpRequest(message: JsonRpcRequest, deps: McpDeps): 
     return error(-32602, `${TOOL_NAME} requires a non-empty code string`);
   }
   if (args.code.length > MAX_CODE_CHARS) return error(-32602, `${TOOL_NAME} code exceeds ${MAX_CODE_CHARS} characters`);
+  const rawNote = args.note;
+  const rawTimeout = args.timeoutMs;
+  const callOptions: { note?: string; timeoutMs?: number } = {};
+  if (typeof rawNote === "string" && rawNote.trim()) callOptions.note = rawNote.trim().slice(0, MAX_BROWSER_EVAL_NOTE_CHARS);
+  if (typeof rawTimeout === "number" && Number.isSafeInteger(rawTimeout) && rawTimeout > 0) {
+    callOptions.timeoutMs = Math.min(Math.max(rawTimeout, 1_000), MAX_BROWSER_EVAL_CALL_TIMEOUT_MS);
+  }
   try {
-    const evaluated = await deps.evaluate(args.code);
+    const evaluated = await deps.evaluate(args.code, callOptions);
     const maxOutputChars = deps.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
     // Mid-run guidance from the dispatcher rides the eval response (see the daemon's
     // browser.eval boundary); surface it as its own block so it reads as instruction, not data.
@@ -181,8 +199,14 @@ async function main(): Promise<void> {
     maxOutputChars: Number.isSafeInteger(maxOutputChars) && maxOutputChars >= 4_096
       ? maxOutputChars
       : DEFAULT_MAX_OUTPUT_CHARS,
-    evaluate: async (code) => {
-      const response = await callBus(socket, "browser.eval", { runId, controlToken, code }, timeoutMs);
+    evaluate: async (code, options) => {
+      const waitMs = Math.max(timeoutMs, (options?.timeoutMs ?? 0) + 30_000);
+      const response = await callBus(
+        socket,
+        "browser.eval",
+        { runId, controlToken, code, ...(options?.note ? { note: options.note } : {}), ...(options?.timeoutMs ? { timeoutMs: options.timeoutMs } : {}) },
+        waitMs,
+      );
       if (!response.ok) throw new Error(response.error ?? "browser evaluation failed");
       return response.data as BrowserEvalResult;
     },

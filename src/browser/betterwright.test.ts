@@ -21,6 +21,8 @@ interface RunCall {
   code: string;
   session: string;
   approvedDownloads: boolean;
+  note?: string;
+  timeout?: number;
   seq: number;
 }
 
@@ -57,11 +59,13 @@ class FakeBetterWright implements BetterWrightClient {
     private readonly handler?: (call: RunCall) => Promise<FakeResult> | FakeResult,
   ) {}
 
-  async run(code: string, options?: { session?: string; approvedDownloads?: boolean }): Promise<unknown> {
+  async run(code: string, options?: { session?: string; approvedDownloads?: boolean; note?: string; timeout?: number }): Promise<unknown> {
     const call: RunCall = {
       code,
       session: options?.session ?? "default",
       approvedDownloads: options?.approvedDownloads ?? false,
+      note: options?.note,
+      timeout: options?.timeout,
       seq: this.seq++,
     };
     this.calls.push(call);
@@ -214,6 +218,22 @@ test("different leases run concurrently instead of queueing behind each other", 
   } finally {
     await runtime.stop();
   }
+});
+
+test("evaluate threads note and a seconds-converted timeout into run()", async () => {
+  const fake = new FakeBetterWright();
+  const runtime = createBetterWrightRuntime(settingsFor(), quietLog, { createBrowser: () => fake });
+  try {
+    await runtime.acquire(leaseFor("opts"));
+    await runtime.evaluate("opts", "return 1", undefined, { note: "Checking out", timeoutMs: 120_000 });
+    const call = fake.calls.at(-1)!;
+    expect(call.note).toBe("Checking out");
+    expect(call.timeout).toBe(120); // seconds
+    await runtime.evaluate("opts", "return 2");
+    const bare = fake.calls.at(-1)!;
+    expect(bare.note).toBeUndefined();
+    expect(bare.timeout).toBeUndefined();
+  } finally { await runtime.stop(); }
 });
 
 test("the per-lease event ring does not leak across leases", async () => {

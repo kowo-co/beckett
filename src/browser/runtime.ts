@@ -94,6 +94,18 @@ export interface BrowserEvalResult {
   truncated: boolean;
 }
 
+/** Optional per-call evaluation controls threaded from the MCP tool input to BetterWright run(). */
+export interface BrowserEvalCallOptions {
+  /** Short host-facing status line (live view / status surface). Never evaluated as code. */
+  note?: string;
+  /** Per-call timeout override in milliseconds; bounded by MAX_BROWSER_EVAL_CALL_TIMEOUT_MS. */
+  timeoutMs?: number;
+}
+/** Hard ceiling for a per-call eval timeout override (5 minutes). */
+export const MAX_BROWSER_EVAL_CALL_TIMEOUT_MS = 300_000;
+/** Longest note accepted from the model before truncation. */
+export const MAX_BROWSER_EVAL_NOTE_CHARS = 300;
+
 export interface BrowserRuntimeStats {
   ready: boolean;
   profileDir: string;
@@ -124,7 +136,7 @@ export interface BrowserCheckpoint {
 
 export interface BrowserRuntime {
   acquire(lease: BrowserLease): Promise<void>;
-  evaluate(runId: string, code: string, controlToken?: string): Promise<BrowserEvalResult>;
+  evaluate(runId: string, code: string, controlToken?: string, options?: BrowserEvalCallOptions): Promise<BrowserEvalResult>;
   capture(runId: string, name: string): Promise<string>;
   checkpoint(runId: string): Promise<BrowserCheckpoint>;
   restore(runId: string, checkpoint: BrowserCheckpoint): Promise<void>;

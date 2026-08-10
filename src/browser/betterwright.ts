@@ -36,6 +36,7 @@ import { measureDirectoryBytes, pruneChromeProfileCaches } from "./profile-cache
 import { LANE_STORAGE_BYTES } from "./storage-quota.ts";
 import type {
   BrowserCheckpoint,
+  BrowserEvalCallOptions,
   BrowserEvalResult,
   BrowserHostSettings,
   BrowserLease,
@@ -406,7 +407,7 @@ const attachFile = async (target, screenshotPath) => {
   }
 
   /** Raw evaluation on one lease's session. Callers must already hold the lease queue. */
-  async function execute(lease: ActiveLease, code: string): Promise<BrowserEvalResult> {
+  async function execute(lease: ActiveLease, code: string, options?: BrowserEvalCallOptions): Promise<BrowserEvalResult> {
     if (!code.trim()) throw new Error("betterwright browser requires non-empty JavaScript");
     if (code.length > MAX_CODE_CHARS) throw new Error(`betterwright browser code exceeds ${MAX_CODE_CHARS} characters`);
     // Stage literal paths before exposing the bridge; unprepared dynamic paths still fail closed.
@@ -416,6 +417,9 @@ const attachFile = async (target, screenshotPath) => {
     const raw = await browser.run(bridgedCode, {
       session: lease.session,
       approvedDownloads: downloadReferences.has(lease.session),
+      ...(options?.note ? { note: options.note } : {}),
+      // BetterWright run() timeouts are seconds (constructor defaultTimeout likewise).
+      ...(options?.timeoutMs ? { timeout: Math.max(5, Math.ceil(options.timeoutMs / 1_000)) } : {}),
     }) as BetterWrightResult;
     const screenshots = copyArtifacts(raw, lease);
     const summaries = raw.pages ?? [];
@@ -546,12 +550,12 @@ const attachFile = async (target, screenshotPath) => {
       }
     },
 
-    async evaluate(runId, code) {
+    async evaluate(runId, code, _controlToken, options?: BrowserEvalCallOptions) {
       const lease = requireLease(runId);
       return runOnLease(lease, async () => {
         await enforceProfileBudget(lease);
         assertProfileHealthy(lease);
-        return execute(lease, code);
+        return execute(lease, code, options);
       });
     },
 

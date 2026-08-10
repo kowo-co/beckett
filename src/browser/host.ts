@@ -12,9 +12,10 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Logger } from "../types.ts";
 import { createBetterWrightRuntime } from "./betterwright.ts";
-import { createLocalBrowserRuntime } from "./runtime.ts";
+import { createLocalBrowserRuntime, MAX_BROWSER_EVAL_CALL_TIMEOUT_MS, MAX_BROWSER_EVAL_NOTE_CHARS } from "./runtime.ts";
 import type {
   BrowserBudgetOverrides,
+  BrowserEvalCallOptions,
   BrowserHostSettings,
   BrowserLease,
   BrowserRuntime,
@@ -139,8 +140,16 @@ async function handle(runtime: BrowserRuntime, request: BrowserHostRequest): Pro
     case "acquire":
       await runtime.acquire(parseLease(request.params));
       return runtime.stats();
-    case "evaluate":
-      return runtime.evaluate(requireString(request.params, "runId"), requireString(request.params, "code"));
+    case "evaluate": {
+      const options: BrowserEvalCallOptions = {};
+      const note = request.params?.note;
+      if (typeof note === "string" && note.trim()) options.note = note.trim().slice(0, MAX_BROWSER_EVAL_NOTE_CHARS);
+      const timeoutMs = request.params?.timeoutMs;
+      if (typeof timeoutMs === "number" && Number.isSafeInteger(timeoutMs) && timeoutMs > 0) {
+        options.timeoutMs = Math.min(timeoutMs, MAX_BROWSER_EVAL_CALL_TIMEOUT_MS);
+      }
+      return runtime.evaluate(requireString(request.params, "runId"), requireString(request.params, "code"), undefined, options);
+    }
     case "prepareEvaluation":
       if (!("prepareEvaluation" in runtime)) throw new Error("BetterWright host does not expose evaluator sessions");
       return (runtime as BrowserControllerRuntime).prepareEvaluation(requireString(request.params, "runId"));
