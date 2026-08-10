@@ -1,0 +1,7 @@
+{
+  "id": "refactor",
+  "prompt": "Rename the exported function `procData` in orders.ts to `processOrders`, updating every call site in the repo. Behavior must not change and `bun test` must still pass.",
+  "model": "",
+  "effort": "low",
+  "timeout_s": 600
+}
