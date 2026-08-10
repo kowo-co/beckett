@@ -25,9 +25,9 @@
  * §6 contract (`workerId`, `ticketId`, `stage`, `onFinished`, `reap`).
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 
 import type {
   Config,
@@ -46,6 +46,7 @@ import type {
 import type { HarnessSpec, Ticket } from "../tracker/types.ts";
 import { createDriver } from "../drivers/index.ts";
 import { workerId as mintWorkerId } from "../ids.ts";
+import { buildPaths } from "../paths.ts";
 import { log } from "../log.ts";
 import { excludeFromGit, installScaffoldingGuardHook, SCAFFOLDING_DIR } from "../worker/worktree.ts";
 import { scopeGuardSpec } from "../hooks/scope-guard.ts";
@@ -255,6 +256,44 @@ function buildEnvelope(harness: HarnessSpec, config: Config): ResourceEnvelope {
 }
 
 /**
+ * Stable per-workspace betterwright profile name: a separate identity (cookie
+ * jar + session daemon) inside the one shared worker browser home. Keyed off the
+ * workspace path, not the worker id, so implement/review/rework and resume
+ * spawns in the same checkout keep one identity — the same persistence the old
+ * per-workspace private home had. "wk-" + 12 hex satisfies betterwright's
+ * profile-name rules (letters/digits/.-_, must start with a letter or digit).
+ */
+export function workerBrowserProfileName(workspace: string): string {
+  return `wk-${createHash("sha256").update(resolve(workspace)).digest("hex").slice(0, 12)}`;
+}
+
+/** The betterwright MCP server entry for one worker's .beckett/betterwright-mcp.json. */
+export function workerMcpServerConfig(options: {
+  beckettRoot: string;
+  sharedHome: string;
+  workspace: string;
+}): { command: string; args: string[]; env: Record<string, string> } {
+  return {
+    // Direct exec of Beckett's own pinned install — no npx, no package-manager
+    // resolution against the worker's cwd, so the worker's project can never
+    // grow a betterwright install (the old --no-install containment, stronger).
+    // The .bin shim is node-shebanged; node is present wherever npx was.
+    command: join(options.beckettRoot, "node_modules", ".bin", "betterwright"),
+    args: ["mcp"],
+    env: {
+      // One shared home: vault, artifacts, and config are shared across workers;
+      // identity isolation comes from the named profile below, not a cold home.
+      BETTERWRIGHT_HOME: options.sharedHome,
+      BETTERWRIGHT_PROFILE: workerBrowserProfileName(options.workspace),
+      BETTERWRIGHT_HEADLESS: "1",
+      // No BETTERWRIGHT_OBSCURA_* here: this server is unsandboxed, so implicit
+      // discovery finds ~/.betterwright/obscura when deploy installed it and
+      // falls back to Chromium/Cloak silently when it did not.
+    },
+  };
+}
+
+/**
  * Write the per-worker meta under `<repoRoot>/.beckett/` (git-excluded): the scope-guard hook
  * settings and the done-signal schema. v3.1 runs the worker IN the project checkout, so the
  * scope-guard is delivered via `claude --settings <file>` (NOT `.claude/settings.json`) — claude
@@ -263,12 +302,13 @@ function buildEnvelope(harness: HarnessSpec, config: Config): ResourceEnvelope {
  * delivers the runtime-awareness PostToolUse hook (when enabled), which notices slow tool calls
  * back into the worker's own context.
  */
-function writeWorkerMeta(
+export function writeWorkerMeta(
   repoRoot: string,
   scopeGuardPath: string,
   ownedGlobs: string[],
   runtimeAwarenessPath: string,
   slowToolMs: number,
+  sharedBrowserHome: string,
 ): { doneSchemaPath: string; settingsPath: string; mcpConfigPath: string } {
   const metaDir = join(repoRoot, SCAFFOLDING_DIR);
   mkdirSync(metaDir, { recursive: true });
@@ -283,24 +323,20 @@ function writeWorkerMeta(
   const doneSchemaPath = join(metaDir, "done-schema.json");
   writeFileSync(doneSchemaPath, JSON.stringify(DONE_SCHEMA, null, 2));
 
-  // Claude Code starts this stdio server for each worker. Keep BetterWright's profile and
-  // artifacts under the worker's git-excluded scaffolding, never in a shared home directory.
+  // Claude Code starts this stdio server for each worker. One shared betterwright home, one
+  // named profile per workspace — separate cookie jars, shared vault/artifacts/binary cache.
   const mcpConfigPath = join(metaDir, "betterwright-mcp.json");
+  mkdirSync(sharedBrowserHome, { recursive: true });
   writeFileSync(
     mcpConfigPath,
     JSON.stringify(
       {
         mcpServers: {
-          betterwright: {
-            command: "npx",
-            // Workers run in their own project checkout, so make npx resolve Beckett's pinned
-            // dependency rather than downloading a browser package into the worker's project.
-            args: ["--no-install", "--prefix", join(import.meta.dir, "..", ".."), "betterwright", "mcp"],
-            env: {
-              BETTERWRIGHT_HOME: join(metaDir, "betterwright"),
-              BETTERWRIGHT_HEADLESS: "1",
-            },
-          },
+          betterwright: workerMcpServerConfig({
+            beckettRoot: join(import.meta.dir, "..", ".."),
+            sharedHome: sharedBrowserHome,
+            workspace: repoRoot,
+          }),
         },
       },
       null,
@@ -455,6 +491,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<TicketWorkerHa
       scope.ownedGlobs,
       runtimeAwarenessPath,
       config.supervise.worker_slow_tool_s * 1000,
+      join(buildPaths(config).beckettDir, "worker-browser"),
     );
 
     // Environment bootstrap: a spawn-time workspace snapshot appended to implement/rework (and
