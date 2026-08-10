@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { BROWSER_RESULT_SCHEMA } from "./agent.ts";
 import { BROWSER_TOOL_DEFINITION, handleMcpRequest, validateMcpBatch } from "./mcp.ts";
 import type { BrowserEvalResult } from "./runtime.ts";
+import betterwrightPkg from "betterwright/package.json";
 
 const emptyEval: BrowserEvalResult = {
   value: { ok: true },
@@ -25,6 +26,10 @@ describe("browser MCP", () => {
     );
     expect(initialized).toMatchObject({ result: { capabilities: { tools: {} } } });
     expect(initialized).toMatchObject({ result: { protocolVersion: "2025-06-18" } });
+    expect(initialized).toMatchObject({
+      result: { serverInfo: { name: "beckett-browser", version: betterwrightPkg.version } },
+    });
+    expect(betterwrightPkg.version).toMatch(/^\d+\.\d+\.\d+/);
     const future = await handleMcpRequest(
       { jsonrpc: "2.0", id: 4, method: "initialize", params: { protocolVersion: "2099-01-01" } },
       deps,

@@ -12,6 +12,7 @@ import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { callBus } from "../shell/control-bus.ts";
 import type { BrowserEvalResult } from "./runtime.ts";
+import betterwrightPkg from "betterwright/package.json";
 
 const TOOL_NAME = "betterwright_browser";
 const MAX_CODE_CHARS = 100_000;
@@ -80,7 +81,7 @@ export async function handleMcpRequest(message: JsonRpcRequest, deps: McpDeps): 
     return result({
       protocolVersion,
       capabilities: { tools: {} },
-      serverInfo: { name: "beckett-browser", version: "1.0.0" },
+      serverInfo: { name: "beckett-browser", version: betterwrightPkg.version },
     });
   }
   if (message.method === "ping") return result({});

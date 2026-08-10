@@ -5,7 +5,7 @@
  * model-authored snippets. This adapter keeps Beckett's lease/proof contract at
  * the host boundary without exposing a raw Playwright/CDP handle to the model.
  *
- * Since betterwright 1.3.0 the session daemon runs separate `--session`s
+ * BetterWright's session daemon (1.7.1 pinned) runs separate `--session`s
  * concurrently while keeping calls *within* one session strictly ordered (see
  * node_modules/betterwright/docs/sessions.md). This adapter holds a map of
  * concurrent leases — one betterwright session per run — instead of a single
@@ -15,7 +15,7 @@
  *
  * Concurrency is capped (default 3, `BECKETT_BROWSER_MAX_LEASES`). The kill
  * switch `BECKETT_BROWSER_SINGLE_LEASE=1` pins the cap to one lease, restoring
- * the pre-1.3.0 strictly-single-lease behaviour without a revert.
+ * the old strictly-single-lease behaviour without a revert.
  *
  * The profile budget is two ceilings, not one, split along who put the bytes there.
  * Beckett's own profile state is held to MAX_PROFILE_BYTES with a per-lease growth

@@ -28,13 +28,17 @@ beyond loopback/allowed policy, only profile/artifact/attachment dirs writable),
 sandboxes the snippet a second time. Same-Unix-user processes stay inside the trusted computing base by design —
 defense in depth, not a separate-privilege boundary.
 
-**v1 retires the second backend.** v0 carried a from-scratch legacy Playwright runtime side-by-side with
+**v1 converges on one backend (retirement still in progress).** v0 carried a from-scratch legacy Playwright runtime side-by-side with
 BetterWright — its own download guard, controller-boundary enforcer, profile-budget watchdog, privacy-redaction
 pipeline, disposable per-eval bubblewrap evaluator — even though production always selected BetterWright: ~2,600
 lines across three files for a codepath never on the hot path, plus a redundant per-eval sandbox layer
 BetterWright's own worker already makes unnecessary. v1 keeps one backend: the whole lane — isolated host,
 adapter, MCP bridge, queue/ledger/redaction — lands at **~1,500 LOC total**, inside the
 [architecture.md](architecture.md) module budget.
+Current state: the legacy runtime is not yet deleted — `src/browser/runtime.ts` (~2,400 lines) still ships,
+and `src/browser/host.ts` selects it whenever `BECKETT_BROWSER_BACKEND` is not `"betterwright"` (production
+dispatch passes the betterwright backend explicitly via `createIsolatedBrowserRuntime`), so the single-backend
+figure above is the target, not the tree today.
 
 ---
 
@@ -179,7 +183,7 @@ sampled over 12s starting 4s after the last eval.
 
 **Null result.** 1.6.1's changelog claims an idle-CPU reduction; the 3-sample mean was slightly *higher*, not
 lower. 1.5.1's baseline was already ~1% of one core, likely below the workload's sensitivity floor, and the host
-wasn't CPU-pinned (1-min load avg 2.22–3.20 during the run). Beckett stays pinned at **1.6.1 in production**
+wasn't CPU-pinned (1-min load avg 2.22–3.20 during the run). Beckett stays pinned at **1.7.1 in production**
 regardless — the pin tracks upstream currency, not this result.
 
 ### Browser-lane tuning (#92)
@@ -219,7 +223,10 @@ CPU. Reverted; unchanged in v1.
 Two findings were **blocked on upstream** at benchmark time (no Chromium launch-args passthrough): a
 `--type=gpu-process` burning ~26% of a core on pure SwiftShader software compositing nobody looks at (headless,
 no GPU), and renderer/raster thread caps defaulting to many-core sizing on a
-4-core box. Warm-browser reuse across leases was also considered and **rejected on
+4-core box. **Unblocked since betterwright 1.7.1**, which added a `chromiumArgs` constructor option (extra Chromium
+switches appended to the managed launch args; identity/proxy/profile switches rejected) plus a
+`BETTERWRIGHT_CHROMIUM_ARGS` host env var — Beckett exposes it via the `BECKETT_BROWSER_CHROMIUM_ARGS`
+config knob. Warm-browser reuse across leases was also considered and **rejected on
 security-posture grounds** — Beckett tears down and relaunches per lease specifically so escaped JS state can't
 leak between runs; reuse would need an upstream per-session hard reset provably equivalent to a fresh process
 before it's safe to revisit.
@@ -290,7 +297,7 @@ below.
 | Model/effort fixed flat for every browser leg regardless of task shape | A browser-step casting table (below), same front-load-judgment/execute-cheap principle as [orchestration.md §3.13](orchestration.md) |
 | Two nested bubblewrap sandboxes in the legacy path | Gone with the legacy backend — BetterWright's own sandboxed worker is the only per-script isolation layer needed |
 | Cold lease-acquire (~1.5–1.7s) pays on every dispatch | Not eliminated — rejected on security-posture grounds at the daemon level. Mitigated at the orchestration layer: batch related sub-tasks into one Job dispatch instead of several separate calls, each paying its own acquire/release. Pre-warmed pool is open, not adopted |
-| GPU-process overhead (~0.23–0.25 CPU-s/run) | Still blocked on upstream Chromium-args passthrough; not fixed, scheduled for periodic re-check |
+| GPU-process overhead (~0.23–0.25 CPU-s/run) | Unblocked: betterwright 1.7.1 shipped `chromiumArgs` passthrough (and `BETTERWRIGHT_CHROMIUM_ARGS`); tune via `BECKETT_BROWSER_CHROMIUM_ARGS`, e.g. `--disable-gpu --disable-software-rasterizer` |
 | Hand-maintained `--ro-bind` dependency list in the sandbox mount config | Not fixed; carried forward as a known maintenance surface |
 
 ---
