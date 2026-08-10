@@ -84,3 +84,76 @@ export function resolveLaneStorageBytes(options: LaneStorageOptions): number {
 export function laneStorageQuotaMib(bytes: number): number {
   return Math.max(1, Math.floor(bytes / (1024 * 1024)));
 }
+
+/** Which BetterWright engine actually served a session (betterwright worker.ts `browserBackend`). */
+export type BrowserLaneBackend = "obscura" | "compatibility";
+
+/**
+ * What Obscura reports for `navigator.storage.estimate().quota`, always, on every host.
+ *
+ * BetterWright 1.7.1 runs headless sessions on the resident Obscura engine rather than
+ * CloakBrowser (docs/obscura.md; CHANGELOG 1.7.0 "Headless sessions now use
+ * checksum-pinned Obscura 0.1.11 for resident DOM, JavaScript, storage, cookie, and
+ * guarded network execution"). Obscura implements `navigator.storage` as its own fixed
+ * shim — the `estimate`/`persist`/`persisted` trio hangs off its synthesised navigator
+ * prototype — and neither Obscura's release notes nor BetterWright's docs offer a lever
+ * over the figure. `--fingerprint-storage-quota`, the lane's only lever
+ * (cloak-storage-quota.mjs), is a CloakBrowser switch and never reaches Obscura, which
+ * also ignores `chromiumArgs` outright for resident execution.
+ *
+ * So on Obscura the lane's measured budget is NOT what a page reads; a flat 5 GB is.
+ * Observed on linux-x64 Obscura 0.1.11 under Beckett's sandboxed host: exactly
+ * 5,000,000,000 with a real `usage` beside it and no `usageDetails` key, on a profile
+ * whose resolved lane budget was 621,809,664 bytes — the number tracks nothing about the
+ * host. Pinning it exactly is the point: if Obscura ever honours a quota lever, or moves
+ * its constant, this gate fires and the lane gets rewired instead of quietly advertising
+ * a figure Beckett did not choose.
+ */
+export const OBSCURA_STORAGE_QUOTA_BYTES = 5_000_000_000;
+
+/** Tolerance on the compatibility lane: free space on the profile's filesystem moves while a smoke runs. */
+const LANE_BUDGET_TOLERANCE_BYTES = 1024 * 1024 * 1024;
+
+export interface LaneStorageQuotaCheck {
+  backend: BrowserLaneBackend;
+  /** The quota a real page read from `navigator.storage.estimate()`. */
+  quota: number;
+  /** The lane budget {@link resolveLaneStorageBytes} resolved for the profile that served it. */
+  expectedBytes: number;
+}
+
+/**
+ * Why the quota a page actually read is wrong for the backend that served it, or `null`
+ * when it is right. Pure so both arms stay testable without either engine installed.
+ *
+ * The two arms assert different things because the lane reaches the two backends
+ * differently. CloakBrowser fabricates the figure from the profile's fingerprint seed
+ * unless the lane overrides it, so the assertion is that the lane's override won: whole
+ * mebibytes (the switch's unit), inside the policy band, tracking the measured budget.
+ * Obscura takes no override at all, so the assertion is its exact fixed constant.
+ */
+export function laneStorageQuotaViolation(check: LaneStorageQuotaCheck): string | null {
+  const { backend, quota, expectedBytes } = check;
+  if (!Number.isFinite(quota) || quota <= 0) return `browser reported no storage quota: ${String(quota)}`;
+  if (backend === "obscura") {
+    // Exact, not a band: the constant is the whole signal. Anything else means Obscura's
+    // storage reporting changed and the lane's budget has to be re-plumbed for it.
+    if (quota !== OBSCURA_STORAGE_QUOTA_BYTES) {
+      return `storage quota ${quota} is not Obscura's fixed ${OBSCURA_STORAGE_QUOTA_BYTES}-byte estimate`;
+    }
+    return null;
+  }
+  // Whole mebibytes is the signature of the lane's own switch: CloakBrowser's fabricated
+  // figure is a seed-derived byte count (593.46 MiB on the profile that motivated this).
+  if (quota % (1024 * 1024) !== 0) return `storage quota ${quota} is not the lane's whole-MiB budget`;
+  if (quota < MIN_LANE_STORAGE_BYTES || quota > LANE_STORAGE_BYTES) {
+    return `storage quota ${quota} is outside the lane's policy band`;
+  }
+  // The smoke's profile sits on a filesystem whose free space moves while it runs, so the
+  // budget is compared with a tolerance rather than for equality — the point is that the
+  // page sees THIS lane's measured budget, not a number invented from a fingerprint.
+  if (Math.abs(quota - expectedBytes) > LANE_BUDGET_TOLERANCE_BYTES) {
+    return `storage quota ${quota} does not track the lane budget ${expectedBytes}`;
+  }
+  return null;
+}
