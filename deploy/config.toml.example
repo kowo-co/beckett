@@ -140,6 +140,7 @@ browser_question_wait_secs = 3600
 browser_chromium_args = ["--disable-gpu", "--disable-software-rasterizer"]
 browser_park_background_pages = true
 browser_attach_roots = []
+browser_live_view_expose = "tailscale"
 
 [announce]
 changes_channel_id = ""

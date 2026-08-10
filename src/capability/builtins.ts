@@ -550,6 +550,11 @@ export const configFragments = {
       // Default roots are the run artifacts plus paths.imagesDir. This opt-in list
       // can widen attachment reads, including '/' for deliberately broad access.
       browser_attach_roots: z.array(browserAttachmentRoot).default([]),
+      // Live-view exposure for watched browser runs. "tailscale" (default) binds only
+      // this machine's tailnet address — usable from the owner's devices, invisible to
+      // the LAN. "off" disables watch-time live view entirely; any live-view failure
+      // (e.g. tailscale down) degrades to screenshot-only.
+      browser_live_view_expose: z.enum(["off", "local", "lan", "tailscale"]).default("tailscale"),
     })
     .strict()
     .default({}),

@@ -1021,6 +1021,8 @@ export interface Config {
     browser_park_background_pages: boolean;
     /** Extra absolute roots whose validated media files a browser run may attach. */
     browser_attach_roots: string[];
+    /** Live-view exposure preset for watched runs; "off" disables watch-time live view. */
+    browser_live_view_expose: "off" | "local" | "lan" | "tailscale";
   };
   /**
    * Restart "what's new" announcement — instance-specific, OFF by default (empty channel), so a

@@ -151,10 +151,18 @@ export interface BrowserCheckpoint {
   activeIndex: number;
 }
 
+export interface BrowserLiveViewStatus {
+  running: boolean;
+  /** Capability URL — embeds a bearer token; surface to the requesting human only, never journal it. */
+  url: string | null;
+}
+
 export interface BrowserRuntime {
   acquire(lease: BrowserLease): Promise<void>;
   evaluate(runId: string, code: string, controlToken?: string, options?: BrowserEvalCallOptions): Promise<BrowserEvalResult>;
   capture(runId: string, name: string): Promise<string>;
+  /** Optional: backends without a live-view server simply omit it. */
+  liveView?(runId: string, action: "start" | "stop" | "status"): Promise<BrowserLiveViewStatus>;
   checkpoint(runId: string): Promise<BrowserCheckpoint>;
   restore(runId: string, checkpoint: BrowserCheckpoint): Promise<void>;
   release(runId: string, captureProof: boolean): Promise<string[]>;
@@ -186,6 +194,8 @@ export interface BrowserHostSettings {
   chromiumArgs?: string[];
   /** Quiet session pages between executions (betterwright backend only; default true). */
   parkBackgroundPages?: boolean;
+  /** Live-view exposure preset; absent means "tailscale". "off" disables. */
+  liveViewExpose?: "off" | "local" | "lan" | "tailscale";
 }
 
 interface ActiveLease extends BrowserLease {
@@ -282,6 +292,7 @@ export function browserHostSettings(config: Config): BrowserHostSettings {
     chromiumArgs: config.quick.browser_chromium_args,
     parkBackgroundPages: config.quick.browser_park_background_pages,
     attachmentRoots: [...new Set([resolve(paths.imagesDir), ...config.quick.browser_attach_roots])],
+    liveViewExpose: config.quick.browser_live_view_expose,
   };
 }
 

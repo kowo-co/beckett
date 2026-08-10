@@ -104,6 +104,8 @@ const PROFILE_SCAN_TTL_MS = 10_000;
 export interface BetterWrightClient {
   run(code: string, options?: { session?: string; approvedDownloads?: boolean; note?: string; timeout?: number }): Promise<unknown>;
   closeSession?(session?: string): Promise<unknown>;
+  startLiveView?(options?: { session?: string; expose?: "lan" | "local" | "tailscale" }): Promise<{ ok: boolean; running?: boolean; url?: string; error?: string }>;
+  stopLiveView?(): Promise<{ ok: boolean; running?: boolean; error?: string }>;
   close(): Promise<void>;
 }
 
@@ -241,11 +243,11 @@ export function createBetterWrightRuntime(
     // `browserFlavor` on the client is a reported "cloak" constant, not a settable
     // option, and `betterwright setup` provisions its own signed CloakBrowser binary,
     // so the host neither picks a browser flavor nor hands in a Playwright executable
-    // path. Since 1.7.0 headless sessions default to a separate resident Obscura
-    // engine instead of Cloak/Chromium; isolated.ts pins BETTERWRIGHT_OBSCURA_PATH=off
-    // for the sandboxed launch because only the managed CloakBrowser cache — not
-    // Obscura's ~/.betterwright/obscura/ install — is bound into this bubblewrap
-    // sandbox.
+    // path. Since 1.7.0 headless sessions default to the resident Obscura engine;
+    // isolated.ts binds the host's ~/.betterwright/obscura install into the sandbox
+    // and points BETTERWRIGHT_OBSCURA_ROOT at it when it exists, falling back to the
+    // Chromium/Cloak compatibility backend when it does not (implicit discovery of an
+    // absent install returns null upstream).
     headless: settings.headless,
     defaultTimeout: Math.max(5, Math.ceil(settings.evalTimeoutMs / 1_000)),
     // Host-level Chromium tuning (1.7.1): appended to the managed launch args. Config-owned;
@@ -269,6 +271,8 @@ export function createBetterWrightRuntime(
   // Session-scoped download approval. This is intentionally a set rather than
   // browser configuration: every `run` gets only its own session's bit.
   const downloadReferences = new Set<string>();
+  // Sessions currently being live-viewed; the shared server stops when the last one goes.
+  const liveViewRuns = new Set<string>();
   let stopped = false;
   let launches = 0;
   let evaluations = 0;
@@ -615,6 +619,28 @@ const attachFile = async (target, screenshotPath) => {
       });
     },
 
+    async liveView(runId, action) {
+      if (action === "stop") {
+        liveViewRuns.delete(runId);
+        if (liveViewRuns.size === 0 && browser.stopLiveView) await browser.stopLiveView();
+        return { running: false, url: null };
+      }
+      const lease = requireLease(runId);
+      if (action === "status") {
+        // liveViewStatus is not on the narrowed client type; report tracked state.
+        return { running: liveViewRuns.has(runId), url: null };
+      }
+      const expose = settings.liveViewExpose ?? "tailscale";
+      if (expose === "off") return { running: false, url: null };
+      if (!browser.startLiveView) throw new Error("this betterwright client does not support live view");
+      // Idempotent upstream: returns the already-running token-gated server. The
+      // session option only picks which session streams first; viewers can switch.
+      const status = await browser.startLiveView({ session: lease.session, expose });
+      if (!status.ok || !status.url) throw new Error(status.error ?? "live view failed to start");
+      liveViewRuns.add(runId);
+      return { running: true, url: status.url };
+    },
+
     async checkpoint(runId) {
       const lease = requireLease(runId);
       return runOnLease(lease, async () => {
@@ -657,6 +683,10 @@ const attachFile = async (target, screenshotPath) => {
         } finally {
           leases.delete(lease.session);
           releaseDownloadReference(lease);
+          liveViewRuns.delete(lease.session);
+          if (liveViewRuns.size === 0 && browser.stopLiveView) {
+            await browser.stopLiveView().catch((error) => logger.warn("live view stop failed on release", { runId, error: String(error) }));
+          }
           if (browser.closeSession) await browser.closeSession(lease.session).catch(() => undefined);
           logger.info("BetterWright browser lease released", { runId: lease.runId, live: leases.size });
         }
@@ -686,6 +716,7 @@ const attachFile = async (target, screenshotPath) => {
       stopped = true;
       leases.clear();
       downloadReferences.clear();
+      liveViewRuns.clear();
       await browser.close();
     },
   };

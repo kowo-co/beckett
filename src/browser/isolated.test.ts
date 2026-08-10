@@ -6,7 +6,7 @@ import { validateConfig } from "../config.ts";
 import type { Logger } from "../types.ts";
 import { buildBrowserEvaluatorLaunch } from "./evaluator-runner.ts";
 import { assertTrustedBrowserAttachment } from "./attachments.ts";
-import { assertTrustedArtifactPng, buildBrowserHostLaunch, createIsolatedBrowserRuntime } from "./isolated.ts";
+import { assertTrustedArtifactPng, buildBrowserHostLaunch, createIsolatedBrowserRuntime, obscuraLaunch } from "./isolated.ts";
 import { browserHostSettings, type BrowserHostSettings } from "./runtime.ts";
 import { laneStorageQuotaMib, MIN_LANE_STORAGE_BYTES, resolveLaneStorageBytes } from "./storage-quota.ts";
 
@@ -54,6 +54,54 @@ function fixturePaths(): {
     },
   };
 }
+
+/** bwrap arguments are positional: a flag only means anything with its own operands. */
+function hasTriple(command: string[], triple: [string, string, string]): boolean {
+  return command.some((value, index) =>
+    value === triple[0] && command[index + 1] === triple[1] && command[index + 2] === triple[2]);
+}
+
+describe("obscura launch gating", () => {
+  test("an existing platform binary yields an explicit root and a mount", () => {
+    const root = "/host/.betterwright/obscura";
+    expect(obscuraLaunch({
+      obscuraRoot: root,
+      platform: "linux",
+      arch: "x64",
+      exists: (path) => path === join(root, "linux-x64", "obscura"),
+    })).toEqual({ env: { BETTERWRIGHT_OBSCURA_ROOT: root }, mountRoot: root });
+  });
+
+  test("a missing binary yields nothing, so betterwright falls back to the compatibility backend", () => {
+    expect(obscuraLaunch({
+      obscuraRoot: "/host/.betterwright/obscura",
+      platform: "linux",
+      arch: "x64",
+      exists: () => false,
+    })).toEqual({ env: {}, mountRoot: null });
+  });
+
+  test("a root of \"off\" keeps the pre-1.7 pin as an operator kill switch", () => {
+    for (const value of ["off", "OFF", " off "]) {
+      expect(obscuraLaunch({ obscuraRoot: value, platform: "linux", arch: "x64", exists: () => true }))
+        .toEqual({ env: { BETTERWRIGHT_OBSCURA_PATH: "off" }, mountRoot: null });
+    }
+  });
+
+  test("win32 probes obscura.exe", () => {
+    const probed: string[] = [];
+    obscuraLaunch({
+      obscuraRoot: "C:\\obscura",
+      platform: "win32",
+      arch: "x64",
+      exists: (path) => {
+        probed.push(path);
+        return false;
+      },
+    });
+    expect(probed).toEqual([join("C:\\obscura", "win32-x64", "obscura.exe")]);
+  });
+});
 
 describe("browser host sandbox policy", () => {
   test("Linux uses bubblewrap with only the current profile and artifacts writable", () => {
@@ -138,6 +186,66 @@ describe("browser host sandbox policy", () => {
       expect(readOnly).toContain(join(shimDir, "dist", "index.js"));
       expect(launch.command).toContain("--unshare-all");
       expect(launch.command).toContain("--cap-drop");
+    } finally {
+      rmSync(fixture.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an installed Obscura engine is bound read-only and pointed at by an explicit root", () => {
+    const fixture = fixturePaths();
+    const obscuraRoot = join(fixture.dir, "obscura-root");
+    mkdirSync(join(obscuraRoot, `linux-${process.arch}`), { recursive: true });
+    writeFileSync(join(obscuraRoot, `linux-${process.arch}`, "obscura"), "fixture");
+    try {
+      const launch = buildBrowserHostLaunch({
+        settings: fixture.settings,
+        platform: "linux",
+        sandbox: "auto",
+        execPath: process.execPath,
+        nodePath: fixture.node,
+        hostPath: fixture.host,
+        chromiumExecutable: fixture.browser,
+        obscuraRoot,
+        repoRoot: resolve(import.meta.dir, "../.."),
+        bwrapPath: "/usr/bin/bwrap",
+        prlimitPath: fixture.prlimit,
+        backend: "betterwright",
+        parentEnv: { PATH: "/usr/bin:/bin" },
+      });
+      expect(hasTriple(launch.command, ["--setenv", "BETTERWRIGHT_OBSCURA_ROOT", obscuraRoot])).toBe(true);
+      expect(hasTriple(launch.command, ["--ro-bind", obscuraRoot, obscuraRoot])).toBe(true);
+      // The kill-switch pin is gone: an installed engine is used, not disabled.
+      expect(launch.command).not.toContain("BETTERWRIGHT_OBSCURA_PATH");
+      const writable = launch.command.flatMap((value, index, all) => (value === "--bind" ? [all[index + 1]] : []));
+      expect(writable).not.toContain(obscuraRoot);
+    } finally {
+      rmSync(fixture.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a missing Obscura install sets no override, leaving betterwright's compatibility fallback", () => {
+    const fixture = fixturePaths();
+    const obscuraRoot = join(fixture.dir, "no-obscura-here");
+    try {
+      const launch = buildBrowserHostLaunch({
+        settings: fixture.settings,
+        platform: "linux",
+        sandbox: "auto",
+        execPath: process.execPath,
+        nodePath: fixture.node,
+        hostPath: fixture.host,
+        chromiumExecutable: fixture.browser,
+        obscuraRoot,
+        repoRoot: resolve(import.meta.dir, "../.."),
+        bwrapPath: "/usr/bin/bwrap",
+        prlimitPath: fixture.prlimit,
+        backend: "betterwright",
+        parentEnv: { PATH: "/usr/bin:/bin" },
+      });
+      // An explicit root betterwright cannot resolve would throw upstream, so we set none.
+      expect(launch.command).not.toContain("BETTERWRIGHT_OBSCURA_ROOT");
+      expect(launch.command).not.toContain("BETTERWRIGHT_OBSCURA_PATH");
+      expect(launch.command).not.toContain(obscuraRoot);
     } finally {
       rmSync(fixture.dir, { recursive: true, force: true });
     }

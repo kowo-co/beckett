@@ -95,6 +95,11 @@ export interface BrowserRunInspection {
   journal: BrowserJournalEvent[];
   /** Fresh screenshot of the live page, when the run still holds the browser lease. */
   screenshot: string | null;
+  /**
+   * Live-view capability URL while the run is live and live view is enabled; null otherwise.
+   * Optional so existing BrowserAgent fakes stay structurally valid; inspect always sets it.
+   */
+  liveViewUrl?: string | null;
 }
 
 export interface BrowserAgent {
@@ -1036,11 +1041,21 @@ export function createBrowserAgent(deps: CreateBrowserAgentDeps): BrowserAgent {
       let screenshot: string | null = null;
       // A fresh screenshot needs the lease; a parked or between-legs run can always serve one,
       // and a capture racing the agent's own eval just queues behind it in the worker.
-      if (opts?.screenshot !== false && entry && browser.hasLease(runId)) {
+      const liveEligible = opts?.screenshot !== false && Boolean(entry) && browser.hasLease(runId);
+      if (liveEligible) {
         try {
           screenshot = await browser.capture(runId, "watch");
         } catch (error) {
           logger.warn("browser watch screenshot failed", { runId, error: String(error) });
+        }
+      }
+      let liveViewUrl: string | null = null;
+      if (liveEligible && browser.liveView) {
+        try {
+          liveViewUrl = (await browser.liveView(runId, "start")).url;
+        } catch (error) {
+          // Fail-open: live view is a bonus on top of the screenshot flow.
+          logger.warn("browser watch live view failed", { runId, error: String(error) });
         }
       }
       return {
@@ -1057,6 +1072,7 @@ export function createBrowserAgent(deps: CreateBrowserAgentDeps): BrowserAgent {
         },
         journal: readJournal(runId, opts?.tail ?? 20, sensitiveInputs),
         screenshot,
+        liveViewUrl,
       };
     },
 
