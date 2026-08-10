@@ -2,12 +2,12 @@ import { afterEach, expect, test } from "bun:test";
 import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { appendSpendRecord, formatWeeklyBill, parseSince, readSpendLedger, spendForTicket, summarizeSpend, summarizeSpendByTicket, summarizeSpendWindows } from "./spend.ts";
+import { appendSpendRecord, FREE_TIME_SPEND_TICKET_ID, formatWeeklyBill, isAttempt, parseSince, readSpendLedger, spendForTicket, summarizeSpend, summarizeSpendByTicket, summarizeSpendWindows, type SpendRecord } from "./spend.ts";
 
 const dirs: string[] = [];
 afterEach(() => dirs.splice(0).forEach((dir) => rmSync(dir, { recursive: true, force: true })));
 
-function row(overrides = {}) {
+function row(overrides: Partial<SpendRecord> = {}): SpendRecord {
   return {
     ticketId: "OPS-123", project: "beckett", stage: "implement" as const,
     harness: "pi", model: "gpt-test", effort: "medium", turns: 2, toolCalls: 3,
@@ -92,4 +92,57 @@ test("formatWeeklyBill renders per-task totals, honoring the window (#77)", () =
 
 test("formatWeeklyBill reports an empty ledger without throwing (#77)", () => {
   expect(formatWeeklyBill([])).toContain("no worker spend recorded");
+});
+
+// ── the free-time lane (docs/freetime.md) ──────────────────────────────────────────────
+
+test("the row guard accepts the free-time stage and still rejects a stage it does not know", () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-spend-")); dirs.push(dir);
+  const path = join(dir, "spend.jsonl");
+  appendSpendRecord(path, row({ ticketId: FREE_TIME_SPEND_TICKET_ID, project: null, stage: "free-time", sessionId: "2026-08-09-deadbeef" }));
+  // Garbage in the stage column is dropped on read, exactly as a truncated line is: a widened
+  // union is still a closed one.
+  appendFileSync(path, `\n${JSON.stringify({ ...row(), stage: "deploy" })}\n`);
+  appendFileSync(path, `\n${JSON.stringify({ ...row(), stage: 7 })}\n`);
+  appendFileSync(path, `\n${JSON.stringify({ ...row(), stage: undefined })}\n`);
+  const rows = readSpendLedger(path);
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toMatchObject({ stage: "free-time", sessionId: "2026-08-09-deadbeef" });
+});
+
+test("a free-time run is not an attempt at anything — only launch failures share that (#159)", () => {
+  expect(isAttempt(row())).toBe(true);
+  expect(isAttempt(row({ outcome: "failed" }))).toBe(true);
+  expect(isAttempt(row({ outcome: "launch_failed" }))).toBe(false);
+  // Nothing was owed and nothing reviewed it, so it is not a run any cast should be scored on.
+  expect(isAttempt(row({ stage: "free-time", outcome: "done" }))).toBe(false);
+});
+
+test("a free-time row rolls up as its own stage and one honest line on the weekly bill", () => {
+  const now = Date.parse("2026-07-10T12:00:00.000Z");
+  const freeTime = (over: Partial<SpendRecord> = {}) =>
+    row({ ticketId: FREE_TIME_SPEND_TICKET_ID, project: null, stage: "free-time",
+      harness: "claude", turns: 0, toolCalls: 0, tokensIn: 0, tokensOut: 900, costUsd: null,
+      ts: "2026-07-09T12:00:00.000Z", ...over });
+  const rows = [
+    row({ ticketId: "OPS-1", project: "alpha", costUsd: 2, ts: "2026-07-09T12:00:00.000Z" }),
+    freeTime(),
+    freeTime({ ts: "2026-07-08T12:00:00.000Z", tokensOut: 100 }),
+  ];
+
+  const summary = summarizeSpend(rows, { since: "7d", now });
+  expect(summary.byStage.map((s) => s.name)).toEqual(["free-time", "implement"]);
+  expect(summary.byStage.find((s) => s.name === "free-time")).toMatchObject({ records: 2, tokensOut: 1000, costUsd: null, unknownCostRecords: 2 });
+  // A lane with no ticket has no project either; it lands in the same bucket every unattributed
+  // row does rather than inventing one.
+  expect(summary.byProject.map((p) => p.name)).toEqual(["(unknown)", "alpha"]);
+
+  // The per-task rollup collapses every session onto the sentinel: one line, two runs, no cost.
+  const byTicket = summarizeSpendByTicket(rows, { since: "7d", now });
+  expect(byTicket.map((t) => t.ticketId)).toEqual(["OPS-1", "free-time"]);
+  expect(byTicket.find((t) => t.ticketId === "free-time")).toMatchObject({ records: 2, costUsd: null, project: null, unknownCostRecords: 2 });
+
+  const bill = formatWeeklyBill(rows, { now, since: "7d" });
+  expect(bill).toContain("**free-time** — — · 2 run(s) · 2 run(s) w/o cost data");
+  expect(bill).toContain("$2.00"); // the unpriced sessions do not pretend to be $0 in the total
 });

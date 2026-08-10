@@ -15,6 +15,7 @@ import type { Config, Logger, Paths } from "../types.ts";
 import { createMemory } from "../memory/index.ts";
 import { SELF_AUDIENCE } from "../memory/search.ts";
 import { localDate } from "../dream/run.ts";
+import { isAttempt, readSpendLedger } from "../spend.ts";
 import {
   FREE_TIME_DENIED_PERMISSIONS,
   buildFreeTimePrompt,
@@ -367,6 +368,7 @@ test("--dry assembles the prompt and stops: no harness, no entry, no share", asy
   expect(outcome.entryPath).toBeNull();
   expect(outcome.prompt).toContain("this time is yours");
   expect(listFreeTimeEntries(join(w.paths.beckettDir, "free-time"))).toHaveLength(0);
+  expect(readSpendLedger(w.paths.spend)).toEqual([]);
 });
 
 test("a zero ceiling means the session never launches, and says so on disk", async () => {
@@ -388,4 +390,77 @@ test("a zero ceiling means the session never launches, and says so on disk", asy
   expect(outcome.ran).toBe(false);
   expect(outcome.note ?? "").toContain("ceiling");
   expect(readFileSync(outcome.entryPath!, "utf8")).toContain("ran: false");
+  // Nothing spawned, so nothing is billed: a $0 row for a session that never existed would be
+  // noise in the ledger, not visibility.
+  expect(readSpendLedger(w.paths.spend)).toEqual([]);
+});
+
+// ── the spend ledger (docs/freetime.md) ────────────────────────────────────────────────
+
+test("a session lands on the spend ledger as its own stage — real output tokens, no invented cost", async () => {
+  const w = world();
+  const outcome = await runFreeTime({
+    config: w.config,
+    paths: w.paths,
+    logger: quiet,
+    now: () => NOW,
+    memory: null,
+    callHarness: async () => ({ text: "read some code", outputTokens: 1_234 }),
+  });
+
+  const rows = readSpendLedger(w.paths.spend);
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toMatchObject({
+    ticketId: "free-time",
+    project: null,
+    stage: "free-time",
+    harness: "claude",
+    model: w.config.concierge.model, // the free_time dial is empty by default
+    tokensOut: 1_234,
+    // Nothing upstream carries these, and a visible zero beats an invented number.
+    tokensIn: 0, turns: 0, toolCalls: 0,
+    // Repricing belongs to the telemetry harvest and its rate table; there is no second path.
+    costUsd: null,
+    outcome: "done",
+    sessionId: outcome.id, // the trace back to the journal entry
+  });
+  // It is on the ledger, but it is not a run any cast is scored on.
+  expect(isAttempt(rows[0]!)).toBe(false);
+});
+
+test("a killed session is `cancelled` and a dead one `failed` — never `launch_failed`", async () => {
+  const w = world();
+  const base = { config: w.config, paths: w.paths, logger: quiet, now: () => NOW, memory: null };
+  await runFreeTime({ ...base, callHarness: async () => { throw new Error("free-time session timed out after 1800s"); } });
+  await runFreeTime({ ...base, callHarness: async () => { throw new Error("free-time session exited 1: boom"); } });
+
+  // `launch_failed` asserts zero tokens AND zero tool calls; a `claude -p` that threw leaves this
+  // runner no usage frame to prove that with, so it never claims it.
+  expect(readSpendLedger(w.paths.spend).map((r) => r.outcome)).toEqual(["cancelled", "failed"]);
+});
+
+test("a ledger that cannot be written costs a log line, never the session", async () => {
+  const w = world();
+  // The ledger's parent is a FILE, so even the mkdir ahead of the append fails.
+  const blocker = join(w.dir, "blocker");
+  writeFileSync(blocker, "not a directory");
+  const warned: string[] = [];
+  const noisy = { ...quiet, warn: (msg: string) => void warned.push(msg) } as unknown as Logger;
+
+  const outcome = await runFreeTime({
+    config: w.config,
+    paths: { ...w.paths, spend: join(blocker, "spend.jsonl") },
+    logger: noisy,
+    now: () => NOW,
+    memory: null,
+    callHarness: async (_prompt, opts) => {
+      writeFileSync(join(opts.cwd, "writeback.json"), JSON.stringify({ did: ["kept going"] }));
+      return { text: "", outputTokens: 5 };
+    },
+  });
+
+  expect(outcome.ran).toBe(true);
+  expect(outcome.did).toEqual(["kept going"]);
+  expect(outcome.entryPath).not.toBeNull();
+  expect(warned.join(" ")).toContain("spend ledger append failed");
 });

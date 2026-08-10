@@ -5,9 +5,10 @@
  * lane's dispatch fork (see {@link ../capability/modules/routines.ts}) as its own
  * `beckett free-time run` process; inside, a model with tools gets a scratch directory, a turn
  * cap, a token ceiling, and no deliverable owed to anyone. What survives the session is a dated
- * journal entry and, at most a handful, create-only `free-time` memories — which are read back
- * as the SEED of the next session. The continuity is the feature: without the writeback this is
- * a model burning tokens in a temp dir, and with it, it is something that goes somewhere.
+ * journal entry, one row on the spend ledger (its own `free-time` stage, so what this costs is
+ * answerable from `beckett spend`), and, at most a handful, create-only `free-time` memories —
+ * which are read back as the SEED of the next session. The continuity is the feature: without the
+ * writeback this is a model burning tokens in a temp dir, and with it, it goes somewhere.
  *
  * The walls, all structural, all outside the session's reach:
  *
@@ -46,6 +47,7 @@ import { renderClaudeSettings } from "../hooks/registry.ts";
 import { scopeGuardSpec } from "../hooks/scope-guard.ts";
 import { SPIKE_DENIED_PERMISSIONS } from "../dream/spike.ts";
 import { localDate, parseModelResult } from "../dream/run.ts";
+import { appendSpendRecord, FREE_TIME_SPEND_TICKET_ID, type SpendOutcome } from "../spend.ts";
 
 export { freeTimeDeferReason, type FreeTimeBusySignals } from "./gate.ts";
 
@@ -227,6 +229,9 @@ export async function runFreeTime(deps: FreeTimeRunDeps): Promise<FreeTimeRunOut
 
   // The ceiling is checked BEFORE the call, dream-style: a session that cannot fit inside its
   // budget does not launch at all, and says so, instead of starting something it must abandon.
+  // No spend row is written on this path (nor on `--dry`): nothing spawned, nothing was billed,
+  // and a $0 row for a session that never existed is noise in the ledger, not visibility. It is
+  // NOT `launch_failed` either — that outcome is about a harness that launched and did no work.
   if (cfg.output_token_budget <= 0) {
     outcome.note = `no free time: the output-token ceiling is ${cfg.output_token_budget}`;
     outcome.entryPath = writeFreeTimeEntry(rootDir, id, composeFreeTimeEntry(outcome, deps.routineId ?? "manual"));
@@ -250,7 +255,9 @@ export async function runFreeTime(deps: FreeTimeRunDeps): Promise<FreeTimeRunOut
   );
 
   const call = deps.callHarness ?? defaultFreeTimeHarnessCall(config, logger);
+  const startedAt = Date.now();
   let harnessText = "";
+  let spendOutcome: SpendOutcome = "done";
   try {
     const result = await call(outcome.prompt, { cwd: scratchDir, settingsPath });
     outcome.ran = true;
@@ -261,8 +268,21 @@ export async function runFreeTime(deps: FreeTimeRunDeps): Promise<FreeTimeRunOut
     const message = String(err);
     outcome.timedOut = /timed out/i.test(message);
     outcome.note = `the session ended early: ${message}`;
+    // A wall-clock kill is a stop THIS code imposed on a session that was working, which is what
+    // `cancelled` means everywhere else in the ledger (a parked/cancelled ticket's live worker).
+    // Anything else is a session that launched and died: `failed`. Never `launch_failed` — that
+    // outcome asserts zero tool calls and zero tokens, and a `claude -p` that threw gives this
+    // runner no usage frame to prove it with, so claiming it would be a guess dressed as data.
+    spendOutcome = outcome.timedOut ? "cancelled" : "failed";
     logger.warn("free-time: session failed", { id, error: message });
   }
+  recordFreeTimeSpend(deps, {
+    id,
+    model: freeTimeModel(config),
+    outputTokens: outcome.outputTokens,
+    durationMs: Math.max(0, Date.now() - startedAt),
+    outcome: spendOutcome,
+  });
 
   // The writeback, fail-closed. A session that wrote nothing readable still gets an entry — the
   // absence IS the finding, and it is cheaper to read than a fabricated summary.
@@ -332,6 +352,64 @@ export async function runFreeTime(deps: FreeTimeRunDeps): Promise<FreeTimeRunOut
     shared: Boolean(outcome.shared),
   });
   return outcome;
+}
+
+// ── the ledger ─────────────────────────────────────────────────────────────────────────
+
+/** The model a session runs on: its own dial, or Beckett's default voice when that is unset. */
+export function freeTimeModel(config: Config): string {
+  return config.free_time.model.trim() || config.concierge.model;
+}
+
+/**
+ * Put one finished session on the spend ledger, through the same `appendSpendRecord` seam the
+ * dispatcher writes worker stages with — so `beckett spend` answers "what did free time cost"
+ * instead of the journal entries having to (docs/freetime.md).
+ *
+ * What this row honestly cannot say, it says as absence rather than as a number:
+ *
+ *   - `costUsd` is **null**. Pricing a row means the rate table in `config/model-rates.json`, and
+ *     the telemetry harvest ({@link ../telemetry/harvest.ts}) owns that lookup end to end. A
+ *     second pricing path here is how two numbers for the same session start disagreeing; the
+ *     harvest reprices from the transcript, and `unknownCostRecords` shows the gap meanwhile.
+ *   - `tokensIn`, `turns`, `toolCalls` are **0**. The free-time harness call returns final text
+ *     and output tokens; nothing upstream carries input tokens or a turn count, and inventing
+ *     them would be worse than a zero a reader can see through.
+ *
+ * Failure is swallowed the way the dispatcher swallows it: the ledger is observability, and a
+ * full disk must never cost a session that already ran.
+ */
+function recordFreeTimeSpend(
+  deps: FreeTimeRunDeps,
+  run: { id: string; model: string; outputTokens: number; durationMs: number; outcome: SpendOutcome },
+): void {
+  try {
+    appendSpendRecord(deps.paths.spend, {
+      // No ticket: free time is the one lane nobody filed. The sentinel keeps the per-task
+      // rollups grouping on a stable, honest name instead of a blank or a fabricated id.
+      ticketId: FREE_TIME_SPEND_TICKET_ID,
+      project: null,
+      stage: "free-time",
+      harness: "claude",
+      model: run.model,
+      // No cast behind this session, so there is no effort dial to report.
+      effort: "",
+      turns: 0,
+      toolCalls: 0,
+      tokensIn: 0,
+      tokensOut: run.outputTokens,
+      costUsd: null,
+      durationMs: run.durationMs,
+      outcome: run.outcome,
+      // `self` is the ledger's way of saying no fresh pair of eyes looked at the work, which is
+      // exactly true here: free time is the one lane nothing reviews.
+      reviewTier: "self",
+      ts: new Date().toISOString(),
+      sessionId: run.id,
+    });
+  } catch (err) {
+    deps.logger.warn("free-time: spend ledger append failed", { id: run.id, error: String(err) });
+  }
 }
 
 // ── the prompt ─────────────────────────────────────────────────────────────────────────
@@ -651,7 +729,7 @@ function defaultMemory(paths: Paths, logger: Logger): MemoryStore | null {
 export function defaultFreeTimeHarnessCall(config: Config, logger: Logger): FreeTimeHarnessCall {
   const cfg = config.free_time;
   const bin = config.harness.claude.bin;
-  const model = cfg.model.trim() || config.concierge.model;
+  const model = freeTimeModel(config);
   const timeoutMs = cfg.hard_timeout_s * 1_000;
   return async (prompt, opts) => {
     const proc = Bun.spawn(
