@@ -1,0 +1,7 @@
+{
+  "id": "fix-bug",
+  "prompt": "This repo has a failing test suite. Run `bun test`, find the bug in stats.ts, and fix it. Do not modify stats.test.ts. When `bun test` passes, you are done.",
+  "model": "",
+  "effort": "low",
+  "timeout_s": 600
+}

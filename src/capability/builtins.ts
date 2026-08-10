@@ -24,6 +24,7 @@
 import { isAbsolute, resolve } from "node:path";
 import { z } from "zod";
 import type { Config } from "../types.ts";
+import { HHMM, WEEKDAYS } from "../routine/types.ts";
 import { ActionClass, CapabilityRegistry, type Capability } from "./index.ts";
 
 // =======================================================================================
@@ -342,6 +343,20 @@ export const configFragments = {
       // work instead of the whole session. Best-effort and side-effect-free beyond the worktree
       // (never touches the tracker / the advance- or publish-outbox). 0 disables periodic checkpointing.
       worker_checkpoint_s: nonNegInt.default(120),
+      // Runtime-awareness threshold (seconds) for the per-worker PostToolUse hook
+      // (src/hooks/runtime-awareness.ts): a tool call that runs at least this long gets a
+      // one-line additionalContext notice injected so the model can route around slow
+      // operations (faster alternative / background it). 0 disables the hook entirely.
+      worker_slow_tool_s: nonNegInt.default(30),
+      // Worker browser home. false (default): every worker gets its own cold BETTERWRIGHT_HOME
+      // under its git-excluded scaffolding — no credential vault, cookie jar, or config is
+      // shared with any other worker, and a login one worker saved cannot autofill in another.
+      // true: one shared home at <beckettDir>/worker-browser with a per-workspace
+      // BETTERWRIGHT_PROFILE — warm session daemon, shared browser-binary cache and artifacts,
+      // separate cookie jars — but betterwright's vault is home-scoped, so a credential saved
+      // once (typed-login capture is on by default) fills in EVERY worker's profile. Turn it on
+      // only when every worker is trusted with every stored credential.
+      worker_browser_shared_home: z.boolean().default(false),
       // Staffing watchdog grace (issue #9): a ticket that is in a staffable/running state
       // (in_progress / in_review / design) but has NO live worker, mid-spawn reservation, queued
       // spawn, or scheduled retry for this many seconds is silently wedged — the reconciliation
@@ -534,9 +549,22 @@ export const configFragments = {
       browser_eval_timeout_ms: posInt.default(60_000),
       browser_max_output_chars: browserOutputChars.default(24_000),
       browser_question_wait_secs: posInt.default(3_600),
+      // Extra Chromium switches appended to BetterWright's managed launch args (betterwright
+      // 1.7.1 chromiumArgs). Defaults disable GPU/software-raster churn on a headless GPU-less
+      // server. Switches BetterWright owns (proxy, --headless, --fingerprint*, …) are rejected
+      // by the library at launch; duplicates are dropped and reported in run warnings.
+      browser_chromium_args: z.array(z.string().min(1)).default(["--disable-gpu", "--disable-software-rasterizer"]),
+      // Quiet each session's pages between executions (pause page script/animations while the
+      // model thinks). BetterWright's own default is true; kept explicit and configurable here.
+      browser_park_background_pages: z.boolean().default(true),
       // Default roots are the run artifacts plus paths.imagesDir. This opt-in list
       // can widen attachment reads, including '/' for deliberately broad access.
       browser_attach_roots: z.array(browserAttachmentRoot).default([]),
+      // Live-view exposure for watched browser runs. "tailscale" (default) binds only
+      // this machine's tailnet address — usable from the owner's devices, invisible to
+      // the LAN. "off" disables watch-time live view entirely; any live-view failure
+      // (e.g. tailscale down) degrades to screenshot-only.
+      browser_live_view_expose: z.enum(["off", "local", "lan", "tailscale"]).default("tailscale"),
     })
     .strict()
     .default({}),
@@ -589,6 +617,44 @@ export const configFragments = {
     })
     .strict()
     .default({}),
+  // Zero-token progress cards (docs/token-efficiency.md fix #1, v0 increment): the daemon posts
+  // and edits ONE Discord status message per active ticket in the ticket's origin channel,
+  // driven directly by dispatch events — no model turn involved. OFF by default: flag off is
+  // byte-identical current behavior (no card writer constructed, no channel stamped on events).
+  progress: z
+    .object({
+      cards_as_code: z.boolean().default(false),
+    })
+    .strict()
+    .default({}),
+  // Free time (docs/freetime.md): one weekly, budgeted, unprompted session inside a scratch
+  // directory, with structured memory writeback seeding the next one. Every value here is a WALL
+  // the session runs INSIDE — the session's process has no write path back to this file, so it
+  // can neither widen its own budget nor re-arm its own trigger.
+  free_time: z
+    .object({
+      enabled: z.boolean().default(true),
+      // Seed values for the builtin routine's schedule. The routine store owns the timing once
+      // seeded (`beckett routine inspect weekly-free-time`), so editing these later retimes a
+      // FRESH install, not a running one — that is what `beckett routine` is for.
+      weekday: z
+        .string()
+        .refine((w) => (WEEKDAYS as readonly string[]).includes(w), `weekday must be one of: ${WEEKDAYS.join(", ")}`)
+        .default("sunday"),
+      window_start: HHMM.default("02:00"),
+      window_end: HHMM.default("05:00"),
+      tz: z.string().min(1).default("America/Los_Angeles"),
+      model: z.string().default("claude-sonnet-5"),
+      max_turns: posInt.default(60),
+      hard_timeout_s: posInt.default(1_800),
+      output_token_budget: posInt.default(80_000),
+      memories_per_session_max: posInt.default(5),
+      // Empty = no message. A session that wants to say something with no channel configured
+      // says it in its journal entry instead; nothing is queued for later.
+      channel_id: z.string().default(""),
+    })
+    .strict()
+    .default({}),
 } satisfies { [K in keyof Config]: z.ZodType<Config[K], z.ZodTypeDef, unknown> };
 
 // =======================================================================================
@@ -619,6 +685,8 @@ const BUILTIN_CAPABILITY_INFO: {
   announce: { id: "announce", summary: "Restart changelog announcements." },
   federation: { id: "federation", summary: "Peer-Beckett federation over Discord." },
   dream: { id: "dream", summary: "Nightly dream pass: token ceiling + model for the self-lane day replay." },
+  progress: { id: "progress", summary: "Zero-token per-ticket progress cards: code-edited Discord status messages." },
+  free_time: { id: "free-time", summary: "Weekly self-directed session: trigger, walls, token ceiling, share channel." },
 };
 
 /**

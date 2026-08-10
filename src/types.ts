@@ -806,6 +806,16 @@ export interface Config {
      *  crash loses at most one window of on-disk WIP, not the whole session. 0 disables. Default
      *  120 (OPS-125). */
     worker_checkpoint_s: number;
+    /** Runtime-awareness threshold (s): a worker tool call running at least this long gets a
+     *  PostToolUse additionalContext notice so the model can route around slow operations.
+     *  0 disables the hook. Default 30. */
+    worker_slow_tool_s: number;
+    /** Worker browser home. false (default): a cold private BETTERWRIGHT_HOME per worker, so no
+     *  credential vault, cookie jar, or config crosses between workers. true: one shared home at
+     *  `<beckettDir>/worker-browser` with a per-workspace `BETTERWRIGHT_PROFILE` — warm daemon,
+     *  shared binary cache/artifacts, separate cookie jars — but the vault is home-scoped, so any
+     *  credential one worker saves autofills in all of them. */
+    worker_browser_shared_home: boolean;
     /** Staffing-watchdog grace (s): a ticket in a staffable state with no live worker, mid-spawn
      *  reservation, queued spawn, or scheduled retry for this long is re-staffed once (logged),
      *  then parked in todo with a comment if that also fails. 0 disables. Default 120 (issue #9). */
@@ -1011,8 +1021,14 @@ export interface Config {
     browser_max_output_chars: number;
     /** How long a screenshot-backed user question may remain parked before expiring. */
     browser_question_wait_secs: number;
+    /** Extra Chromium switches appended to BetterWright's managed launch args. */
+    browser_chromium_args: string[];
+    /** Quiet each session's pages between executions (betterwright default is also true). */
+    browser_park_background_pages: boolean;
     /** Extra absolute roots whose validated media files a browser run may attach. */
     browser_attach_roots: string[];
+    /** Live-view exposure preset for watched runs; "off" disables watch-time live view. */
+    browser_live_view_expose: "off" | "local" | "lan" | "tailscale";
   };
   /**
    * Restart "what's new" announcement — instance-specific, OFF by default (empty channel), so a
@@ -1064,6 +1080,41 @@ export interface Config {
     /** Repo the spike's throwaway worktree is cut from. Empty = `<projects>/beckett`
      *  (Beckett's own project checkout — the loops a dream can pair are Beckett's own). */
     spike_repo: string;
+  };
+  /** Zero-token progress cards: CODE posts/edits one status message per active ticket in the
+   *  ticket's origin channel, driven by dispatch events — no model turn. Default off. */
+  progress: {
+    cards_as_code: boolean;
+  };
+  /**
+   * Free time (docs/freetime.md): one weekly, budgeted, unprompted session in a scratch
+   * directory, with structured memory writeback seeding the next one. Every number here is a
+   * WALL, not a dial the session can reach: the session runs as its own process and has no
+   * write path to this file.
+   */
+  free_time: {
+    /** The human off-switch. False = the routine's fire is refused before anything spawns. */
+    enabled: boolean;
+    /** Weekday the builtin routine is SEEDED on (one of `WEEKDAYS`, `src/routine/types.ts`);
+     *  after the seed, the routine store owns the timing and `beckett routine` edits it. */
+    weekday: string;
+    /** Fuzz window the seeded routine's fire time is rolled inside (24h HH:MM, local to `tz`). */
+    window_start: string;
+    window_end: string;
+    /** IANA tz for that window. Matches the other weekly builtins' home timezone. */
+    tz: string;
+    /** Model the session runs on. A session is Beckett with time, not a specialist. */
+    model: string;
+    /** Turn cap on the one harness call. */
+    max_turns: number;
+    /** Wall-clock cap on the one harness call, in seconds. A wedged child is killed, not waited on. */
+    hard_timeout_s: number;
+    /** Hard ceiling on model OUTPUT tokens per session. A session that cannot fit does not launch. */
+    output_token_budget: number;
+    /** Most durable memories one session may write. Over-cap entries are dropped and counted. */
+    memories_per_session_max: number;
+    /** Channel the optional one-line share posts to. Empty = the session says nothing to anyone. */
+    channel_id: string;
   };
 }
 

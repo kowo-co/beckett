@@ -18,6 +18,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { buildPaths } from "../paths.ts";
 import { childEnv } from "../env.ts";
 import type { Config, Logger } from "../types.ts";
+import { MAX_BROWSER_EVAL_CALL_TIMEOUT_MS } from "./runtime.ts";
 import type { BrowserRuntime } from "./runtime.ts";
 import type { KeychainEntrySecrets, KeychainReader } from "../secret/keychain-read.ts";
 
@@ -94,6 +95,12 @@ export interface BrowserRunInspection {
   journal: BrowserJournalEvent[];
   /** Fresh screenshot of the live page, when the run still holds the browser lease. */
   screenshot: string | null;
+  /**
+   * Live-view capability URL when the watcher asked for it (`opts.live`) and the run is live
+   * with live view enabled; null otherwise.
+   * Optional so existing BrowserAgent fakes stay structurally valid; inspect always sets it.
+   */
+  liveViewUrl?: string | null;
 }
 
 export interface BrowserAgent {
@@ -124,8 +131,16 @@ export interface BrowserAgent {
   drainSteers(runId: string): string[];
   /** Journal one browser evaluation (called by the daemon's browser.eval boundary). */
   recordEval(runId: string, record: BrowserEvalRecord): void;
-  /** A run's state, redacted journal tail, and (live) a fresh screenshot — for `browser watch`. */
-  inspect(runId: string, opts?: { tail?: number; screenshot?: boolean }): Promise<BrowserRunInspection | null>;
+  /**
+   * A run's state, redacted journal tail, and (live) a fresh screenshot — for `browser watch`.
+   * `live` opts INTO the live view: starting it costs a serial launch attempt (up to the
+   * launch timeout when the expose interface is down) and permanently promotes the session to
+   * a resident streaming browser, so a plain watch never pays for it.
+   */
+  inspect(
+    runId: string,
+    opts?: { tail?: number; screenshot?: boolean; live?: boolean },
+  ): Promise<BrowserRunInspection | null>;
   /**
    * Resolve the `secrets` values for one evaluation of a live run: the entry's static fields
    * plus a freshly minted `totp` code when the entry stores a seed. Returns null when the run
@@ -343,6 +358,12 @@ export function createBrowserAgent(deps: CreateBrowserAgentDeps): BrowserAgent {
   const starting = new Map<string, PendingDispatch>();
   /** Runs a dead daemon left on disk; {@link recover} turns them into restart-cancellation outcomes. */
   const orphans: BrowserAgentRun[] = [];
+  /**
+   * Runs whose live-view start already failed once. A down expose interface (no tailscale) costs
+   * a full serial launch attempt per try, so the first failure is remembered for the rest of the
+   * run's life and cleared when its lease is released in {@link finalize}.
+   */
+  const liveViewFailures = new Set<string>();
   let outcomeRetryTimer: ReturnType<typeof setTimeout> | null = null;
   let queueRetryTimer: ReturnType<typeof setTimeout> | null = null;
   let stopping = false;
@@ -491,6 +512,7 @@ export function createBrowserAgent(deps: CreateBrowserAgentDeps): BrowserAgent {
         logger.warn("browser lease release failed", { runId: run.runId, error: String(error) });
       }
     }
+    liveViewFailures.delete(run.runId);
     if (state === "done" && captureProof && run.proofFiles.length === 0) {
       run.state = "error";
       run.result = `${run.result}\n\nThe page reported success, but Beckett could not capture completion proof. Treat the outcome as unverified.`;
@@ -688,7 +710,7 @@ export function createBrowserAgent(deps: CreateBrowserAgentDeps): BrowserAgent {
     // isn't dropped under `--strict-mcp-config` when a busy host slows the cold bun import.
     if (!env.MCP_TIMEOUT) env.MCP_TIMEOUT = String(MCP_STARTUP_TIMEOUT_MS);
     if (!env.MCP_TOOL_TIMEOUT) {
-      env.MCP_TOOL_TIMEOUT = String(config.quick.browser_eval_timeout_ms + 60_000);
+      env.MCP_TOOL_TIMEOUT = String(Math.max(config.quick.browser_eval_timeout_ms, MAX_BROWSER_EVAL_CALL_TIMEOUT_MS) + 60_000);
     }
     return env;
   }
@@ -1035,11 +1057,25 @@ export function createBrowserAgent(deps: CreateBrowserAgentDeps): BrowserAgent {
       let screenshot: string | null = null;
       // A fresh screenshot needs the lease; a parked or between-legs run can always serve one,
       // and a capture racing the agent's own eval just queues behind it in the worker.
-      if (opts?.screenshot !== false && entry && browser.hasLease(runId)) {
+      const liveEligible = opts?.screenshot !== false && Boolean(entry) && browser.hasLease(runId);
+      if (liveEligible) {
         try {
           screenshot = await browser.capture(runId, "watch");
         } catch (error) {
           logger.warn("browser watch screenshot failed", { runId, error: String(error) });
+        }
+      }
+      let liveViewUrl: string | null = null;
+      // Opt-in only: starting live view is a per-session side effect (resident streaming
+      // browser) and, when the expose interface is down, a serial launch-timeout stall.
+      if (opts?.live && liveEligible && browser.liveView && !liveViewFailures.has(runId)) {
+        try {
+          liveViewUrl = (await browser.liveView(runId, "start")).url;
+        } catch (error) {
+          // Fail-open: live view is a bonus on top of the screenshot flow. Remembered for the
+          // rest of the run so a broken expose interface is paid for exactly once.
+          liveViewFailures.add(runId);
+          logger.warn("browser watch live view failed", { runId, error: String(error) });
         }
       }
       return {
@@ -1056,6 +1092,7 @@ export function createBrowserAgent(deps: CreateBrowserAgentDeps): BrowserAgent {
         },
         journal: readJournal(runId, opts?.tail ?? 20, sensitiveInputs),
         screenshot,
+        liveViewUrl,
       };
     },
 

@@ -84,7 +84,7 @@ function fakeAgent(calls: string[], stats: Partial<BrowserAgentStats> = {}): Bro
     },
     drainSteers: () => [],
     recordEval: () => {},
-    async inspect(runId) {
+    async inspect(runId, opts) {
       if (runId === "missing") return null;
       return {
         run: {
@@ -100,6 +100,8 @@ function fakeAgent(calls: string[], stats: Partial<BrowserAgentStats> = {}): Bro
         },
         journal: [],
         screenshot: null,
+        // Mirrors the real agent: the live view only starts when the watcher opted in.
+        liveViewUrl: opts?.live ? "https://live.example/#tok" : null,
       };
     },
     async evalSecrets() {
@@ -439,6 +441,33 @@ test("steer/stop refuse from a channel other than the run's own", async () => {
     error: "browser runs can only be stopped from the channel that dispatched them",
   });
   expect(calls).toEqual([]);
+});
+
+test("the live view is gated to the run's own channel; the journal read stays open", async () => {
+  const { ext, deps } = build();
+  const registry = new ExtensionRegistry();
+  registry.register(ext);
+  await registry.initAll(deps);
+
+  // Live view is full browser control (take-control CDP input, chat, handoff), so it rides the
+  // steer/stop gate: an origin identity, and the channel that dispatched the run.
+  const foreign = { channelId: "other-chan", userId: "owner-1" };
+  expect(await registry.invoke(
+    { capabilityId: "browser.watch", args: { runId: "run-1", live: true }, origin: foreign }, deps,
+  )).toEqual({ ok: false, error: "browser runs can only be watched live from the channel that dispatched them" });
+  expect(await registry.invoke({ capabilityId: "browser.watch", args: { runId: "run-1", live: true } }, deps))
+    .toEqual({ ok: false, error: "the live browser view needs an authenticated authorized request" });
+
+  // An un-gated watch is still an open read — it just carries no live-view link.
+  expect(await registry.invoke({ capabilityId: "browser.watch", args: { runId: "run-1" } }, deps))
+    .toMatchObject({ ok: true, data: { run: { runId: "run-1" }, liveViewUrl: null } });
+  expect(await registry.invoke({ capabilityId: "browser.watch", args: { runId: "run-1" }, origin: foreign }, deps))
+    .toMatchObject({ ok: true, data: { liveViewUrl: null } });
+
+  // Same channel, live requested: the link comes back.
+  expect(await registry.invoke(
+    { capabilityId: "browser.watch", args: { runId: "run-1", live: true }, origin: ORIGIN }, deps,
+  )).toMatchObject({ ok: true, data: { liveViewUrl: "https://live.example/#tok" } });
 });
 
 test("watch/steer/stop route to the agent; unknown runs and capabilities refuse as results", async () => {

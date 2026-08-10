@@ -185,6 +185,7 @@ function setup(
     browser?: BrowserRuntime;
     keychain?: KeychainReader;
     dir?: string;
+    logger?: Logger;
   } = {},
 ) {
   const dir = behavior.dir ?? mkdtempSync(join(tmpdir(), "browser-agent-test-"));
@@ -192,7 +193,7 @@ function setup(
   const questions: { run: BrowserAgentRun; question: BrowserAgentQuestion }[] = [];
   const agent = createBrowserAgent({
     config: makeConfig(dir, overrides),
-    logger: quietLog,
+    logger: behavior.logger ?? quietLog,
     browser: behavior.browser ?? fakeBrowser(),
     ...(behavior.keychain ? { keychain: behavior.keychain } : {}),
     onOutcome: behavior.onOutcome ?? ((run) => {
@@ -895,5 +896,89 @@ describe("redaction", () => {
     }
     const extracted = redactKnownBrowserInputs("Should I use monkey again?", ["Use monkey"]);
     expect(extracted).not.toContain("monkey");
+  });
+});
+
+describe("live view", () => {
+  test("inspect carries the live-view URL alongside the screenshot when asked", async () => {
+    const browser = fakeBrowser();
+    browser.liveView = async () => ({ running: true, url: "https://100.108.167.104:7788/#tok" });
+    const { agent, questions } = setup({}, { browser });
+    const { runId } = await agent.run("ASK_COLOR", { channelId: "chan", requesterId: "owner" });
+    await waitUntil(() => questions.length === 1);
+    const inspection = await agent.inspect(runId, { live: true });
+    expect(inspection!.screenshot).toBeTruthy();
+    expect(inspection!.liveViewUrl).toBe("https://100.108.167.104:7788/#tok");
+  });
+
+  test("a plain watch never starts live view — it is opt-in per watch", async () => {
+    const browser = fakeBrowser();
+    let starts = 0;
+    browser.liveView = async () => {
+      starts++;
+      return { running: true, url: "https://100.108.167.104:7788/#tok" };
+    };
+    const { agent, questions } = setup({}, { browser });
+    const { runId } = await agent.run("ASK_COLOR", { channelId: "chan", requesterId: "owner" });
+    await waitUntil(() => questions.length === 1);
+    const inspection = await agent.inspect(runId);
+    expect(inspection!.screenshot).toBeTruthy();
+    expect(inspection!.liveViewUrl).toBeNull();
+    expect(starts).toBe(0);
+  });
+
+  test("a failing live view is attempted once per run, not once per watch", async () => {
+    const browser = fakeBrowser();
+    let attempts = 0;
+    browser.liveView = async () => {
+      attempts++;
+      throw new Error("no tailscale interface");
+    };
+    const { agent, questions } = setup({}, { browser });
+    const { runId } = await agent.run("ASK_COLOR", { channelId: "chan", requesterId: "owner" });
+    await waitUntil(() => questions.length === 1);
+    for (let i = 0; i < 3; i++) {
+      expect((await agent.inspect(runId, { live: true }))!.liveViewUrl).toBeNull();
+    }
+    // Memoized: a down expose interface costs one launch attempt for the run's whole life.
+    expect(attempts).toBe(1);
+  });
+
+  test("a failing live view degrades to screenshot-only with one warn", async () => {
+    const warnings: string[] = [];
+    const logger = (() => {
+      const captured = {
+        info() {},
+        warn(message: string) {
+          warnings.push(message);
+        },
+        debug() {},
+        error() {},
+        child() {
+          return captured;
+        },
+      };
+      return captured as unknown as Logger;
+    })();
+    const browser = fakeBrowser();
+    browser.liveView = async () => {
+      throw new Error("no tailscale interface");
+    };
+    const { agent, questions } = setup({}, { browser, logger });
+    const { runId } = await agent.run("ASK_COLOR", { channelId: "chan", requesterId: "owner" });
+    await waitUntil(() => questions.length === 1);
+    const inspection = await agent.inspect(runId, { live: true });
+    expect(inspection!.screenshot).toBeTruthy();
+    expect(inspection!.liveViewUrl).toBeNull();
+    expect(warnings.filter((message) => message === "browser watch live view failed")).toHaveLength(1);
+  });
+
+  test("a runtime without live view simply reports none", async () => {
+    const { agent, questions } = setup();
+    const { runId } = await agent.run("ASK_COLOR", { channelId: "chan", requesterId: "owner" });
+    await waitUntil(() => questions.length === 1);
+    const inspection = await agent.inspect(runId, { live: true });
+    expect(inspection!.screenshot).toBeTruthy();
+    expect(inspection!.liveViewUrl).toBeNull();
   });
 });

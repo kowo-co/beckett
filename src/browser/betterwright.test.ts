@@ -21,6 +21,8 @@ interface RunCall {
   code: string;
   session: string;
   approvedDownloads: boolean;
+  note?: string;
+  timeout?: number;
   seq: number;
 }
 
@@ -33,6 +35,10 @@ interface FakeResult {
   pages?: Array<Record<string, unknown>>;
   console?: unknown[];
   durationMs?: number;
+  warnings?: unknown[];
+  challenges?: unknown[];
+  skills?: Array<Record<string, unknown>>;
+  pendingCredential?: unknown;
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
@@ -57,11 +63,13 @@ class FakeBetterWright implements BetterWrightClient {
     private readonly handler?: (call: RunCall) => Promise<FakeResult> | FakeResult,
   ) {}
 
-  async run(code: string, options?: { session?: string; approvedDownloads?: boolean }): Promise<unknown> {
+  async run(code: string, options?: { session?: string; approvedDownloads?: boolean; note?: string; timeout?: number }): Promise<unknown> {
     const call: RunCall = {
       code,
       session: options?.session ?? "default",
       approvedDownloads: options?.approvedDownloads ?? false,
+      note: options?.note,
+      timeout: options?.timeout,
       seq: this.seq++,
     };
     this.calls.push(call);
@@ -75,6 +83,10 @@ class FakeBetterWright implements BetterWrightClient {
       pages: raw.pages ?? [{ url: "about:blank", title: "", active: true }],
       console: raw.console ?? [],
       durationMs: raw.durationMs ?? 1,
+      ...(raw.warnings !== undefined ? { warnings: raw.warnings } : {}),
+      ...(raw.challenges !== undefined ? { challenges: raw.challenges } : {}),
+      ...(raw.skills !== undefined ? { skills: raw.skills } : {}),
+      ...(raw.pendingCredential !== undefined ? { pendingCredential: raw.pendingCredential } : {}),
     };
   }
 
@@ -147,6 +159,30 @@ test("two leases acquired back to back are both live, each on its own session", 
   }
 });
 
+test("constructor receives configured chromiumArgs and an explicit parkBackgroundPages", async () => {
+  const fake = new FakeBetterWright();
+  let seen: Record<string, unknown> | undefined;
+  const settings = { ...settingsFor(), chromiumArgs: ["--disable-gpu"], parkBackgroundPages: false };
+  const runtime = createBetterWrightRuntime(settings, quietLog, {
+    createBrowser: (options) => { seen = options as Record<string, unknown>; return fake; },
+  });
+  try {
+    expect(seen?.chromiumArgs).toEqual(["--disable-gpu"]);
+    expect(seen?.parkBackgroundPages).toBe(false);
+  } finally { await runtime.stop(); }
+});
+test("parkBackgroundPages defaults to an explicit true when settings omit it", async () => {
+  const fake = new FakeBetterWright();
+  let seen: Record<string, unknown> | undefined;
+  const runtime = createBetterWrightRuntime(settingsFor(), quietLog, {
+    createBrowser: (options) => { seen = options as Record<string, unknown>; return fake; },
+  });
+  try {
+    expect(seen?.parkBackgroundPages).toBe(true);
+    expect("chromiumArgs" in (seen ?? {})).toBe(false);
+  } finally { await runtime.stop(); }
+});
+
 test("calls within one lease stay strictly ordered", async () => {
   const gate = deferred<void>();
   const fake = new FakeBetterWright(async (call) => {
@@ -192,6 +228,22 @@ test("different leases run concurrently instead of queueing behind each other", 
   }
 });
 
+test("evaluate threads note and a seconds-converted timeout into run()", async () => {
+  const fake = new FakeBetterWright();
+  const runtime = createBetterWrightRuntime(settingsFor(), quietLog, { createBrowser: () => fake });
+  try {
+    await runtime.acquire(leaseFor("opts"));
+    await runtime.evaluate("opts", "return 1", undefined, { note: "Checking out", timeoutMs: 120_000 });
+    const call = fake.calls.at(-1)!;
+    expect(call.note).toBe("Checking out");
+    expect(call.timeout).toBe(120); // seconds
+    await runtime.evaluate("opts", "return 2");
+    const bare = fake.calls.at(-1)!;
+    expect(bare.note).toBeUndefined();
+    expect(bare.timeout).toBeUndefined();
+  } finally { await runtime.stop(); }
+});
+
 test("the per-lease event ring does not leak across leases", async () => {
   const fake = new FakeBetterWright((call) => ({ events: [`${call.session}#${call.seq}`] }));
   const runtime = createBetterWrightRuntime(settingsFor(), quietLog, { createBrowser: () => fake });
@@ -200,10 +252,10 @@ test("the per-lease event ring does not leak across leases", async () => {
     await runtime.acquire(leaseFor("beta"));
     const a = await runtime.evaluate("alpha", "return 1");
     const b = await runtime.evaluate("beta", "return 2");
-    expect(a.events.every((event) => event.startsWith("alpha#"))).toBe(true);
-    expect(b.events.every((event) => event.startsWith("beta#"))).toBe(true);
-    expect(a.events.some((event) => event.startsWith("beta#"))).toBe(false);
-    expect(b.events.some((event) => event.startsWith("alpha#"))).toBe(false);
+    expect((a.events ?? []).every((event) => event.startsWith("alpha#"))).toBe(true);
+    expect((b.events ?? []).every((event) => event.startsWith("beta#"))).toBe(true);
+    expect((a.events ?? []).some((event) => event.startsWith("beta#"))).toBe(false);
+    expect((b.events ?? []).some((event) => event.startsWith("alpha#"))).toBe(false);
   } finally {
     await runtime.stop();
   }
@@ -246,7 +298,7 @@ test("the bridge exposes attachFile only for screenshots captured by this lease"
   try {
     await runtime.acquire(leaseFor("attachable"));
     const captured = await runtime.evaluate("attachable", "return await screenshot('CAPTURE_ATTACHABLE')");
-    const source = captured.screenshots[0]!;
+    const source = captured.screenshots?.[0]!;
     await runtime.evaluate("attachable", `return await attachFile('input[type=file]', ${JSON.stringify(source)})`);
     const call = fake.calls.at(-1)!;
     expect(call.code).toContain("const attachFile");
@@ -348,7 +400,7 @@ test("acquire prunes an oversized disposable cache before warming a lease", asyn
     expect(existsSync(join(defaultDir, "Cache"))).toBe(false);
     expect(readFileSync(join(defaultDir, "Cookies"), "utf8")).toBe("signed-in");
     const result = await runtime.evaluate("cache-recovery", "return 1");
-    expect(result.events.join("\n")).toContain("profile cache pruned] reclaimed");
+    expect((result.events ?? []).join("\n")).toContain("profile cache pruned] reclaimed");
   } finally {
     await runtime.stop();
   }
@@ -368,7 +420,7 @@ test("acquire leaves caches alone below the prune high-water mark", async () => 
     await runtime.acquire(leaseFor("below-high-water"));
     expect(existsSync(cache)).toBe(true);
     const result = await runtime.evaluate("below-high-water", "return 1");
-    expect(result.events.join("\n")).not.toContain("profile cache pruned");
+    expect((result.events ?? []).join("\n")).not.toContain("profile cache pruned");
   } finally {
     await runtime.stop();
   }
@@ -383,6 +435,7 @@ test("one lease tripping the profile budget does not blind or kill another", asy
     maxProfileGrowthBytes: 100,
     maxProfileBytes: 10_000,
     maxLeases: 5,
+    profileScanTtlMs: 0,
   });
   try {
     await runtime.acquire(leaseFor("alpha")); // baseline 10
@@ -415,6 +468,7 @@ test("disposable cache growth does not trip the per-lease budget, but real profi
     // Real measureDirectoryBytes (not injected) so cache exclusion actually runs.
     maxProfileGrowthBytes: 512 * 1024,
     maxProfileBytes: 64 * 1024 * 1024,
+    profileScanTtlMs: 0,
   });
   try {
     await runtime.acquire(leaseFor("cache-churn"));
@@ -453,6 +507,7 @@ test("a multi-GB CacheStorage write survives the lease budget and the next acqui
     maxProfileBytes: 256 * 1024,
     maxProfileGrowthBytes: 64 * 1024,
     maxProfileDiskBytes: 32 * 1024 * 1024,
+    profileScanTtlMs: 0,
   });
   try {
     await runtime.acquire(leaseFor("model-cache"));
@@ -474,7 +529,7 @@ test("a multi-GB CacheStorage write survives the lease budget and the next acqui
     await runtime.acquire(leaseFor("second-run"));
     expect(existsSync(join(cacheStorage, "shard-0.bin"))).toBe(true);
     const next = await runtime.evaluate("second-run", "return 2");
-    expect(next.events.join("\n")).not.toContain("profile cache pruned");
+    expect((next.events ?? []).join("\n")).not.toContain("profile cache pruned");
 
     // Real profile state is still bounded by its own, much smaller ceiling.
     writeFileSync(join(defaultDir, "runaway-state.bin"), Buffer.alloc(1024 * 1024));
@@ -492,6 +547,7 @@ test("site storage past the advertised quota still blocks the lease that wrote i
   const runtime = createBetterWrightRuntime(settings, quietLog, {
     createBrowser: () => fake,
     maxProfileDiskBytes: 4 * 1024 * 1024,
+    profileScanTtlMs: 0,
   });
   try {
     await runtime.acquire(leaseFor("greedy"));
@@ -536,6 +592,7 @@ test("the enforced footprint ceiling is the quota the lane advertised, not the c
     createBrowser: () => fake,
     measureProfileBytes: async () => profileSize,
     env: { BECKETT_BROWSER_STORAGE_QUOTA_MIB: "2" },
+    profileScanTtlMs: 0,
   });
   try {
     await runtime.acquire(leaseFor("advertised"));
@@ -557,7 +614,7 @@ test("an unset or unusable advertised quota falls back to the lane ceiling", asy
   try {
     await runtime.acquire(leaseFor("fallback"));
     const result = await runtime.evaluate("fallback", "return 1");
-    expect(result.events.join("\n")).not.toContain("profile blocked");
+    expect((result.events ?? []).join("\n")).not.toContain("profile blocked");
   } finally {
     await runtime.stop();
   }
@@ -591,6 +648,7 @@ test("the global profile ceiling binds every lease regardless of its own baselin
     maxProfileGrowthBytes: 10_000,
     maxProfileBytes: 500,
     maxLeases: 5,
+    profileScanTtlMs: 0,
   });
   try {
     await runtime.acquire(leaseFor("alpha"));
@@ -655,4 +713,180 @@ test("releasing a lease closes only its own betterwright session", async () => {
   } finally {
     await runtime.stop();
   }
+});
+
+test("a deflated 1.7.1 envelope stays deflated and new fields pass through", async () => {
+  const fake = new FakeBetterWright(() => ({
+    events: [],
+    console: [],
+    warnings: ["switch dropped"],
+    challenges: [{ type: "bot_challenge" }],
+    skills: [{ name: "s", description: "d", path: "/p" }],
+    pendingCredential: { pendingId: "p2", origin: "o", matchMode: "base-domain", username: null, label: null, expiresAt: null },
+  }));
+  const runtime = createBetterWrightRuntime(settingsFor(), quietLog, { createBrowser: () => fake });
+  try {
+    await runtime.acquire(leaseFor("sparse"));
+    const result = await runtime.evaluate("sparse", "return 1");
+    expect("console" in result).toBe(false);
+    expect("events" in result).toBe(false);
+    expect("screenshots" in result).toBe(false);
+    expect("truncated" in result).toBe(false);
+    expect(result.warnings).toEqual(["switch dropped"]);
+    expect(result.challenges).toEqual([{ type: "bot_challenge" }]);
+    expect(result.skills).toEqual([{ name: "s", description: "d", path: "/p" }]);
+    expect(result.pendingCredential?.pendingId).toBe("p2");
+  } finally { await runtime.stop(); }
+});
+
+test("steady-state evaluates do zero directory walks", async () => {
+  let scans = 0;
+  const fake = new FakeBetterWright();
+  const runtime = createBetterWrightRuntime(settingsFor(), quietLog, {
+    createBrowser: () => fake,
+    measureProfileBytes: async () => { scans++; return 10; },
+  });
+  try {
+    await runtime.acquire(leaseFor("steady"));
+    const afterAcquire = scans;
+    for (let i = 0; i < 5; i++) await runtime.evaluate("steady", "return 1");
+    expect(scans).toBe(afterAcquire); // acquire seeded the cache; the hot path never walked
+  } finally { await runtime.stop(); }
+});
+
+test("a stale cache delays budget enforcement by at most the window, never skips it", async () => {
+  let clock = 0;
+  let profileSize = 10;
+  const fake = new FakeBetterWright();
+  const runtime = createBetterWrightRuntime(settingsFor(), quietLog, {
+    createBrowser: () => fake,
+    measureProfileBytes: async () => profileSize,
+    maxProfileGrowthBytes: 100,
+    maxProfileBytes: 10_000,
+    now: () => clock,
+  });
+  try {
+    await runtime.acquire(leaseFor("stale"));
+    profileSize = 5_000; // over the growth allowance, but the seeded cache still says 10
+    await runtime.evaluate("stale", "return 1"); // inside the window: allowed (bounded delay)
+    clock = 10_001; // one tick past PROFILE_SCAN_TTL_MS
+    await expect(runtime.evaluate("stale", "return 2")).rejects.toThrow("profile storage budget exceeded");
+  } finally { await runtime.stop(); }
+});
+
+/** Adds the optional live-view surface the real client exposes. */
+class LiveViewFake extends FakeBetterWright {
+  readonly startCalls: Array<{ session?: string; expose?: string }> = [];
+  stopCalls = 0;
+
+  constructor(private readonly startResult: { ok: boolean; url?: string; error?: string } = { ok: true, url: "https://100.108.167.104:7788/#tok" }) {
+    super();
+  }
+
+  async startLiveView(options?: { session?: string; expose?: "lan" | "local" | "tailscale" }) {
+    this.startCalls.push({ session: options?.session, expose: options?.expose });
+    return { running: this.startResult.ok, ...this.startResult };
+  }
+
+  async stopLiveView() {
+    this.stopCalls++;
+    return { ok: true, running: false };
+  }
+}
+
+describe("live view", () => {
+  test("start on an acquired lease streams that lease's session over tailscale", async () => {
+    const fake = new LiveViewFake();
+    const runtime = createBetterWrightRuntime(settingsFor(), quietLog, { createBrowser: () => fake });
+    try {
+      await runtime.acquire(leaseFor("alpha"));
+      const status = await runtime.liveView!("alpha", "start");
+      expect(status).toEqual({ running: true, url: "https://100.108.167.104:7788/#tok" });
+      expect(fake.startCalls).toEqual([{ session: "alpha", expose: "tailscale" }]);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  test("expose 'off' never touches the client", async () => {
+    const fake = new LiveViewFake();
+    const runtime = createBetterWrightRuntime(
+      { ...settingsFor(), liveViewExpose: "off" },
+      quietLog,
+      { createBrowser: () => fake },
+    );
+    try {
+      await runtime.acquire(leaseFor("alpha"));
+      expect(await runtime.liveView!("alpha", "start")).toEqual({ running: false, url: null });
+      expect(fake.startCalls).toEqual([]);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  test("a client that cannot start the server rejects", async () => {
+    const fake = new LiveViewFake({ ok: false, error: "no tailscale" });
+    const runtime = createBetterWrightRuntime(settingsFor(), quietLog, { createBrowser: () => fake });
+    try {
+      await runtime.acquire(leaseFor("alpha"));
+      await expect(runtime.liveView!("alpha", "start")).rejects.toThrow("no tailscale");
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  test("the shared server stops only when the last live-viewed lease releases", async () => {
+    const fake = new LiveViewFake();
+    const runtime = createBetterWrightRuntime(settingsFor(), quietLog, {
+      createBrowser: () => fake,
+      maxLeases: 5,
+    });
+    try {
+      await runtime.acquire(leaseFor("alpha"));
+      await runtime.acquire(leaseFor("beta"));
+      await runtime.liveView!("alpha", "start");
+      await runtime.liveView!("beta", "start");
+      await runtime.release("alpha", false);
+      expect(fake.stopCalls).toBe(0);
+      await runtime.release("beta", false);
+      expect(fake.stopCalls).toBe(1);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  test("a single live-viewed lease stops the server on release", async () => {
+    const fake = new LiveViewFake();
+    const runtime = createBetterWrightRuntime(settingsFor(), quietLog, { createBrowser: () => fake });
+    try {
+      await runtime.acquire(leaseFor("alpha"));
+      await runtime.liveView!("alpha", "start");
+      await runtime.release("alpha", false);
+      expect(fake.stopCalls).toBe(1);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  test("a client without live view rejects start but still resolves stop", async () => {
+    const fake = new FakeBetterWright();
+    const runtime = createBetterWrightRuntime(settingsFor(), quietLog, { createBrowser: () => fake });
+    try {
+      await runtime.acquire(leaseFor("alpha"));
+      await expect(runtime.liveView!("alpha", "start")).rejects.toThrow("does not support live view");
+      expect(await runtime.liveView!("alpha", "stop")).toEqual({ running: false, url: null });
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  test("live view on an unknown run rejects", async () => {
+    const fake = new LiveViewFake();
+    const runtime = createBetterWrightRuntime(settingsFor(), quietLog, { createBrowser: () => fake });
+    try {
+      await expect(runtime.liveView!("ghost", "start")).rejects.toThrow("is not active");
+    } finally {
+      await runtime.stop();
+    }
+  });
 });

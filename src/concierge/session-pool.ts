@@ -48,9 +48,9 @@ export interface PoolSession {
   /** Whether the live turn has already invoked a tool (it's doing work, not composing). */
   liveTurnToolUse?(): boolean;
   /** Hand a message to the turn generating right now, without cancelling it (see injectLiveTurn). */
-  injectIntoLiveTurn?(text: string): "injected" | "no-live-turn" | "capped";
+  injectIntoLiveTurn?(text: string, messageId?: string): "injected" | "no-live-turn" | "capped";
   /** Drop queued (not-yet-started) turns the predicate matches; count dropped (queue-free UX). */
-  supersedeQueuedTurns?(match: (meta: unknown) => boolean): number;
+  supersedeQueuedTurns?(match: (meta: unknown) => boolean, onSuperseded?: (meta: unknown) => void): number;
   /** Start a recycled child's relaunch without a turn (issue #153); no-op when live/stopped. */
   prewarm?(): void;
   hasLiveChild?(): boolean;
@@ -228,6 +228,17 @@ export class SessionPool {
     return metas;
   }
 
+  /**
+   * Turns queued or in flight across every pooled session — "is Beckett talking to anyone right
+   * now?" in one number. Read by the free-time idle gate (docs/freetime.md), which will not start
+   * an unprompted session while a conversation is live.
+   */
+  queueDepth(): number {
+    let depth = 0;
+    for (const { session } of this.entries.values()) depth += session.queueDepth?.() ?? 0;
+    return depth;
+  }
+
   /** True iff every session exposes meta tracking (real sessions do; fake test doubles may not). */
   tracksMeta(): boolean {
     for (const { session } of this.entries.values()) {
@@ -300,11 +311,15 @@ export class SessionPool {
    * the same cross-author hazard #117's guard exists to prevent. Unlike cancelLiveTurn there is
    * no tool-use branch to check: injection is the tool-use case (that's the whole point), so
    * eligibility never depends on whether a tool has already run.
+   *
+   * `opts.messageId` rides along so the session can track WHICH message it swallowed — an injection
+   * that races the live turn's own `result` is answered by nobody unless something remembers it
+   * (ConciergeSession.injectIntoLiveTurn).
    */
   injectLiveTurn(
     channelId: string,
     text: string,
-    opts: { byUserId: string },
+    opts: { byUserId: string; messageId?: string },
   ): "injected" | "no-live-turn" | "not-eligible" | "capped" {
     const entry = this.entries.get(this.scopeKey(channelId));
     if (!entry) return "no-live-turn";
@@ -314,18 +329,24 @@ export class SessionPool {
       | undefined;
     if (!meta || meta.channelId !== channelId) return "no-live-turn";
     if (meta.ambient || meta.userId !== opts.byUserId) return "not-eligible";
-    return entry.session.injectIntoLiveTurn?.(text) ?? "no-live-turn";
+    return entry.session.injectIntoLiveTurn?.(text, opts.messageId) ?? "no-live-turn";
   }
 
   /**
    * Drop queued same-channel turns the predicate matches (see ConciergeSession.supersedeQueuedTurns).
    * Channel-scoped like {@link cancelLiveTurn}: in collapsed global/fixed-session mode the
    * predicate's own meta checks keep other channels' turns untouched. Returns the count dropped.
+   * `onSuperseded` receives each dropped turn's meta, oldest first, so the caller can carry its
+   * text into the surviving turn rather than losing it.
    */
-  supersedeQueuedTurns(channelId: string, match: (meta: unknown) => boolean): number {
+  supersedeQueuedTurns(
+    channelId: string,
+    match: (meta: unknown) => boolean,
+    onSuperseded?: (meta: unknown) => void,
+  ): number {
     const entry = this.entries.get(this.scopeKey(channelId));
     if (!entry) return 0;
-    return entry.session.supersedeQueuedTurns?.(match) ?? 0;
+    return entry.session.supersedeQueuedTurns?.(match, onSuperseded) ?? 0;
   }
 
   /** The live sessionId for a channel's scope (watermarks + awareness suppression are keyed to it). */

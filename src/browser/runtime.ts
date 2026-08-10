@@ -82,17 +82,46 @@ export interface BrowserPageSummary {
   title: string;
 }
 
+/** Skill pack surfaced by betterwright whose autoInject.url matches an open page. */
+export interface BrowserSkillHint { name: string; description: string; path: string; }
+/** Secret-free metadata for a generated credential still awaiting recovery. */
+export interface BrowserPendingCredential {
+  pendingId: string;
+  origin: string;
+  matchMode: string;
+  username: string | null;
+  label: string | null;
+  expiresAt: string | null;
+}
+
 export interface BrowserEvalResult {
   value: unknown;
-  console: string[];
+  console?: string[];
   pages: BrowserPageSummary[];
-  events: string[];
-  screenshots: string[];
+  events?: string[];
+  screenshots?: string[];
   /** Trusted PNG screenshots the agent may attach later in this same run. */
   attachments?: string[];
   elapsedMs: number;
-  truncated: boolean;
+  truncated?: boolean;
+  /** 1.7.1 envelope passthrough — omitted when empty. */
+  warnings?: string[];
+  challenges?: unknown[];
+  skills?: BrowserSkillHint[];
+  pendingCredential?: BrowserPendingCredential;
 }
+
+/** Optional per-call evaluation controls threaded from the MCP tool input to BetterWright run(). */
+export interface BrowserEvalCallOptions {
+  /** Short host-facing status line (live view / status surface). Never evaluated as code. */
+  note?: string;
+  /** Per-call timeout override in milliseconds; bounded by MAX_BROWSER_EVAL_CALL_TIMEOUT_MS. */
+  timeoutMs?: number;
+}
+/** Hard ceiling for a per-call eval timeout override (5 minutes). */
+export const MAX_BROWSER_EVAL_CALL_TIMEOUT_MS = 300_000;
+/** Longest note accepted from the model before truncation. */
+export const MAX_BROWSER_EVAL_NOTE_CHARS = 300;
 
 export interface BrowserRuntimeStats {
   ready: boolean;
@@ -122,10 +151,18 @@ export interface BrowserCheckpoint {
   activeIndex: number;
 }
 
+export interface BrowserLiveViewStatus {
+  running: boolean;
+  /** Capability URL — embeds a bearer token; surface to the requesting human only, never journal it. */
+  url: string | null;
+}
+
 export interface BrowserRuntime {
   acquire(lease: BrowserLease): Promise<void>;
-  evaluate(runId: string, code: string, controlToken?: string): Promise<BrowserEvalResult>;
+  evaluate(runId: string, code: string, controlToken?: string, options?: BrowserEvalCallOptions): Promise<BrowserEvalResult>;
   capture(runId: string, name: string): Promise<string>;
+  /** Optional: backends without a live-view server simply omit it. */
+  liveView?(runId: string, action: "start" | "stop" | "status"): Promise<BrowserLiveViewStatus>;
   checkpoint(runId: string): Promise<BrowserCheckpoint>;
   restore(runId: string, checkpoint: BrowserCheckpoint): Promise<void>;
   release(runId: string, captureProof: boolean): Promise<string[]>;
@@ -153,6 +190,12 @@ export interface BrowserHostSettings {
   maxOutputChars: number;
   /** Global configured roots; each lease adds its own artifactsDir at attachment time. */
   attachmentRoots?: string[];
+  /** Extra Chromium switches for the BetterWright-managed launch (betterwright backend only). */
+  chromiumArgs?: string[];
+  /** Quiet session pages between executions (betterwright backend only; default true). */
+  parkBackgroundPages?: boolean;
+  /** Live-view exposure preset; absent means "tailscale". "off" disables. */
+  liveViewExpose?: "off" | "local" | "lan" | "tailscale";
 }
 
 interface ActiveLease extends BrowserLease {
@@ -246,7 +289,10 @@ export function browserHostSettings(config: Config): BrowserHostSettings {
     navigationTimeoutMs: config.quick.browser_navigation_timeout_ms,
     evalTimeoutMs: config.quick.browser_eval_timeout_ms,
     maxOutputChars: config.quick.browser_max_output_chars,
+    chromiumArgs: config.quick.browser_chromium_args,
+    parkBackgroundPages: config.quick.browser_park_background_pages,
     attachmentRoots: [...new Set([resolve(paths.imagesDir), ...config.quick.browser_attach_roots])],
+    liveViewExpose: config.quick.browser_live_view_expose,
   };
 }
 
@@ -1974,8 +2020,8 @@ function boundBrowserEvalResult(result: BrowserEvalResult, maxChars: number): Br
   const length = () => JSON.stringify(result).length;
   if (length() <= maxChars) return result;
   result.truncated = true;
-  result.console = boundStringList(result.console, Math.min(2_000, Math.floor(maxChars / 8)));
-  result.events = boundStringList(result.events, Math.min(2_000, Math.floor(maxChars / 8)));
+  result.console = boundStringList(result.console ?? [], Math.min(2_000, Math.floor(maxChars / 8)));
+  result.events = boundStringList(result.events ?? [], Math.min(2_000, Math.floor(maxChars / 8)));
   result.pages = result.pages.slice(0, 8).map((page) => ({
     ...page,
     url: truncatePlain(page.url, 512),
@@ -2007,7 +2053,7 @@ function boundBrowserEvalResult(result: BrowserEvalResult, maxChars: number): Br
     console: [],
     pages: [],
     events: [],
-    screenshots: result.screenshots.slice(0, MAX_SCREENSHOTS_PER_EVAL),
+    screenshots: (result.screenshots ?? []).slice(0, MAX_SCREENSHOTS_PER_EVAL),
     elapsedMs: result.elapsedMs,
     truncated: true,
   };

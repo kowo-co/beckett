@@ -13,6 +13,8 @@ per_task_usd_cap = 0
 worker_hard_cap_s = 3600
 worker_stall_s = 300
 worker_checkpoint_s = 120
+worker_slow_tool_s = 30
+worker_browser_shared_home = false
 staffing_watchdog_s = 120
 max_repeated_stall_fingerprints = 2
 max_rework_cycles = 3
@@ -136,7 +138,10 @@ browser_navigation_timeout_ms = 30000
 browser_eval_timeout_ms = 60000
 browser_max_output_chars = 24000
 browser_question_wait_secs = 3600
+browser_chromium_args = ["--disable-gpu", "--disable-software-rasterizer"]
+browser_park_background_pages = true
 browser_attach_roots = []
+browser_live_view_expose = "tailscale"
 
 [announce]
 changes_channel_id = ""
@@ -152,3 +157,19 @@ output_token_budget = 150000
 model = ""
 spike_output_token_budget = 60000
 spike_repo = ""
+
+[progress]
+cards_as_code = false
+
+[free_time]
+enabled = true
+weekday = "sunday"
+window_start = "02:00"
+window_end = "05:00"
+tz = "America/Los_Angeles"
+model = "claude-sonnet-5"
+max_turns = 60
+hard_timeout_s = 1800
+output_token_budget = 80000
+memories_per_session_max = 5
+channel_id = ""

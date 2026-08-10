@@ -5,7 +5,7 @@
  * model-authored snippets. This adapter keeps Beckett's lease/proof contract at
  * the host boundary without exposing a raw Playwright/CDP handle to the model.
  *
- * Since betterwright 1.3.0 the session daemon runs separate `--session`s
+ * BetterWright's session daemon (1.7.1 pinned) runs separate `--session`s
  * concurrently while keeping calls *within* one session strictly ordered (see
  * node_modules/betterwright/docs/sessions.md). This adapter holds a map of
  * concurrent leases — one betterwright session per run — instead of a single
@@ -15,7 +15,7 @@
  *
  * Concurrency is capped (default 3, `BECKETT_BROWSER_MAX_LEASES`). The kill
  * switch `BECKETT_BROWSER_SINGLE_LEASE=1` pins the cap to one lease, restoring
- * the pre-1.3.0 strictly-single-lease behaviour without a revert.
+ * the old strictly-single-lease behaviour without a revert.
  *
  * The profile budget is two ceilings, not one, split along who put the bytes there.
  * Beckett's own profile state is held to MAX_PROFILE_BYTES with a per-lease growth
@@ -32,13 +32,15 @@ import { basename, extname, join, resolve } from "node:path";
 import { BetterWright, NetworkPolicy, piImageArtifacts } from "betterwright";
 import { openTrustedBrowserAttachment } from "./attachments.ts";
 import type { Logger } from "../types.ts";
-import { measureDirectoryBytes, pruneChromeProfileCaches } from "./profile-cache.ts";
+import { createMeasurementCache, measureDirectoryBytes, pruneChromeProfileCaches } from "./profile-cache.ts";
 import { LANE_STORAGE_BYTES } from "./storage-quota.ts";
 import type {
   BrowserCheckpoint,
+  BrowserEvalCallOptions,
   BrowserEvalResult,
   BrowserHostSettings,
   BrowserLease,
+  BrowserPendingCredential,
   BrowserRuntime,
   BrowserRuntimeStats,
 } from "./runtime.ts";
@@ -85,11 +87,25 @@ function advertisedProfileDiskBytes(env: Record<string, string | undefined>): nu
 const MAX_PROFILE_GROWTH_BYTES = 100 * 1024 * 1024;
 /** Prune disposable caches before they can make a dormant profile unavailable. */
 const PROFILE_PRUNE_HIGH_WATER_MARK = 0.7;
+/**
+ * How long one profile-size scan stays authoritative. Steady-state evaluate/capture/checkpoint/
+ * restore/release calls inside this window do ZERO directory walks; budget enforcement is
+ * therefore delayed by at most this window and never skipped (the first budget check after
+ * expiry re-scans). Sticky per-lease breaches (profileBudgetError) are unaffected.
+ *
+ * A lazy TTL cache rather than the interval-driven watcher in runtime.ts: this adapter lives
+ * inside the sandboxed host process, where an interval timer would keep the event loop busy
+ * between runs and need lifecycle plumbing through stop(). A TTL cache does no work at all
+ * while idle and re-measures on the first call after expiry.
+ */
+const PROFILE_SCAN_TTL_MS = 10_000;
 
 /** The slice of the betterwright client this adapter drives; injectable for tests. */
 export interface BetterWrightClient {
   run(code: string, options?: { session?: string; approvedDownloads?: boolean; note?: string; timeout?: number }): Promise<unknown>;
   closeSession?(session?: string): Promise<unknown>;
+  startLiveView?(options?: { session?: string; expose?: "lan" | "local" | "tailscale" }): Promise<{ ok: boolean; running?: boolean; url?: string; error?: string }>;
+  stopLiveView?(): Promise<{ ok: boolean; running?: boolean; error?: string }>;
   close(): Promise<void>;
 }
 
@@ -118,6 +134,10 @@ interface BetterWrightResult {
   artifacts?: Array<{ path?: unknown; kind?: unknown; media?: unknown }>;
   pages?: Array<{ url?: unknown; title?: unknown; active?: unknown }>;
   durationMs?: unknown;
+  warnings?: unknown[];
+  challenges?: unknown[];
+  skills?: Array<{ name?: unknown; description?: unknown; path?: unknown }>;
+  pendingCredential?: unknown;
   [key: string]: unknown;
 }
 
@@ -146,6 +166,10 @@ export interface CreateBetterWrightRuntimeDeps {
   /** Whole-footprint ceiling override, caches included; defaults to the lane budget. */
   maxProfileDiskBytes?: number;
   maxProfileGrowthBytes?: number;
+  /** Profile-scan cache window override; 0 disables caching (tests). */
+  profileScanTtlMs?: number;
+  /** Clock override for the scan cache (tests). */
+  now?: () => number;
   /** Environment source for the cap / kill-switch; defaults to process.env. */
   env?: Record<string, string | undefined>;
 }
@@ -208,6 +232,10 @@ export function createBetterWrightRuntime(
       (options?.excludeSiteStorage ? maxProfileBytes : maxProfileDiskBytes) + 1,
       options,
     ));
+  const scanCache = createMeasurementCache({ ttlMs: deps.profileScanTtlMs ?? PROFILE_SCAN_TTL_MS, now: deps.now });
+  /** TTL-cached scan used on the per-call hot path; acquire() measures fresh and seeds it. */
+  const cachedProfileBytes = (options?: { excludeSiteStorage?: boolean }) =>
+    scanCache.measure(options?.excludeSiteStorage ? "profile-state" : "disk", () => measureProfileBytes(options));
 
   const createBrowser = deps.createBrowser ?? ((options) => new BetterWright(options) as unknown as BetterWrightClient);
   const browser = createBrowser({
@@ -215,13 +243,18 @@ export function createBetterWrightRuntime(
     // `browserFlavor` on the client is a reported "cloak" constant, not a settable
     // option, and `betterwright setup` provisions its own signed CloakBrowser binary,
     // so the host neither picks a browser flavor nor hands in a Playwright executable
-    // path. Since 1.7.0 headless sessions default to a separate resident Obscura
-    // engine instead of Cloak/Chromium; isolated.ts pins BETTERWRIGHT_OBSCURA_PATH=off
-    // for the sandboxed launch because only the managed CloakBrowser cache — not
-    // Obscura's ~/.betterwright/obscura/ install — is bound into this bubblewrap
-    // sandbox.
+    // path. Since 1.7.0 headless sessions default to the resident Obscura engine;
+    // isolated.ts binds the host's ~/.betterwright/obscura install into the sandbox
+    // and points BETTERWRIGHT_OBSCURA_ROOT at it when it exists, falling back to the
+    // Chromium/Cloak compatibility backend when it does not (implicit discovery of an
+    // absent install returns null upstream).
     headless: settings.headless,
     defaultTimeout: Math.max(5, Math.ceil(settings.evalTimeoutMs / 1_000)),
+    // Host-level Chromium tuning (1.7.1): appended to the managed launch args. Config-owned;
+    // the zod default disables the GPU process on this GPU-less host (docs/betterwright.md #92).
+    ...(settings.chromiumArgs !== undefined ? { chromiumArgs: settings.chromiumArgs } : {}),
+    // Explicit, not implied: park pages between executions so idle tabs stop burning CPU.
+    parkBackgroundPages: settings.parkBackgroundPages ?? true,
     // Pin the open private-network and loopback defaults explicitly so Beckett's
     // local/intranet access survives future upgrades.
     policy: new NetworkPolicy({ allowLoopback: true, allowPrivateNetwork: true }),
@@ -238,6 +271,8 @@ export function createBetterWrightRuntime(
   // Session-scoped download approval. This is intentionally a set rather than
   // browser configuration: every `run` gets only its own session's bit.
   const downloadReferences = new Set<string>();
+  // Sessions currently being live-viewed; the shared server stops when the last one goes.
+  const liveViewRuns = new Set<string>();
   let stopped = false;
   let launches = 0;
   let evaluations = 0;
@@ -272,7 +307,7 @@ export function createBetterWrightRuntime(
     // already bounded by the quota the lane advertised. Measuring the rest here — against
     // a like-for-like acquire baseline — keeps the growth allowance and this ceiling
     // tracking what Chromium itself accumulates.
-    const profileBytes = await measureProfileBytes({ excludeSiteStorage: true });
+    const profileBytes = await cachedProfileBytes({ excludeSiteStorage: true });
     // Growth allowance is per-lease (its own acquire baseline); the ceiling is
     // global and shared. Whichever binds first wins.
     const storageLimit = Math.min(maxProfileBytes, lease.profileBytesAtAcquire + maxProfileGrowthBytes);
@@ -287,7 +322,7 @@ export function createBetterWrightRuntime(
     // Site storage is discounted above, so it needs its own bound: the advertised quota.
     // A page may use every byte it was promised and not one more, and it learns that here
     // rather than by filling the host disk.
-    const diskBytes = await measureProfileBytes();
+    const diskBytes = await cachedProfileBytes();
     if (diskBytes > maxProfileDiskBytes) {
       lease.profileBudgetError = new Error(
         `browser profile storage budget exceeded for run ${lease.runId} (profile=${diskBytes} bytes, past the ${maxProfileDiskBytes}-byte storage quota this lane grants)`,
@@ -401,7 +436,7 @@ const attachFile = async (target, screenshotPath) => {
   }
 
   /** Raw evaluation on one lease's session. Callers must already hold the lease queue. */
-  async function execute(lease: ActiveLease, code: string): Promise<BrowserEvalResult> {
+  async function execute(lease: ActiveLease, code: string, options?: BrowserEvalCallOptions): Promise<BrowserEvalResult> {
     if (!code.trim()) throw new Error("betterwright browser requires non-empty JavaScript");
     if (code.length > MAX_CODE_CHARS) throw new Error(`betterwright browser code exceeds ${MAX_CODE_CHARS} characters`);
     // Stage literal paths before exposing the bridge; unprepared dynamic paths still fail closed.
@@ -411,6 +446,9 @@ const attachFile = async (target, screenshotPath) => {
     const raw = await browser.run(bridgedCode, {
       session: lease.session,
       approvedDownloads: downloadReferences.has(lease.session),
+      ...(options?.note ? { note: options.note } : {}),
+      // BetterWright run() timeouts are seconds (constructor defaultTimeout likewise).
+      ...(options?.timeoutMs ? { timeout: Math.max(5, Math.ceil(options.timeoutMs / 1_000)) } : {}),
     }) as BetterWrightResult;
     const screenshots = copyArtifacts(raw, lease);
     const summaries = raw.pages ?? [];
@@ -420,19 +458,35 @@ const attachFile = async (target, screenshotPath) => {
     const pendingEvents = lease.events.splice(0);
     const events = (raw.events ?? []).map((entry) => typeof entry === "string" ? entry : JSON.stringify(entry));
     for (const entry of events) pushLeaseEvent(lease, entry);
+    const consoleLines = (raw.console ?? []).map((entry) => typeof entry === "string" ? entry : JSON.stringify(entry));
+    const eventLines = [...pendingEvents, ...events];
+    const warnings = (raw.warnings ?? []).filter((entry): entry is string => typeof entry === "string");
+    const challenges = Array.isArray(raw.challenges) ? raw.challenges : [];
+    const skills = (Array.isArray(raw.skills) ? raw.skills : []).filter(
+      (entry): entry is { name: string; description: string; path: string } =>
+        !!entry && typeof entry.name === "string" && typeof entry.description === "string" && typeof entry.path === "string",
+    );
+    const pendingCredential = raw.pendingCredential && typeof raw.pendingCredential === "object"
+      && typeof (raw.pendingCredential as { pendingId?: unknown }).pendingId === "string"
+      ? raw.pendingCredential as BrowserPendingCredential
+      : undefined;
     const result: BrowserEvalResult = {
       value: raw.result,
-      console: (raw.console ?? []).map((entry) => typeof entry === "string" ? entry : JSON.stringify(entry)),
       pages: summaries.map((entry, index) => ({
         index,
         active: entry.active === true,
         url: typeof entry.url === "string" ? entry.url : "about:blank",
         title: typeof entry.title === "string" ? entry.title : "",
       })),
-      events: [...pendingEvents, ...events],
-      screenshots,
       elapsedMs: typeof raw.durationMs === "number" ? raw.durationMs : 0,
-      truncated: false,
+      // 1.7.1 omits empty envelope fields; do not re-inflate them here.
+      ...(consoleLines.length > 0 ? { console: consoleLines } : {}),
+      ...(eventLines.length > 0 ? { events: eventLines } : {}),
+      ...(screenshots.length > 0 ? { screenshots } : {}),
+      ...(warnings.length > 0 ? { warnings } : {}),
+      ...(challenges.length > 0 ? { challenges } : {}),
+      ...(skills.length > 0 ? { skills } : {}),
+      ...(pendingCredential ? { pendingCredential } : {}),
     };
     pages = result.pages.length;
     evaluations++;
@@ -447,7 +501,7 @@ const attachFile = async (target, screenshotPath) => {
       lease,
       `return await screenshot({ kind: ${JSON.stringify(name === "proof-auto" ? "proof" : "question")}, name: ${JSON.stringify(name)} })`,
     );
-    const screenshot = result.screenshots[0];
+    const screenshot = result.screenshots?.[0];
     if (!screenshot) throw new Error("BetterWright did not produce a screenshot");
     return screenshot;
   }
@@ -512,16 +566,22 @@ const attachFile = async (target, screenshotPath) => {
             profileBytes = await measureProfileBytes();
           }
         }
+        // Pruning moved bytes under any cached value; the hot path must not keep serving it.
+        if (cachePruneReclaimed !== null) scanCache.invalidate();
         if (profileBytes > maxProfileDiskBytes) {
           const pruneDetail = cachePruneReclaimed === null
             ? "cache prune was skipped while another browser lease was active"
             : `cache prune reclaimed ${cachePruneReclaimed} bytes, still over`;
           throw new Error(`browser profile storage budget exceeded for run ${lease.runId} (${pruneDetail}; profile=${profileBytes}, lease growth=0 bytes)`);
         }
+        // Both acquire scans are fresh — its prune decisions need current numbers — so seed
+        // the hot-path cache with them and a fresh lease's first evaluates walk nothing.
+        scanCache.seed("disk", profileBytes);
         // The growth baseline discounts disposable caches so enforceProfileBudget compares
         // like against like; the ceiling/prune checks above deliberately stay cache-inclusive
         // because they guard real on-disk usage.
         active.profileBytesAtAcquire = await measureProfileBytes({ excludeSiteStorage: true });
+        scanCache.seed("profile-state", active.profileBytesAtAcquire);
         // Start the BetterWright worker now so unavailable browser setup fails
         // before the agent begins its turn.
         await runOnLease(active, () => execute(active, "return page.url()"));
@@ -541,12 +601,12 @@ const attachFile = async (target, screenshotPath) => {
       }
     },
 
-    async evaluate(runId, code) {
+    async evaluate(runId, code, _controlToken, options?: BrowserEvalCallOptions) {
       const lease = requireLease(runId);
       return runOnLease(lease, async () => {
         await enforceProfileBudget(lease);
         assertProfileHealthy(lease);
-        return execute(lease, code);
+        return execute(lease, code, options);
       });
     },
 
@@ -557,6 +617,28 @@ const attachFile = async (target, screenshotPath) => {
         assertProfileHealthy(lease);
         return captureOnLease(lease, name);
       });
+    },
+
+    async liveView(runId, action) {
+      if (action === "stop") {
+        liveViewRuns.delete(runId);
+        if (liveViewRuns.size === 0 && browser.stopLiveView) await browser.stopLiveView();
+        return { running: false, url: null };
+      }
+      const lease = requireLease(runId);
+      if (action === "status") {
+        // liveViewStatus is not on the narrowed client type; report tracked state.
+        return { running: liveViewRuns.has(runId), url: null };
+      }
+      const expose = settings.liveViewExpose ?? "tailscale";
+      if (expose === "off") return { running: false, url: null };
+      if (!browser.startLiveView) throw new Error("this betterwright client does not support live view");
+      // Idempotent upstream: returns the already-running token-gated server. The
+      // session option only picks which session streams first; viewers can switch.
+      const status = await browser.startLiveView({ session: lease.session, expose });
+      if (!status.ok || !status.url) throw new Error(status.error ?? "live view failed to start");
+      liveViewRuns.add(runId);
+      return { running: true, url: status.url };
     },
 
     async checkpoint(runId) {
@@ -601,6 +683,10 @@ const attachFile = async (target, screenshotPath) => {
         } finally {
           leases.delete(lease.session);
           releaseDownloadReference(lease);
+          liveViewRuns.delete(lease.session);
+          if (liveViewRuns.size === 0 && browser.stopLiveView) {
+            await browser.stopLiveView().catch((error) => logger.warn("live view stop failed on release", { runId, error: String(error) }));
+          }
           if (browser.closeSession) await browser.closeSession(lease.session).catch(() => undefined);
           logger.info("BetterWright browser lease released", { runId: lease.runId, live: leases.size });
         }
@@ -630,6 +716,7 @@ const attachFile = async (target, screenshotPath) => {
       stopped = true;
       leases.clear();
       downloadReferences.clear();
+      liveViewRuns.clear();
       await browser.close();
     },
   };

@@ -159,13 +159,17 @@ git fetch origin
 git checkout main
 git pull --ff-only origin main
 bun install --frozen-lockfile
-# BetterWright's documented setup provisions its managed runtime. In 1.x, a bare
-# `betterwright setup` also fetches the native Chromium fork into ~/.betterwright and
-# makes discovery prefer it; that artifact is never bound into the browser-host
-# bubblewrap sandbox, so pin --cloak-only to provision just the managed CloakBrowser
-# binary the sandbox actually reaches. Beckett's own pinned-Playwright Chromium
-# (the default backend + evaluator) is installed separately below.
-bun x betterwright setup --cloak-only
+# BetterWright's documented setup provisions its managed runtime. Since 1.7.x a bare
+# `betterwright setup` installs three legs: the Obscura resident DOM engine
+# (~/.betterwright/obscura — bound read-only into the browser-host sandbox by
+# src/browser/isolated.ts, so headless DOM work no longer keeps Chromium resident),
+# the on-demand Chromium pixel renderer (~/.betterwright/chromium — deliberately NOT
+# bound into the sandbox: screenshot promotion stays on the managed CloakBrowser via
+# the storage-quota shim), and the managed CloakBrowser (~/.cloakbrowser). A missing
+# Obscura install is a silent fallback to CloakBrowser, so this line failing partway
+# degrades rather than breaks. Beckett's own pinned-Playwright Chromium (the default
+# backend + evaluator) is installed separately below.
+bun x betterwright setup
 bun x playwright install --no-shell chromium
 browser_smoke() {
   bun -e 'import { chromium } from "playwright"; const browser = await chromium.launch({ headless: true, channel: "chromium" }); await browser.close();'

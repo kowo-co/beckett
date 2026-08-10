@@ -163,6 +163,31 @@ export interface DreamRememberInput {
   reason: string;
 }
 
+/**
+ * The free-time namespace's mandatory name shape (docs/freetime.md): the date the session ran
+ * plus a slug. Same load-bearing prefix rule as {@link DREAM_NAME_RE} — a free-time session can
+ * only ever create a node inside its own namespace, never name (and thereby update) one outside it.
+ */
+export const FREE_TIME_NAME_RE = /^free-time-\d{4}-\d{2}-\d{2}-[a-z0-9][a-z0-9-]*$/;
+
+/** Input to {@link MemoryStore.rememberFreeTime}. Type/inference/source are forced, not passed. */
+export interface FreeTimeRememberInput {
+  /** `free-time-YYYY-MM-DD-<slug>` — validated against {@link FREE_TIME_NAME_RE}. */
+  name: string;
+  description: string;
+  body?: string;
+  /** The session the note came out of (e.g. "free-time:2026-08-09-1a2b3c4d"). */
+  provenance: string[];
+  /**
+   * `public` reaches the harness bridge index and therefore seeds future sessions — that is the
+   * whole point of the namespace, and why the session gets to choose. `owner` keeps a note inside
+   * the graph. There is no `dm` arm: a free-time session is in nobody's conversation.
+   */
+  visibility: "public" | "owner";
+  /** Logged into the memory git commit, like remember's reason. */
+  reason: string;
+}
+
 // isInferenceNode lives in ./search.ts (pure over nodes, cycle-free for agent-recall);
 // re-exported here so write-path consumers import it alongside the store.
 export { isInferenceNode } from "./search.ts";
@@ -177,6 +202,7 @@ const TYPE_FOLDER: Record<string, string> = {
   reference: "references",
   decision: "decisions",
   dream: "dreams",
+  "free-time": "free-time",
 };
 
 /** Deterministic metadata key order for clean one-line git diffs (Spec 08 §4.5). */
@@ -477,47 +503,124 @@ export class MemoryStore implements Memory {
   }
 
   private async rememberDreamLocked(input: DreamRememberInput): Promise<MemoryNode> {
-    if (!DREAM_NAME_RE.test(input.name)) {
+    const provenance = (input.provenance ?? []).map((s) => String(s).trim()).filter(Boolean);
+    if (DREAM_NAME_RE.test(input.name) && input.description?.trim() && !provenance.length) {
+      throw new Error(`memory.rememberDream: a dream memory needs a non-empty provenance list ('${input.name}')`);
+    }
+    return this.createOnlyLocked({
+      method: "rememberDream",
+      noun: "dream",
+      name: input.name,
+      nameRe: DREAM_NAME_RE,
+      nameShape: "dream-YYYY-MM-DD-<kebab-slug>",
+      type: "dream",
+      description: input.description ?? "",
+      body: input.body,
+      metadata: { inference: true, provenance },
+      reason: input.reason,
+    });
+  }
+
+  /**
+   * Create-only write for a free-time session's durable note (docs/freetime.md). The SAME
+   * containment as {@link rememberDream}, one namespace over: the name must match
+   * {@link FREE_TIME_NAME_RE}, an existing node or file under that name throws instead of being
+   * updated, and the session id rides along as provenance. `inference: true` is forced — a note
+   * written by a model with nobody watching is a claim, not an observation, and the bridge index
+   * labels it as one.
+   *
+   * `visibility` is the session's own call and is the reason this method exists: a `public` note
+   * reaches the harness bridge index ({@link ./bridge.ts}) and seeds the next session, which is
+   * the continuity the whole feature is for. `owner` keeps it inside the graph.
+   */
+  async rememberFreeTime(input: FreeTimeRememberInput): Promise<MemoryNode> {
+    return this.withLock(() => this.rememberFreeTimeLocked(input));
+  }
+
+  private async rememberFreeTimeLocked(input: FreeTimeRememberInput): Promise<MemoryNode> {
+    const provenance = (input.provenance ?? []).map((s) => String(s).trim()).filter(Boolean);
+    if (FREE_TIME_NAME_RE.test(input.name) && input.description?.trim() && !provenance.length) {
       throw new Error(
-        `memory.rememberDream: invalid dream node name '${input.name}' (must be dream-YYYY-MM-DD-<kebab-slug>)`,
+        `memory.rememberFreeTime: a free-time memory needs a non-empty provenance list ('${input.name}')`,
       );
     }
-    if (!input.description?.trim()) {
-      throw new Error(`memory.rememberDream: 'description' is required for '${input.name}'`);
+    const visibility = input.visibility === "owner" ? "owner" : "public";
+    return this.createOnlyLocked({
+      method: "rememberFreeTime",
+      noun: "free-time",
+      name: input.name,
+      nameRe: FREE_TIME_NAME_RE,
+      nameShape: "free-time-YYYY-MM-DD-<kebab-slug>",
+      type: "free-time",
+      description: input.description ?? "",
+      body: input.body,
+      metadata: { inference: true, provenance, visibility },
+      reason: input.reason,
+    });
+  }
+
+  /**
+   * The shared body of every NAMESPACED, CREATE-ONLY write (`rememberDream`, `rememberFreeTime`).
+   * Deliberately narrower than {@link remember} — the containment is structural, not prompted:
+   *
+   *   - the name MUST match the namespace's regex, so the writer can never name (and thereby
+   *     update) an existing node outside its own namespace;
+   *   - if ANY node or file already answers to the name, it throws — no update, no append, no
+   *     similarity dedup/merge. Neither caller can physically edit or delete an existing memory.
+   *   - `metadata.type` and the caller's forced fields are set here, whatever else was passed;
+   *   - the backlink-refresh sweep that {@link remember} runs over link targets is SKIPPED: one
+   *     new node file plus the generated MEMORY.md index. (`## Backlinks` sections are derived
+   *     state; the graph's edges come from the files.)
+   */
+  private async createOnlyLocked(opts: {
+    /** The public method name, so every refusal reads as the caller a human actually invoked. */
+    method: string;
+    /** How the namespace is spoken about in a refusal ("dream", "free-time"). */
+    noun: string;
+    name: string;
+    nameRe: RegExp;
+    nameShape: string;
+    type: string;
+    description: string;
+    body?: string;
+    metadata: Record<string, unknown>;
+    reason: string;
+  }): Promise<MemoryNode> {
+    const { method, noun, name } = opts;
+    if (!opts.nameRe.test(name)) {
+      throw new Error(`memory.${method}: invalid ${noun} node name '${name}' (must be ${opts.nameShape})`);
     }
-    const provenance = (input.provenance ?? []).map((s) => String(s).trim()).filter(Boolean);
-    if (!provenance.length) {
-      throw new Error(`memory.rememberDream: a dream memory needs a non-empty provenance list ('${input.name}')`);
+    if (!opts.description?.trim()) {
+      throw new Error(`memory.${method}: 'description' is required for '${name}'`);
     }
     this.warmGraph = undefined;
     this.mossSyncedGraph = undefined;
     await this.ensureDir();
     let g = this.buildGraph();
 
-    const prior = g.nodes.get(input.name);
+    const prior = g.nodes.get(name);
     if (prior && !prior.phantom) {
-      throw new Error(`memory.rememberDream: '${input.name}' already exists — dream memories are create-only`);
+      throw new Error(`memory.${method}: '${name}' already exists — ${noun} memories are create-only`);
     }
-    const path = this.pathFor(input.name, "dream");
+    const path = this.pathFor(name, opts.type);
     if (existsSync(path)) {
       // A file the graph didn't parse (malformed/archived remnant) still blocks: never overwrite.
-      throw new Error(`memory.rememberDream: a file already exists at ${path} — dream memories are create-only`);
+      throw new Error(`memory.${method}: a file already exists at ${path} — ${noun} memories are create-only`);
     }
 
     const now = nowIso();
     const node: MemoryNode = {
-      name: input.name,
-      type: "dream",
-      description: input.description.trim(),
+      name,
+      type: opts.type,
+      description: opts.description.trim(),
       metadata: {
-        type: "dream",
-        inference: true,
-        provenance,
+        type: opts.type,
+        ...opts.metadata,
         created: now,
         updated: now,
         source: "derived",
       },
-      body: (input.body ?? "").trim(),
+      body: (opts.body ?? "").trim(),
       path,
       created: now,
       updated: now,
@@ -531,12 +634,12 @@ export class MemoryStore implements Memory {
     // Rebuild for the derived index; deliberately NO refreshBacklinksOnDisk sweep (see above).
     g = this.buildGraph();
     this.atomicWrite(join(this.dir, "MEMORY.md"), renderIndex(g));
-    await this.commit(`memory: dream ${input.name} (${input.reason})`);
+    await this.commit(`memory: ${noun} ${name} (${opts.reason})`);
     await this.syncMossQuietly(g);
     this.syncBridge(g);
 
-    const result = g.nodes.get(input.name);
-    if (!result) throw new Error(`memory.rememberDream: node '${input.name}' missing after write`);
+    const result = g.nodes.get(name);
+    if (!result) throw new Error(`memory.${method}: node '${name}' missing after write`);
     return result;
   }
 

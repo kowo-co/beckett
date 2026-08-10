@@ -5,15 +5,12 @@ import { join } from "node:path";
 import { BROWSER_RESULT_SCHEMA } from "./agent.ts";
 import { BROWSER_TOOL_DEFINITION, handleMcpRequest, validateMcpBatch } from "./mcp.ts";
 import type { BrowserEvalResult } from "./runtime.ts";
+import betterwrightPkg from "betterwright/package.json";
 
 const emptyEval: BrowserEvalResult = {
   value: { ok: true },
-  console: [],
   pages: [{ index: 0, active: true, url: "https://example.test", title: "Example" }],
-  events: [],
-  screenshots: [],
   elapsedMs: 7,
-  truncated: false,
 };
 
 describe("browser MCP", () => {
@@ -25,6 +22,10 @@ describe("browser MCP", () => {
     );
     expect(initialized).toMatchObject({ result: { capabilities: { tools: {} } } });
     expect(initialized).toMatchObject({ result: { protocolVersion: "2025-06-18" } });
+    expect(initialized).toMatchObject({
+      result: { serverInfo: { name: "beckett-browser", version: betterwrightPkg.version } },
+    });
+    expect(betterwrightPkg.version).toMatch(/^\d+\.\d+\.\d+/);
     const future = await handleMcpRequest(
       { jsonrpc: "2.0", id: 4, method: "initialize", params: { protocolVersion: "2099-01-01" } },
       deps,
@@ -83,6 +84,56 @@ describe("browser MCP", () => {
     expect(content[1]?.text).not.toContain("42");
   });
 
+  test("the tool schema declares optional note and timeoutMs and still requires only code", () => {
+    expect(BROWSER_TOOL_DEFINITION.inputSchema.required).toEqual(["code"]);
+    expect(BROWSER_TOOL_DEFINITION.inputSchema.properties.note.maxLength).toBe(300);
+    expect(BROWSER_TOOL_DEFINITION.inputSchema.properties.timeoutMs.maximum).toBe(300000);
+  });
+
+  test("forwards note and a clamped timeout to the evaluator", async () => {
+    const recorded: { code: string; options?: { note?: string; timeoutMs?: number } }[] = [];
+    const deps = {
+      evaluate: async (code: string, options?: { note?: string; timeoutMs?: number }) => {
+        recorded.push({ code, options });
+        return emptyEval;
+      },
+    };
+    await handleMcpRequest({
+      jsonrpc: "2.0",
+      id: 20,
+      method: "tools/call",
+      params: {
+        name: "betterwright_browser",
+        arguments: { code: "return 1", note: "  Signing in  ", timeoutMs: 120_000 },
+      },
+    }, deps);
+    expect(recorded.at(-1)?.options).toEqual({ note: "Signing in", timeoutMs: 120_000 });
+
+    await handleMcpRequest({
+      jsonrpc: "2.0",
+      id: 21,
+      method: "tools/call",
+      params: { name: "betterwright_browser", arguments: { code: "return 1", timeoutMs: 999 } },
+    }, deps);
+    expect(recorded.at(-1)?.options).toEqual({ timeoutMs: 1_000 });
+
+    await handleMcpRequest({
+      jsonrpc: "2.0",
+      id: 22,
+      method: "tools/call",
+      params: { name: "betterwright_browser", arguments: { code: "return 1", timeoutMs: 10_000_000 } },
+    }, deps);
+    expect(recorded.at(-1)?.options).toEqual({ timeoutMs: 300_000 });
+
+    await handleMcpRequest({
+      jsonrpc: "2.0",
+      id: 23,
+      method: "tools/call",
+      params: { name: "betterwright_browser", arguments: { code: "return 1", note: 42 as never } },
+    }, deps);
+    expect(recorded.at(-1)?.options).toEqual({});
+  });
+
   test("rejects oversized evaluator programs before the daemon boundary", async () => {
     const response = await handleMcpRequest({
       jsonrpc: "2.0",
@@ -129,6 +180,36 @@ describe("browser MCP", () => {
     const failureText = ((failure!.result as { content: { text: string }[] }).content[0]!.text);
     expect(failureText.length).toBeLessThanOrEqual(4_096);
     expect(failureText).toEndWith("...[truncated to MCP output budget]");
+  });
+
+  test("an empty envelope serializes to the minimal payload", async () => {
+    const padded = { ...emptyEval, console: [], events: [], screenshots: [], truncated: false } as BrowserEvalResult;
+    const response = await handleMcpRequest(
+      { jsonrpc: "2.0", id: 21, method: "tools/call", params: { name: "betterwright_browser", arguments: { code: "return 1" } } },
+      { evaluate: async () => padded },
+    );
+    const text = (response!.result as { content: { text: string }[] }).content[0]!.text;
+    expect(text).toBe(JSON.stringify(emptyEval));
+    expect(text).not.toContain("truncated");
+  });
+
+  test("challenges, warnings, skills, and pendingCredential pass through the payload", async () => {
+    const rich = {
+      ...emptyEval,
+      warnings: ["dropped duplicate --disable-gpu"],
+      challenges: [{ type: "bot_challenge", provider: "turnstile" }],
+      skills: [{ name: "github", description: "GitHub flows", path: "/skills/github.md" }],
+      pendingCredential: { pendingId: "p1", origin: "https://x.test", matchMode: "base-domain", username: null, label: null, expiresAt: null },
+    } as BrowserEvalResult;
+    const response = await handleMcpRequest(
+      { jsonrpc: "2.0", id: 22, method: "tools/call", params: { name: "betterwright_browser", arguments: { code: "return 1" } } },
+      { evaluate: async () => rich },
+    );
+    const parsed = JSON.parse((response!.result as { content: { text: string }[] }).content[0]!.text);
+    expect(parsed.warnings).toEqual(["dropped duplicate --disable-gpu"]);
+    expect(parsed.challenges[0].provider).toBe("turnstile");
+    expect(parsed.skills[0].name).toBe("github");
+    expect(parsed.pendingCredential.pendingId).toBe("p1");
   });
 });
 

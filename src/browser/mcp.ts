@@ -11,7 +11,8 @@
 import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { callBus } from "../shell/control-bus.ts";
-import type { BrowserEvalResult } from "./runtime.ts";
+import { MAX_BROWSER_EVAL_CALL_TIMEOUT_MS, MAX_BROWSER_EVAL_NOTE_CHARS, type BrowserEvalResult } from "./runtime.ts";
+import betterwrightPkg from "betterwright/package.json";
 
 const TOOL_NAME = "betterwright_browser";
 const MAX_CODE_CHARS = 100_000;
@@ -36,6 +37,17 @@ export const BROWSER_TOOL_DEFINITION = {
         description: "BetterWright browser JavaScript body. Use return to send useful data back.",
         maxLength: MAX_CODE_CHARS,
       },
+      note: {
+        type: "string",
+        maxLength: 300,
+        description: "Short present-tense status line for anyone watching this run (e.g. 'Signing in to GitHub'). Shown on the live view; never executed.",
+      },
+      timeoutMs: {
+        type: "integer",
+        minimum: 1000,
+        maximum: 300000,
+        description: "Per-call timeout override in milliseconds for one slow action (big page load, long download). Defaults to the host eval timeout.",
+      },
     },
     required: ["code"],
     additionalProperties: false,
@@ -50,7 +62,7 @@ interface JsonRpcRequest {
 }
 
 interface McpDeps {
-  evaluate(code: string): Promise<BrowserEvalResult>;
+  evaluate(code: string, options?: { note?: string; timeoutMs?: number }): Promise<BrowserEvalResult>;
   maxOutputChars?: number;
 }
 
@@ -60,6 +72,20 @@ function boundMcpText(value: string, maxChars: number): string {
   if (value.length <= maxChars) return value;
   const suffix = "\n...[truncated to MCP output budget]";
   return `${value.slice(0, Math.max(0, maxChars - suffix.length))}${suffix}`;
+}
+
+/** Envelope keys compacted before serialization. `value`/`pages` are model data — never touched. */
+const OMIT_WHEN_EMPTY = ["console", "events", "screenshots", "attachments", "warnings", "challenges", "skills"] as const;
+export function compactEvalPayload<T extends Record<string, unknown>>(payload: T): T {
+  const compact = { ...payload } as Record<string, unknown>;
+  for (const key of OMIT_WHEN_EMPTY) {
+    const entry = compact[key];
+    if (Array.isArray(entry) && entry.length === 0) delete compact[key];
+  }
+  if (compact.truncated === false) delete compact.truncated;
+  if (compact.elapsedMs === 0) delete compact.elapsedMs;
+  if (compact.pendingCredential == null) delete compact.pendingCredential;
+  return compact as T;
 }
 
 export async function handleMcpRequest(message: JsonRpcRequest, deps: McpDeps): Promise<Record<string, unknown> | null> {
@@ -80,7 +106,7 @@ export async function handleMcpRequest(message: JsonRpcRequest, deps: McpDeps): 
     return result({
       protocolVersion,
       capabilities: { tools: {} },
-      serverInfo: { name: "beckett-browser", version: "1.0.0" },
+      serverInfo: { name: "beckett-browser", version: betterwrightPkg.version },
     });
   }
   if (message.method === "ping") return result({});
@@ -98,15 +124,22 @@ export async function handleMcpRequest(message: JsonRpcRequest, deps: McpDeps): 
     return error(-32602, `${TOOL_NAME} requires a non-empty code string`);
   }
   if (args.code.length > MAX_CODE_CHARS) return error(-32602, `${TOOL_NAME} code exceeds ${MAX_CODE_CHARS} characters`);
+  const rawNote = args.note;
+  const rawTimeout = args.timeoutMs;
+  const callOptions: { note?: string; timeoutMs?: number } = {};
+  if (typeof rawNote === "string" && rawNote.trim()) callOptions.note = rawNote.trim().slice(0, MAX_BROWSER_EVAL_NOTE_CHARS);
+  if (typeof rawTimeout === "number" && Number.isSafeInteger(rawTimeout) && rawTimeout > 0) {
+    callOptions.timeoutMs = Math.min(Math.max(rawTimeout, 1_000), MAX_BROWSER_EVAL_CALL_TIMEOUT_MS);
+  }
   try {
-    const evaluated = await deps.evaluate(args.code);
+    const evaluated = await deps.evaluate(args.code, callOptions);
     const maxOutputChars = deps.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
     // Mid-run guidance from the dispatcher rides the eval response (see the daemon's
     // browser.eval boundary); surface it as its own block so it reads as instruction, not data.
     const { steering, ...payload } = evaluated as BrowserEvalResult & { steering?: unknown };
     const notes = Array.isArray(steering) ? steering.filter((note): note is string => typeof note === "string") : [];
     const content: Record<string, unknown>[] = [
-      { type: "text", text: boundMcpText(JSON.stringify(payload), maxOutputChars) },
+      { type: "text", text: boundMcpText(JSON.stringify(compactEvalPayload(payload)), maxOutputChars) },
     ];
     if (notes.length > 0) {
       content.push({
@@ -117,7 +150,7 @@ export async function handleMcpRequest(message: JsonRpcRequest, deps: McpDeps): 
           notes.map((note) => `- ${note}`).join("\n"),
       });
     }
-    for (const path of evaluated.screenshots.slice(0, 3)) {
+    for (const path of (evaluated.screenshots ?? []).slice(0, 3)) {
       try {
         content.push({ type: "image", data: readFileSync(path).toString("base64"), mimeType: "image/png" });
       } catch {
@@ -181,8 +214,14 @@ async function main(): Promise<void> {
     maxOutputChars: Number.isSafeInteger(maxOutputChars) && maxOutputChars >= 4_096
       ? maxOutputChars
       : DEFAULT_MAX_OUTPUT_CHARS,
-    evaluate: async (code) => {
-      const response = await callBus(socket, "browser.eval", { runId, controlToken, code }, timeoutMs);
+    evaluate: async (code, options) => {
+      const waitMs = Math.max(timeoutMs, (options?.timeoutMs ?? 0) + 30_000);
+      const response = await callBus(
+        socket,
+        "browser.eval",
+        { runId, controlToken, code, ...(options?.note ? { note: options.note } : {}), ...(options?.timeoutMs ? { timeoutMs: options.timeoutMs } : {}) },
+        waitMs,
+      );
       if (!response.ok) throw new Error(response.error ?? "browser evaluation failed");
       return response.data as BrowserEvalResult;
     },

@@ -168,7 +168,7 @@ test("issue #98: an unresumable resume re-drives the SAME turn on the seeded fre
       // The seeded fresh session inits and answers normally.
       sess.handleLine(JSON.stringify({ type: "system", subtype: "init" }), child);
       sess.handleLine(
-        JSON.stringify({ type: "result", structured_output: { decision: "send", message: "ok, here's where we were" } }),
+        JSON.stringify({ type: "result", structured_output: { decision: "send", voice_check: "", message: "ok, here's where we were" } }),
         child,
       );
     }
@@ -260,7 +260,7 @@ test("a soft timeout keeps the child alive and delivers its late real result", (
 
   s.handleLine(JSON.stringify({
     type: "result",
-    structured_output: { decision: "send", message: "the real answer" },
+    structured_output: { decision: "send", voice_check: "", message: "the real answer" },
   }), child);
 
   expect(delivered).toEqual({
@@ -346,7 +346,7 @@ test("issue #139: the hard deadline does NOT reap when a late real result arrive
 
   // The completed-but-late REAL answer lands inside the late window — the whole point of the soft
   // deadline. onResult clears the hard timer, so the reaper must never fire.
-  s.handleLine(JSON.stringify({ type: "result", structured_output: { decision: "send", message: "the real answer" } }), child);
+  s.handleLine(JSON.stringify({ type: "result", structured_output: { decision: "send", voice_check: "", message: "the real answer" } }), child);
   expect(delivered).toEqual({ decision: "send", message: "Sorry, that took a while —\n\nthe real answer" });
   expect(s.pending).toBeNull();
 
@@ -488,7 +488,7 @@ test("issue #150: a turn still emitting events past the old 6-minute wall clock 
   expect(s.pending).not.toBeNull();
 
   // ...and the turn's real answer lands, unframed: it was never late, only long.
-  s.handleLine(JSON.stringify({ type: "result", structured_output: { decision: "send", message: "the real answer" } }), child);
+  s.handleLine(JSON.stringify({ type: "result", structured_output: { decision: "send", voice_check: "", message: "the real answer" } }), child);
   expect(delivered).toEqual({ decision: "send", message: "the real answer" });
   expect(s.pending).toBeNull();
 });
@@ -512,7 +512,7 @@ test("issue #150: an event during the reap window disarms the reaper — the sta
   expect(delivered).toBeUndefined();
 
   // `timedOut` stays sticky: the person really did wait through that quiet stretch.
-  s.handleLine(JSON.stringify({ type: "result", structured_output: { decision: "send", message: "the real answer" } }), child);
+  s.handleLine(JSON.stringify({ type: "result", structured_output: { decision: "send", voice_check: "", message: "the real answer" } }), child);
   expect(delivered).toEqual({ decision: "send", message: "Sorry, that took a while —\n\nthe real answer" });
 });
 
@@ -613,7 +613,7 @@ test("reasoning before a pass decision is never promoted to Discord output", () 
     reject: () => {},
   };
 
-  s.handleLine(JSON.stringify({ type: "result", structured_output: { decision: "pass", message: null } }), child);
+  s.handleLine(JSON.stringify({ type: "result", structured_output: { decision: "pass", voice_check: "", message: null } }), child);
 
   expect(delivered).toEqual({ decision: "pass", message: null });
   expect(s.pending).toBeNull();
@@ -638,7 +638,7 @@ test("a malformed delivery object on a live turn surfaces (warn + notice) instea
   const child = {};
   const malformed = JSON.stringify({
     type: "result",
-    structured_output: { decision: "wat", message: "half a thought" }, // bad enum → parses to null
+    structured_output: { decision: "wat", voice_check: "", message: "half a thought" }, // bad enum → parses to null
   });
 
   // Directed turn: the person is owed a word.

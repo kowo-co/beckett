@@ -109,6 +109,43 @@ test("a restart inside the window neither re-rolls the chosen time nor double-fi
   expect(rec2.calls.length).toBe(0);
 });
 
+test("a deferred fire does NOT claim its period, and the next tick fires it (docs/freetime.md)", async () => {
+  const { store } = makeStore();
+  const { calls } = recorder();
+  let busy = true;
+  const scheduler = startRoutineScheduler({
+    store,
+    dispatcher: {
+      async dispatch(plan) {
+        calls.push(plan);
+      },
+      // Stands in for the free-time idle gate: defer while the machine is busy.
+      deferReason: (plan) => (busy && plan.routineId === "daily-x-shitpost" ? "busy" : null),
+    },
+    logger: quietLogger,
+    now: () => INSIDE,
+    rng: () => 0,
+    intervalMs: 10_000_000,
+  });
+  stoppers.push(scheduler.stop);
+
+  await scheduler.tick();
+  expect(calls.some((c) => c.routineId === "daily-x-shitpost")).toBe(false);
+  // The period is deliberately UNCLAIMED — that is what makes the retry possible.
+  expect((await store.get("daily-x-shitpost"))!.state.lastFiredPeriodKey).toBeNull();
+  // …and every other routine claimed and fired as always: deferral is per-fire, not a pause.
+  expect((await store.get("nightly-dream"))!.state.lastFiredPeriodKey).toBe("2026-07-20");
+
+  busy = false;
+  await scheduler.tick();
+  expect(calls.filter((c) => c.routineId === "daily-x-shitpost").length).toBe(1);
+  expect((await store.get("daily-x-shitpost"))!.state.lastFiredPeriodKey).toBe("2026-07-20");
+
+  // Still once per period after the deferral — the retry did not buy a second fire.
+  await scheduler.tick();
+  expect(calls.filter((c) => c.routineId === "daily-x-shitpost").length).toBe(1);
+});
+
 test("does not fire before the chosen time", async () => {
   const { store } = makeStore();
   await store.setState("daily-x-shitpost", {

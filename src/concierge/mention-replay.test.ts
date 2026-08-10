@@ -133,7 +133,7 @@ test("a result with no delivery object re-drives the same turn instead of postin
       s.handleLine(JSON.stringify({ type: "result" }), child);
     } else {
       s.handleLine(
-        JSON.stringify({ type: "result", structured_output: { decision: "send", message: "yeah — v6.23 went out at 21:56" } }),
+        JSON.stringify({ type: "result", structured_output: { decision: "send", voice_check: "", message: "yeah — v6.23 went out at 21:56" } }),
         child,
       );
     }

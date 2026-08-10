@@ -166,6 +166,8 @@ export interface StagePromptArgs {
   steering?: string[];
   /** The pre-read contribution diff for review prompts (issue #27). */
   reviewDiff?: string;
+  /** Spawn-time workspace snapshot (env-bootstrap block), pre-gathered by spawn.ts. */
+  envBootstrap?: string;
 }
 
 /** Inputs to a stage's system-append builder (the worker persona + scope). */
@@ -253,6 +255,8 @@ export interface StageDefinition {
   readonly capturesBaseSha?: boolean;
   /** Pre-read the ticket's contribution diff into the prompt (review, issue #27). */
   readonly preloadsDiff?: boolean;
+  /** Gather the spawn-time workspace snapshot into the prompt (implement + rework). */
+  readonly wantsEnvBootstrap?: boolean;
   /** Resolve the stage's cast: apply the stage default when the ticket casts nothing. */
   resolveCast(explicit: HarnessSpec | undefined, ticket: Ticket, config: Config): HarnessSpec;
   /** The initial task brief (first user turn) handed to the worker. */
@@ -391,9 +395,10 @@ function designDocPath(ticket: Ticket): string {
 }
 
 /** The generic task brief — the implement stage's prompt AND the unknown-stage fallback. */
-function genericTaskPrompt({ ticket, steering }: StagePromptArgs): string {
+function genericTaskPrompt({ ticket, steering, envBootstrap }: StagePromptArgs): string {
   const body = ticket.body.trim() ? `\n\n${ticket.body.trim()}` : "";
-  return `<task>\n${taskHeader(ticket)}${body}\n</task>${taskCriteria(ticket)}${steeringBlock(steering)}`;
+  const envBlock = envBootstrap?.trim() ? `\n\n${envBootstrap.trim()}` : "";
+  return `<task>\n${taskHeader(ticket)}${body}\n</task>${taskCriteria(ticket)}${steeringBlock(steering)}${envBlock}`;
 }
 
 /**
@@ -502,6 +507,7 @@ const implementStage: StageDefinition = {
   name: "implement",
   entryState: "in_progress",
   capturesBaseSha: true,
+  wantsEnvBootstrap: true,
   resolveCast: (explicit) => explicit ?? { harness: "claude" },
   buildPrompt: genericTaskPrompt,
   buildSystemAppend: (args) => workerSystemAppend(args),

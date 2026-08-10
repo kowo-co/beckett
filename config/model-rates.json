@@ -59,14 +59,14 @@
       "source": "Estimate: no public price sheet exists for the 5 label; based on the current Sonnet $3/$15 tier. Anthropic cache read is 0.1× input and 5m cache creation is 1.25× input."
     },
     "claude-fable-5": {
-      "input": 1,
-      "output": 5,
-      "cache_read": 0.1,
-      "cache_write": 1.25,
+      "input": 10,
+      "output": 50,
+      "cache_read": 1,
+      "cache_write": 12.5,
       "cache_read_multiplier": 0.1,
       "cache_creation_multiplier": 1.25,
       "estimate": true,
-      "source": "Estimate: Fable is an internal/runtime label with no published API SKU; based on the Haiku tier. Anthropic cache read is 0.1× input and 5m cache creation is 1.25× input."
+      "source": "Estimate: Fable/Mythos tier at $10/$50 per docs/token-efficiency.md audit (previous Haiku-tier $1/$5 entry was a 10x underestimate). Anthropic cache read is 0.1× input and 5m cache creation is 1.25× input."
     },
     "claude-haiku-4-5": {
       "input": 1,
