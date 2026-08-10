@@ -989,6 +989,14 @@ export interface Config {
     max_live_sessions: number;
     /** Idle minutes before a session's child is recycled (transcript survives via --resume). */
     idle_recycle_minutes: number;
+    /**
+     * Directed-message settle window in ms (src/concierge/directed-settle.ts). A directed message
+     * that would start a NEW turn waits this long first; another message from the same author in
+     * the same channel inside the hold folds into ONE turn (the existing coalesced-burst preamble)
+     * and restarts the hold, capped at 2× the window. **0 = OFF and is the default** — off is
+     * today's behavior byte-for-byte. Clamped to 3000 by the schema.
+     */
+    directed_settle_ms: number;
   };
   /**
    * Quick agents — the NO-TICKET lane: short-lived specialist `claude -p` harnesses

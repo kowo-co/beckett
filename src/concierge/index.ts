@@ -89,11 +89,19 @@ import { BROWSER_QUESTION_SUFFIX } from "../browser/question-message.ts";
 import {
   createAmbientCoordinator,
   isAmbientPass,
+  realClock,
   type AmbientClock,
   type AmbientCoordinator,
   type AmbientTranscriptMessage,
   type AmbientTurn,
 } from "./ambient.ts";
+import {
+  clampSettleWindowMs,
+  decideSettle,
+  settleKey,
+  DIRECTED_SETTLE_MAX_MS,
+  type SettleHoldState,
+} from "./directed-settle.ts";
 import {
   createChannelContextStore,
   renderEntryLine,
@@ -2453,6 +2461,32 @@ function isMentionClaim(meta: unknown): meta is MentionClaim {
 }
 
 /**
+ * One directed turn parked by the settle window ({@link decideSettle}), waiting to see whether its
+ * author is still typing.
+ *
+ * The NEWEST message always anchors the hold: it owns the turn that eventually runs, it is what the
+ * reply is a native reply TO, and the messages it superseded ride along as `carried` text (folded
+ * by the same {@link coalescedBurstNote} a superseded QUEUED turn uses) plus `absorbedIds` (the
+ * same ledger/watermark bookkeeping an INJECTED mid-flow message uses). That is deliberate: this
+ * feature adds a timing decision, not a third way to render or account for a burst.
+ */
+interface HeldDirectedTurn {
+  /** The newest message — the one whose turn will run and whose author the reply answers. */
+  m: IncomingMessage;
+  /** The newest message's turn text (forwarded snapshots already folded in). */
+  anchorText: string;
+  workspace: TicketWorkspaceContext | null;
+  /** The newest message's claim. Older claims are discarded once their text is carried. */
+  mention: MentionClaim;
+  /** Texts this turn owes an answer to, oldest first, NOT including {@link anchorText}. */
+  carried: string[];
+  /** Message ids superseded inside the hold. They ride the anchor's single reply. */
+  absorbedIds: string[];
+  state: SettleHoldState;
+  timer: unknown;
+}
+
+/**
  * A DIRECT @mention or DM — a person addressed Beckett and is owed an answer, so a dead turn must
  * surface (issue #139). Ambient/un-addressed turns share the {@link MentionClaim} shape but carry
  * `ambient: true`; a failed ambient interjection is correctly invisible, so it is excluded here.
@@ -2672,6 +2706,19 @@ export class Concierge {
    */
   private readonly requeuedInjections = new Set<string>();
   /**
+   * Directed turns currently held by the settle window ({@link decideSettle}), keyed by
+   * {@link settleKey} — one hold per (channel, author), never per channel. EMPTY AND UNTOUCHED
+   * unless `concierge.directed_settle_ms > 0`; with the window off nothing ever writes here, so
+   * the directed path runs exactly as it did before this map existed.
+   */
+  private readonly settleHolds = new Map<string, HeldDirectedTurn>();
+  /**
+   * Timer seam for the settle window: the injected ambient FakeClock in tests, real timers in
+   * production. Shared with {@link nowMs} so a held turn's due time and the clock that fires it
+   * can never disagree.
+   */
+  private readonly settleClock: AmbientClock;
+  /**
    * The boot replay drain ({@link replayOwedMentions}), kept so tests — and any future shutdown
    * path that wants to wait for it — can await something. Resolved when no replay is running.
    */
@@ -2826,6 +2873,7 @@ export class Concierge {
     // clock or it expires them as decades old), the real clock in production.
     const ambientClock = opts.ambientClock;
     this.nowMs = ambientClock ? () => ambientClock.now() : Date.now;
+    this.settleClock = ambientClock ?? realClock;
     // Lazy on the filesystem like everything else built here — constructing a Concierge still
     // touches nothing; the first claim (or the boot snapshot) reads.
     this.owed = createOwedMentionStore({
@@ -3920,6 +3968,11 @@ export class Concierge {
     }
     this.busStop = null;
     this.ambient?.stop();
+    // A message parked by the settle window has been ACCEPTED — it is in the owed ledger and the
+    // person has seen a typing indicator. Letting its timer die with the process would make the
+    // window the one directed path that can swallow a message, so every hold is released into a
+    // real turn here. No-op unless `concierge.directed_settle_ms` is set.
+    this.flushSettleHolds("daemon stopping");
     // Drain buffered `-# filed …` receipts BEFORE the gateway closes. A restart landing inside the
     // window would otherwise swallow the only signal that a filing happened at all.
     await this.flushAllFiledLines();
@@ -5703,6 +5756,16 @@ export class Concierge {
     };
     this.activeMentions.set(m.channelId, mention);
 
+    // SETTLE WINDOW, half one (`concierge.directed_settle_ms`; inert at its 0 default). This
+    // author already has a turn PARKED on this channel — they were still typing — so this message
+    // joins it instead of racing it. Deliberately AHEAD of the interrupt block below: during a hold
+    // there is no live turn of this person's to cancel or inject into (the held message never
+    // started one), so a plausible amend arriving now is not an amend at all — it is simply the
+    // next fragment of the same thought, and folding is the whole mechanism. Every other message —
+    // different author, different channel, or this channel with no hold parked — falls straight
+    // through to the untouched paths below.
+    if (this.foldIntoSettleHold(m, turnContent, workspace, mention)) return;
+
     // In-flight interrupt (issue #117), narrowed to real amendments (the multitasking fix): a
     // person correcting their OWN ask while the turn is still composing gets cancel-and-amend —
     // the stale reply is suppressed, the session id retained, and THIS message answers promptly
@@ -5807,6 +5870,37 @@ export class Concierge {
     // those returns above, so none of them can ever reach a claim. Do not move this call up.
     this.owed.claim(m);
 
+    // SETTLE WINDOW, half two (inert at its 0 default). THIS is the only place a hold opens: the
+    // priority-queue path, the one branch where this message would start a brand-new turn. The
+    // amend path is excluded on purpose (`!amended`) — cancel-and-amend exists to answer a
+    // correction PROMPTLY, and it has already killed the turn that was in flight, so holding it
+    // would trade a fast answer for a slow one. The injection path never reaches this line (it
+    // returned above), and ambient never enters onMessage's directed half at all.
+    //
+    // Claiming above, not below: a held message is owed from the moment it ARRIVES. If the daemon
+    // dies mid-hold, the ledger — not the timer — is what gets the person their answer.
+    if (this.beginSettleHold(m, turnContent, workspace, mention, carriedTexts, amended)) return;
+
+    await this.runDirectedTurn(m, turnContent, workspace, mention, carriedTexts, amended);
+  }
+
+  /**
+   * Run one directed turn to completion: typing, prompt assembly (including any coalesced burst),
+   * the model ask, the reply, and the owed-ledger settle for this message and everything folded
+   * into it.
+   *
+   * Split out of {@link onMessage} verbatim so the settle window can start the SAME turn later
+   * without a second, drifting copy of the reply/ledger path. Callers: onMessage's own tail (the
+   * unheld case — unchanged) and {@link releaseSettleHold}.
+   */
+  private async runDirectedTurn(
+    m: IncomingMessage,
+    turnContent: string,
+    workspace: TicketWorkspaceContext | null,
+    mention: MentionClaim,
+    carriedTexts: string[],
+    amended: boolean,
+  ): Promise<void> {
     let keepTyping = true;
     const typing = setInterval(() => {
       if (keepTyping) void this.gateway.sendTyping(m.channelId);
@@ -5919,6 +6013,190 @@ export class Concierge {
       }
     } finally {
       if (this.activeMentions.get(m.channelId) === mention) this.activeMentions.delete(m.channelId);
+    }
+  }
+
+  // ── the directed settle window (src/concierge/directed-settle.ts) ─────────────────────────
+  //
+  // OFF BY DEFAULT, and off has to mean off: `settleWindowMs()` returns 0 unless the owner sets
+  // `concierge.directed_settle_ms`, both entry points below return false on 0 before touching any
+  // state, and neither the hold map nor a timer is ever created. The directed path with the window
+  // off is the path that existed before this section, line for line.
+
+  /** The configured window, clamped. 0 (the default) means the whole feature is inert. */
+  private settleWindowMs(): number {
+    return clampSettleWindowMs(this.config.concierge?.directed_settle_ms ?? 0, DIRECTED_SETTLE_MAX_MS);
+  }
+
+  /**
+   * Half one: this author already has a turn parked on this channel, so fold this message into it
+   * rather than letting it start a turn of its own. Returns true once the message has been taken.
+   *
+   * The NEW message becomes the anchor and the old one becomes carried text — the same direction
+   * the queue-supersede path folds in ({@link coalescedBurstNote} reads oldest-first, newest last),
+   * so the model sees a correction as following its original and the reply lands on the message the
+   * person sent most recently.
+   */
+  private foldIntoSettleHold(
+    m: IncomingMessage,
+    turnContent: string,
+    workspace: TicketWorkspaceContext | null,
+    mention: MentionClaim,
+  ): boolean {
+    const windowMs = this.settleWindowMs();
+    if (windowMs <= 0) return false;
+    const key = settleKey(m.channelId, m.userId);
+    const hold = this.settleHolds.get(key);
+    if (!hold) return false;
+
+    const decision = decideSettle({ windowMs, now: this.settleClock.now(), existing: hold.state });
+    if (decision.kind === "passthrough") return false; // unreachable at windowMs > 0; belt and braces
+
+    // Owed AT ARRIVAL, exactly as an unheld message is: from here until the anchor turn answers,
+    // this message is on the books, so a daemon that dies mid-hold replays it after boot.
+    this.owed.claim(m);
+    // Kept verbatim so the orphan path ({@link requeueOrphanedInjection}) can re-run it as its own
+    // real turn if the anchor turn dies without absorbing it — the same recovery a mid-flow
+    // injection gets, because this message rides a reply the same way.
+    this.rememberInjectedMessage(hold.m);
+
+    if (hold.anchorText.trim()) hold.carried.push(hold.anchorText);
+    hold.absorbedIds.push(hold.m.messageId);
+    hold.m = m;
+    hold.anchorText = turnContent;
+    hold.workspace = workspace;
+    hold.mention = mention;
+    hold.state = decision.state;
+
+    this.settleClock.clearTimeout(hold.timer);
+    hold.timer = null;
+    // Life, at the moment they sent it — not after the hold. A Discord typing indicator lasts ~10s,
+    // comfortably longer than any legal window, so this one refresh covers the hold and hands over
+    // to the turn's own typing loop.
+    void this.gateway.sendTyping(m.channelId);
+
+    if (decision.kind === "release") {
+      // The cap (2× the window). Someone typing without pause cannot hold their own answer any
+      // longer than this — the turn goes now, with everything they have said so far in it.
+      this.log.debug("directed settle hold hit its cap — releasing", {
+        channelId: m.channelId,
+        messageId: m.messageId,
+        folded: decision.state.folded,
+      });
+      this.settleHolds.delete(key);
+      void this.releaseSettleHold(hold, "cap reached");
+      return true;
+    }
+    hold.timer = this.settleClock.setTimeout(() => {
+      if (this.settleHolds.get(key) !== hold) return;
+      this.settleHolds.delete(key);
+      void this.releaseSettleHold(hold, "settled");
+    }, decision.delayMs);
+    this.log.debug("directed message folded into a settle hold", {
+      channelId: m.channelId,
+      messageId: m.messageId,
+      folded: decision.state.folded,
+    });
+    return true;
+  }
+
+  /**
+   * Half two: park a directed message that would otherwise start a new turn. Returns true when the
+   * turn has been held (the caller must return — the turn runs later, from the timer).
+   *
+   * `amended` is the gate that keeps this off the cancel-and-amend path: that branch has already
+   * killed a turn to answer this correction quickly, and delaying it would undo the point.
+   */
+  private beginSettleHold(
+    m: IncomingMessage,
+    turnContent: string,
+    workspace: TicketWorkspaceContext | null,
+    mention: MentionClaim,
+    carriedTexts: string[],
+    amended: boolean,
+  ): boolean {
+    const windowMs = this.settleWindowMs();
+    if (windowMs <= 0 || amended) return false;
+    const key = settleKey(m.channelId, m.userId);
+    if (this.settleHolds.has(key)) return false; // folding is foldIntoSettleHold's job, not this one
+
+    const decision = decideSettle({ windowMs, now: this.settleClock.now(), existing: null });
+    if (decision.kind !== "hold") return false;
+
+    const hold: HeldDirectedTurn = {
+      m,
+      anchorText: turnContent,
+      workspace,
+      mention,
+      carried: [...carriedTexts],
+      absorbedIds: [],
+      state: decision.state,
+      timer: null,
+    };
+    this.settleHolds.set(key, hold);
+    // Typing at HOLD START, not at turn start: the person has to see life during the beat we are
+    // deliberately not answering in, or the window reads as being ignored.
+    void this.gateway.sendTyping(m.channelId);
+    hold.timer = this.settleClock.setTimeout(() => {
+      if (this.settleHolds.get(key) !== hold) return;
+      this.settleHolds.delete(key);
+      void this.releaseSettleHold(hold, "settled");
+    }, decision.delayMs);
+    this.log.debug("directed turn held for the settle window", {
+      channelId: m.channelId,
+      messageId: m.messageId,
+      windowMs,
+    });
+    return true;
+  }
+
+  /**
+   * Start the held turn. Everything folded into the hold rides the anchor's single reply, which is
+   * precisely what `injectedMessageIds` already means — watermark commit, `markDelivering`, and
+   * `settle` for each id all wait on this turn reaching a real result, and a turn that dies instead
+   * re-runs each of them through {@link requeueOrphanedInjection}. No second bookkeeping path.
+   */
+  private async releaseSettleHold(hold: HeldDirectedTurn, reason: string): Promise<void> {
+    if (hold.absorbedIds.length > 0) {
+      hold.mention.injectedMessageIds = [...(hold.mention.injectedMessageIds ?? []), ...hold.absorbedIds];
+    }
+    this.log.debug("directed settle hold released", {
+      channelId: hold.m.channelId,
+      messageId: hold.m.messageId,
+      folded: hold.state.folded,
+      reason,
+    });
+    try {
+      await this.runDirectedTurn(hold.m, hold.anchorText, hold.workspace, hold.mention, hold.carried, false);
+    } catch (err) {
+      this.log.warn("held directed turn failed", {
+        channelId: hold.m.channelId,
+        messageId: hold.m.messageId,
+        err: String(err),
+      });
+    }
+  }
+
+  /**
+   * Shutdown drain: a held message must never die in its own timer. Every hold is released into a
+   * real turn before the gateway closes — and because each held message was claimed in the owed
+   * ledger at ARRIVAL, one that cannot finish against a closing daemon is still on the books and
+   * gets answered by the boot replay. Deliberately not awaited: a turn can run for minutes and stop
+   * must not hang on one; the ledger, not this call, is the guarantee that nothing is lost.
+   */
+  private flushSettleHolds(reason: string): void {
+    if (this.settleHolds.size === 0) return;
+    const holds = [...this.settleHolds.values()];
+    this.settleHolds.clear();
+    for (const hold of holds) {
+      this.settleClock.clearTimeout(hold.timer);
+      hold.timer = null;
+      this.log.info("flushing a held directed turn", {
+        channelId: hold.m.channelId,
+        messageId: hold.m.messageId,
+        reason,
+      });
+      void this.releaseSettleHold(hold, reason);
     }
   }
 
