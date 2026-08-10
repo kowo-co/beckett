@@ -103,6 +103,8 @@ export interface CreateIsolatedBrowserRuntimeDeps {
   chromiumExecutable?: string;
   /** Managed CloakBrowser cache dir bound into the betterwright sandbox. */
   cloakCacheDir?: string;
+  /** Host Obscura install root bound read-only into the betterwright sandbox. */
+  obscuraRoot?: string;
   repoRoot?: string;
   bwrapPath?: string;
   sandboxExecPath?: string;
@@ -131,6 +133,8 @@ interface BuildBrowserHostLaunchOptions {
   hostPath: string;
   chromiumExecutable: string;
   cloakCacheDir?: string;
+  /** Host Obscura install root bound read-only into the betterwright sandbox. */
+  obscuraRoot?: string;
   /**
    * Host directory holding the CloakBrowser wrapper shim's `dist/index.js`. Only the
    * betterwright backend loads it; without it the lane keeps CloakBrowser's fabricated
@@ -144,6 +148,36 @@ interface BuildBrowserHostLaunchOptions {
   parentEnv?: NodeJS.ProcessEnv;
   budgetOverrides?: BrowserBudgetOverrides;
   backend?: "playwright" | "betterwright";
+}
+
+/**
+ * Obscura enablement for the sandboxed betterwright host. The sandbox sets
+ * HOME=/tmp/home, so betterwright's implicit ~/.betterwright/obscura discovery
+ * can never find the host install; instead, when the pinned binary exists on the
+ * host we point BETTERWRIGHT_OBSCURA_ROOT at it (and bind it read-only in bwrap).
+ * Explicit roots are STRICT in betterwright (missing binary throws), which is why
+ * the env var is gated on the binary existing. When it does not exist we set
+ * nothing: implicit discovery inside the sandbox finds nothing and betterwright
+ * falls back to the Chromium/Cloak compatibility backend (resolveObscuraBinary
+ * returns null for an absent implicit install). A root configured as "off"
+ * keeps the pre-1.7 pin as an operator kill switch. Note: an explicit root skips
+ * betterwright's version-marker check; deploy refreshes the install via
+ * `betterwright setup`, keeping the binary at the package's pin.
+ */
+export function obscuraLaunch(options: {
+  obscuraRoot: string;
+  platform?: NodeJS.Platform;
+  arch?: string;
+  exists?: (path: string) => boolean;
+}): { env: Record<string, string>; mountRoot: string | null } {
+  const platform = options.platform ?? process.platform;
+  const arch = options.arch ?? process.arch;
+  const exists = options.exists ?? existsSync;
+  const root = options.obscuraRoot.trim();
+  if (root.toLowerCase() === "off") return { env: { BETTERWRIGHT_OBSCURA_PATH: "off" }, mountRoot: null };
+  const binary = join(root, `${platform}-${arch}`, platform === "win32" ? "obscura.exe" : "obscura");
+  if (!exists(binary)) return { env: {}, mountRoot: null };
+  return { env: { BETTERWRIGHT_OBSCURA_ROOT: root }, mountRoot: root };
 }
 
 /** Pure command builder, exported so Linux/macOS sandbox policy remains unit-testable. */
@@ -181,13 +215,9 @@ export function buildBrowserHostLaunch(options: BuildBrowserHostLaunchOptions): 
     options.backend === "betterwright" && options.cloakCacheDir
       ? { CLOAKBROWSER_CACHE_DIR: options.cloakCacheDir, CLOAKBROWSER_AUTO_UPDATE: "false" }
       : {};
-  // Since betterwright 1.7.0, headless sessions default to the Obscura resident engine,
-  // installed under ~/.betterwright/obscura/ by `betterwright setup`. This sandbox only
-  // binds the managed CloakBrowser cache in (see the --ro-bind below), so an Obscura
-  // launch would find no binary and fail closed. Pin the pre-1.7 Chromium/Cloak
-  // compatibility backend instead (see docs/obscura.md: either override set to "off").
-  const obscuraEnv: Record<string, string> =
-    options.backend === "betterwright" ? { BETTERWRIGHT_OBSCURA_PATH: "off" } : {};
+  const obscura = options.backend === "betterwright" && options.obscuraRoot
+    ? obscuraLaunch({ obscuraRoot: options.obscuraRoot, platform: options.platform })
+    : { env: {}, mountRoot: null };
   // The shim reads the budget from the environment and appends CloakBrowser's
   // --fingerprint-storage-quota, the only switch that moves what
   // navigator.storage.estimate() reports. Inside bubblewrap the shim is bound beside
@@ -220,7 +250,7 @@ export function buildBrowserHostLaunch(options: BuildBrowserHostLaunchOptions): 
     BECKETT_BROWSER_HOST_SETTINGS: encodedSettings,
     BECKETT_BROWSER_BACKEND: options.backend ?? "playwright",
     ...cloakEnv,
-    ...obscuraEnv,
+    ...obscura.env,
     ...storageEnv(false),
     ...leaseEnv,
     ...(encodedBudgets ? { BECKETT_BROWSER_HOST_BUDGETS: encodedBudgets } : {}),
@@ -280,7 +310,7 @@ export function buildBrowserHostLaunch(options: BuildBrowserHostLaunchOptions): 
     ];
     if (encodedBudgets) args.push("--setenv", "BECKETT_BROWSER_HOST_BUDGETS", encodedBudgets);
     for (const [name, value] of Object.entries(cloakEnv)) args.push("--setenv", name, value);
-    for (const [name, value] of Object.entries(obscuraEnv)) args.push("--setenv", name, value);
+    for (const [name, value] of Object.entries(obscura.env)) args.push("--setenv", name, value);
     for (const [name, value] of Object.entries(storageEnv(true))) args.push("--setenv", name, value);
     for (const [name, value] of Object.entries(leaseEnv)) args.push("--setenv", name, value);
     args.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp");
@@ -319,6 +349,9 @@ export function buildBrowserHostLaunch(options: BuildBrowserHostLaunchOptions): 
     if (options.backend === "betterwright" && options.cloakCacheDir && existsSync(options.cloakCacheDir)) {
       args.push("--ro-bind", options.cloakCacheDir, options.cloakCacheDir);
     }
+    // Obscura's pinned binary, read-only at its host path (BETTERWRIGHT_OBSCURA_ROOT
+    // points here). obscuraLaunch only emits a mountRoot when the binary exists.
+    if (obscura.mountRoot) args.push("--ro-bind", obscura.mountRoot, obscura.mountRoot);
     // Read-only, and beside the host bundle rather than under /repo/src, so the shim
     // resolves `cloakbrowser` from the node_modules already bound below.
     if (options.backend === "betterwright" && options.cloakShimDir) {
@@ -352,6 +385,7 @@ export function buildBrowserHostLaunch(options: BuildBrowserHostLaunchOptions): 
         execPath: nodePath,
         browserRoot,
         cloakCacheDir: options.backend === "betterwright" ? options.cloakCacheDir : undefined,
+        obscuraRoot: obscura.mountRoot ?? undefined,
         profileDir: options.settings.profileDir,
         artifactsRoot: options.settings.artifactsRoot,
         attachmentRoots: attachmentRoots(options.settings),
@@ -453,6 +487,9 @@ export function createIsolatedBrowserRuntime(deps: CreateIsolatedBrowserRuntimeD
   // Managed CloakBrowser (betterwright backend) caches its signed binary here;
   // mirror cloakbrowser's own resolution (CLOAKBROWSER_CACHE_DIR, else ~/.cloakbrowser).
   const cloakCacheDir = deps.cloakCacheDir ?? (process.env.CLOAKBROWSER_CACHE_DIR?.trim() || join(homedir(), ".cloakbrowser"));
+  // Mirror betterwright's own Obscura resolution (BETTERWRIGHT_OBSCURA_ROOT, else
+  // ~/.betterwright/obscura); obscuraLaunch gates the env var on the binary existing.
+  const obscuraRoot = deps.obscuraRoot ?? (process.env.BETTERWRIGHT_OBSCURA_ROOT?.trim() || join(homedir(), ".betterwright", "obscura"));
   const repoRoot = deps.repoRoot ?? resolve(MODULE_DIR, "../..");
 
   let child: HostChild | null = null;
@@ -636,6 +673,7 @@ export function createIsolatedBrowserRuntime(deps: CreateIsolatedBrowserRuntimeD
       hostPath,
       chromiumExecutable,
       cloakCacheDir,
+      obscuraRoot,
       cloakShimDir,
       repoRoot,
       bwrapPath: deps.bwrapPath,
@@ -1078,6 +1116,7 @@ function macSandboxProfile(paths: {
   execPath: string;
   browserRoot: string;
   cloakCacheDir?: string;
+  obscuraRoot?: string;
   profileDir: string;
   artifactsRoot: string;
   attachmentRoots: string[];
@@ -1094,6 +1133,7 @@ function macSandboxProfile(paths: {
     paths.execPath,
     paths.browserRoot,
     ...(paths.cloakCacheDir ? [paths.cloakCacheDir] : []),
+    ...(paths.obscuraRoot ? [paths.obscuraRoot] : []),
     paths.profileDir,
     paths.artifactsRoot,
     ...paths.attachmentRoots,

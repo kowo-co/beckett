@@ -215,11 +215,11 @@ export function createBetterWrightRuntime(
     // `browserFlavor` on the client is a reported "cloak" constant, not a settable
     // option, and `betterwright setup` provisions its own signed CloakBrowser binary,
     // so the host neither picks a browser flavor nor hands in a Playwright executable
-    // path. Since 1.7.0 headless sessions default to a separate resident Obscura
-    // engine instead of Cloak/Chromium; isolated.ts pins BETTERWRIGHT_OBSCURA_PATH=off
-    // for the sandboxed launch because only the managed CloakBrowser cache — not
-    // Obscura's ~/.betterwright/obscura/ install — is bound into this bubblewrap
-    // sandbox.
+    // path. Since 1.7.0 headless sessions default to the resident Obscura engine;
+    // isolated.ts binds the host's ~/.betterwright/obscura install into the sandbox
+    // and points BETTERWRIGHT_OBSCURA_ROOT at it when it exists, falling back to the
+    // Chromium/Cloak compatibility backend when it does not (implicit discovery of an
+    // absent install returns null upstream).
     headless: settings.headless,
     defaultTimeout: Math.max(5, Math.ceil(settings.evalTimeoutMs / 1_000)),
     // Pin the open private-network and loopback defaults explicitly so Beckett's
