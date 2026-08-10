@@ -1,0 +1,15 @@
+import { expect, test } from "bun:test";
+import { checkEligibility } from "./lib/validate.ts";
+import { summarize } from "./index.ts";
+
+test("checkEligibility applies the given minimum age", () => {
+  expect(checkEligibility(18, 18)).toBe(true);
+  expect(checkEligibility(17, 18)).toBe(false);
+  expect(checkEligibility(21, 21)).toBe(true);
+  expect(checkEligibility(20, 21)).toBe(false);
+});
+
+test("summarize reflects eligibility at the default minimum age", () => {
+  expect(summarize("Ada", 20)).toBe("Ada is an adult; checkout allowed; eligible");
+  expect(summarize("Bo", 16)).toBe("Bo is a minor; checkout blocked; not eligible");
+});

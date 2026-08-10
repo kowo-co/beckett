@@ -1,0 +1,7 @@
+{
+  "id": "env-discovery",
+  "prompt": "This repo has a bug in its statistics helpers. There is no README. Figure out how this project verifies itself, then find and fix the bug so that verification passes.",
+  "model": "",
+  "effort": "low",
+  "timeout_s": 600
+}
