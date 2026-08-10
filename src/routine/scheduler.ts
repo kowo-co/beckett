@@ -13,6 +13,12 @@
  *   2. **Fires** when now ≥ the chosen time and this period hasn't fired. Firing is idempotent
  *      per period: it CLAIMS the period (writes `lastFiredPeriodKey` + persists) BEFORE
  *      dispatching, so a crash mid-dispatch can never double-post.
+ *   3. **Defers**, if the dispatcher vetoes this fire — asked BEFORE the claim, so a deferred
+ *      routine is retried on the next tick inside the same period instead of losing it. Only
+ *      free time (docs/freetime.md) uses this; a dispatcher without `deferReason` behaves
+ *      exactly as before.
+ *
+ * A manual `fireNow` never consults the veto: a human asking for it now outranks the guard.
  *
  * Dispatch runs OFF this process: the injected `dispatch` executor hands the plan to the
  * `beckett browser` background lane. The scheduler never blocks on browser work.
@@ -30,6 +36,18 @@ export const ROUTINE_TICK_MS = 30_000;
 export interface RoutineDispatcher {
   /** Execute a plan through the background lane. Resolves once the lane has TAKEN the work. */
   dispatch(plan: RoutineDispatchPlan, routine: Routine): Promise<void>;
+  /**
+   * OPTIONAL pre-claim veto, consulted BEFORE the period is claimed: a reason to hold this fire
+   * for a later tick, or null to fire now. The one deliberate hole in "claim, then dispatch" —
+   * and it is safe precisely because it happens BEFORE the claim: a deferred routine's period is
+   * never marked fired, so the next 30s tick re-evaluates it, and every routine that does NOT
+   * defer keeps byte-identical crash-safe once-per-period behavior.
+   *
+   * Free time (docs/freetime.md) is the only user: a session that would compete with live work is
+   * pushed later in the same week rather than running alongside it. A dispatcher that never
+   * defers (the default: this method absent) is the old code path exactly.
+   */
+  deferReason?(plan: RoutineDispatchPlan, routine: Routine): string | null;
 }
 
 export interface RoutineSchedulerDeps {
@@ -78,10 +96,20 @@ export function startRoutineScheduler(deps: RoutineSchedulerDeps): RoutineSchedu
     if (state.lastFiredPeriodKey === key) return;
     if (!state.chosenFireAt || at.getTime() < new Date(state.chosenFireAt).getTime()) return;
 
+    // 3. The pre-claim veto (docs/freetime.md). Asked BEFORE the claim on purpose: a deferred
+    //    fire leaves `lastFiredPeriodKey` untouched, so the next tick retries it inside the SAME
+    //    period — the routine loses the window, never the week. Nothing else in the tick moves,
+    //    so a routine whose dispatcher does not implement this is unaffected.
+    const plan = buildDispatchPlan(routine);
+    const defer = deps.dispatcher.deferReason?.(plan, routine) ?? null;
+    if (defer) {
+      deps.logger.info("routine fire deferred", { id: routine.id, period: key, reason: defer });
+      return;
+    }
+
     // Claim the period BEFORE dispatching so a crash mid-dispatch never double-fires.
     const claimed = { ...state, lastFiredPeriodKey: key, lastFiredAt: at.toISOString() };
     await deps.store.setState(routine.id, claimed);
-    const plan = buildDispatchPlan(routine);
     deps.logger.info("routine firing", { id: routine.id, period: key, preview: plan.preview });
     try {
       await deps.dispatcher.dispatch(plan, routine);

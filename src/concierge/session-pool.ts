@@ -228,6 +228,17 @@ export class SessionPool {
     return metas;
   }
 
+  /**
+   * Turns queued or in flight across every pooled session — "is Beckett talking to anyone right
+   * now?" in one number. Read by the free-time idle gate (docs/freetime.md), which will not start
+   * an unprompted session while a conversation is live.
+   */
+  queueDepth(): number {
+    let depth = 0;
+    for (const { session } of this.entries.values()) depth += session.queueDepth?.() ?? 0;
+    return depth;
+  }
+
   /** True iff every session exposes meta tracking (real sessions do; fake test doubles may not). */
   tracksMeta(): boolean {
     for (const { session } of this.entries.values()) {

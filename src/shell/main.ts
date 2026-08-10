@@ -642,6 +642,11 @@ async function boot(): Promise<BootedSystem> {
       channelId: process.env.BECKETT_ROUTINE_CHANNEL_ID?.trim() ?? null,
       requesterId: process.env.DISCORD_OWNER_ID?.trim() ?? null,
     }),
+    // The free-time idle gate (docs/freetime.md), read at fire time: an unprompted session waits
+    // for a machine with nothing else to do. Both are cheap in-memory census reads — the
+    // scheduler asks them on the tick that would otherwise claim the period.
+    isFleetIdle: () => dispatcher.live().length === 0,
+    conciergeQuiet: () => concierge.queueDepth() === 0,
   })({ config, paths, logger });
   extensions.register(routinesExtension);
   // Phase 6 — the memory organ, the LAST organ (docs/v6-architecture.md §6-§7): init builds the

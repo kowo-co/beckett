@@ -246,6 +246,23 @@ export const RoutineActionSchema = z.discriminatedUnion("kind", [
    * `beckett routine spend-report` subprocess so the ledger read + Discord post never sit inside a
    * scheduler tick, and a crash in it can't reach the daemon.
    */
+  /**
+   * `free-time` (docs/freetime.md): the weekly self-directed session, riding the SAME self-lane
+   * fork as `dream` — no agent, no browser, no credentials — and executed as the contained
+   * `beckett free-time run` subprocess. Like `dream` it has no prompt field: what the session may
+   * do is decided by the scratch-directory scope guard, the deny list, and the token ceiling, all
+   * in code, so a routine edit can never widen it. Unlike every other action it may DEFER: the
+   * scheduler asks the dispatcher before claiming the period, and a busy fleet pushes the fire to
+   * a later tick in the same week rather than competing with real work.
+   */
+  z.object({
+    kind: z.literal("free-time"),
+    /** Discord channel the fire is attributed to (optional; env fallback). Provenance only —
+     *  the session's optional share posts to `[free_time] channel_id`, not to this. */
+    channelId: z.string().optional(),
+    /** Authenticated requester the fire is attributed to (optional; owner env fallback). */
+    requesterId: z.string().optional(),
+  }),
   z.object({
     kind: z.literal("spend-report"),
     /** Rolling window billed, as a `parseSince` string (e.g. "7d"). Default matches the weekly cadence. */

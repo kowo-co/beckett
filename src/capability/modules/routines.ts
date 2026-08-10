@@ -59,7 +59,8 @@ import {
 } from "../../routine/watch.ts";
 import { defaultDepsUpdateDeps, runDepsUpdate } from "../../ops/deps-update.ts";
 import { defaultProactiveSweepDeps, runProactiveSweep } from "../../ops/proactive-sweep.ts";
-import { PROACTIVE_SWEEP_ID } from "../../routine/builtins.ts";
+import { PROACTIVE_SWEEP_ID, type BuiltinRoutineOverrides } from "../../routine/builtins.ts";
+import { freeTimeDeferReason } from "../../freetime/gate.ts";
 import { formatWeeklyBill, readSpendLedger } from "../../spend.ts";
 import { defaultRepoRoot } from "../../version/index.ts";
 import { loadIdentity } from "../../agency/index.ts";
@@ -116,6 +117,23 @@ export interface RoutinesExtensionDeps {
    * agent/registry/runner, and never posts a `routine.self` concierge wake.
    */
   spawnDream?: (argv: string[]) => void;
+  /**
+   * How the weekly free-time session (docs/freetime.md) is launched. Default: a detached
+   * `beckett free-time run` subprocess, exactly like `spawnDream`. Injected for the same reason —
+   * so a test can assert the session forks on the self lane BEFORE (and never resolves) the
+   * browser agent/registry/runner, and never posts a `routine.self` concierge wake.
+   */
+  spawnFreeTime?: (argv: string[]) => void;
+  /**
+   * Is the worker fleet doing nothing right now? Bound by the daemon to the dispatcher's live
+   * census. Free time is the ONLY consumer: an unprompted session must never compete with real
+   * work for the machine, so a busy fleet defers the fire (before the period is claimed) instead
+   * of running alongside it. Unwired ⇒ treated as idle: the CLI never arms a scheduler, and a
+   * daemon that somehow lacks the accessor should still get its free time rather than starve.
+   */
+  isFleetIdle?: () => boolean;
+  /** Is the concierge's turn queue empty? Second half of the same idle gate, same defaults. */
+  conciergeQuiet?: () => boolean;
   /**
    * How the weekly spend report (#77) is launched. Default: a detached `beckett routine
    * spend-report` subprocess, exactly like `spawnDepsUpdate`. Injected for the same reason — so a
@@ -395,6 +413,53 @@ export const createRoutinesExtension =
     }
 
     /**
+     * Launch the weekly free-time session (docs/freetime.md) as its own `beckett free-time run`
+     * process — the dream pattern exactly: detached, not awaited, and it owns whatever reporting
+     * it does (its journal entry under `~/.beckett/free-time` is the record; the optional one-line
+     * share is posted by the RUNNER after the session exits, never by the session itself). It
+     * rides the SELF lane's pre-browser fork, so like the dream it can never resolve the browser
+     * agent, an agent registry entry, or a creds entry.
+     */
+    function spawnFreeTime(
+      plan: RoutineDispatchPlan,
+      origin: { channelId: string; requesterId: string },
+    ): void {
+      const argv = [
+        "free-time", "run",
+        "--routine", plan.routineId,
+        // Provenance only — the session's share goes to `[free_time] channel_id`, not here.
+        "--requester", origin.requesterId,
+      ];
+      if (deps.spawnFreeTime) {
+        deps.spawnFreeTime(argv);
+        return;
+      }
+      const proc = Bun.spawn([process.execPath, BECKETT_CLI_ENTRY, ...argv], {
+        cwd: ctx.paths.home,
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      proc.unref?.();
+      ctx.logger.info("free-time session launched off-process", { routineId: plan.routineId, pid: proc.pid });
+    }
+
+    /**
+     * The scheduler's pre-claim veto ({@link RoutineDispatcher.deferReason}), free time only.
+     * Consulted BEFORE the period is claimed, so a deferral costs the window and not the week:
+     * the next 30s tick asks again, and if the fleet is still working, again, until the fleet
+     * goes quiet or the week rolls over. A disabled session is NOT deferred — it falls through to
+     * dispatch, which refuses it once and lets the period close.
+     */
+    function deferReason(plan: RoutineDispatchPlan): string | null {
+      if (!plan.freeTime || !ctx.config.free_time.enabled) return null;
+      return freeTimeDeferReason({
+        fleetIdle: deps.isFleetIdle?.() ?? true,
+        conciergeQuiet: deps.conciergeQuiet?.() ?? true,
+      });
+    }
+
+    /**
      * Launch the weekly spend report (#77) as its own `beckett routine spend-report` process — the
      * deps-update pattern exactly: detached, not awaited, owns its own reporting (it posts the one
      * per-task bill to `channelId` itself). It rides no browser dependency: reading the ledger and
@@ -534,6 +599,19 @@ export const createRoutinesExtension =
           spawnDream(plan, { channelId, requesterId });
           return;
         }
+        // Free time (docs/freetime.md) forks beside the dream, inside the self lane, for the same
+        // reasons and with one more: `[free_time] enabled=false` is the human off-switch, and it
+        // is honored HERE — before anything spawns — so turning free time off takes effect on the
+        // next fire without touching the routine. A refused fire keeps its claimed period: the
+        // week closes quietly rather than retrying a session nobody wants every 30 seconds.
+        if (plan.freeTime) {
+          if (!ctx.config.free_time.enabled) {
+            ctx.logger.info("free-time fire refused: [free_time] enabled=false", { routineId: plan.routineId });
+            return;
+          }
+          spawnFreeTime(plan, { channelId, requesterId });
+          return;
+        }
         if (!plan.selfPrompt) throw new Error("self-lane routine is missing its prompt");
         const post = { routineId: plan.routineId, prompt: plan.selfPrompt, channelId };
         if (deps.wakeSelf) {
@@ -583,7 +661,23 @@ export const createRoutinesExtension =
      * routes a real fire through the bus, exactly as before.
      */
     function cliRoutineStore(): RoutineStore {
-      return new RoutineStore(join(ctx.paths.beckettDir, "routines.json"));
+      return new RoutineStore(join(ctx.paths.beckettDir, "routines.json"), { builtins: builtinOverrides() });
+    }
+
+    /**
+     * Seed-time schedule for the built-ins that read config — free time only. Both store
+     * constructions (daemon + CLI) go through this so a fresh routines.json is seeded with the
+     * SAME window whichever process happens to create it first. A weekday config typo fails the
+     * config schema, not here.
+     */
+    function builtinOverrides(): BuiltinRoutineOverrides {
+      const ft = ctx.config.free_time;
+      return {
+        freeTime: {
+          weekday: WeekdaySchema.parse(ft.weekday),
+          window: { start: ft.window_start, end: ft.window_end, tz: ft.tz },
+        },
+      };
     }
 
     /**
@@ -1162,7 +1256,8 @@ export const createRoutinesExtension =
         // fully INERT: no interval armed, nothing ticks until start().
         init: () => {
           store =
-            deps.createStore?.(ctx) ?? new RoutineStore(join(ctx.paths.beckettDir, "routines.json"));
+            deps.createStore?.(ctx) ??
+            new RoutineStore(join(ctx.paths.beckettDir, "routines.json"), { builtins: builtinOverrides() });
           watchStateStore =
             deps.createWatchStateStore?.(ctx) ??
             new WatchStateStore(
@@ -1172,7 +1267,10 @@ export const createRoutinesExtension =
           schedulerDeps = {
             store,
             logger: ctx.logger.child("routine"),
-            dispatcher: { dispatch: (plan, routine) => dispatchPlan(plan, routine) },
+            dispatcher: {
+              dispatch: (plan, routine) => dispatchPlan(plan, routine),
+              deferReason: (plan) => deferReason(plan),
+            },
             ...(deps.now ? { now: deps.now } : {}),
             ...(deps.rng ? { rng: deps.rng } : {}),
             ...(deps.intervalMs !== undefined ? { intervalMs: deps.intervalMs } : {}),

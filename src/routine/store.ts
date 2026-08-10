@@ -17,7 +17,7 @@
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
-import { builtinRoutineDefs } from "./builtins.ts";
+import { builtinRoutineDefs, type BuiltinRoutineOverrides } from "./builtins.ts";
 import { RoutineRegistrySchema, type Routine, type RoutineRegistry } from "./types.ts";
 
 const LOCK_STALE_MS = 30_000;
@@ -29,6 +29,13 @@ export interface RoutineStoreOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Seed the built-in routines on load (default true; tests disable for a clean slate). */
   seedBuiltins?: boolean;
+  /**
+   * Seed-time schedule overrides for the built-ins that read config (free time only —
+   * {@link BuiltinRoutineOverrides}). Applied ONLY when a definition is first written; a routine
+   * already on disk keeps whatever timing it has, because the store, not config, is the source of
+   * truth once a routine exists.
+   */
+  builtins?: BuiltinRoutineOverrides;
 }
 
 const EMPTY: RoutineRegistry = { version: 1, routines: [], removedBuiltins: [] };
@@ -40,6 +47,7 @@ export class RoutineStore {
   private readonly id: () => string;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly seedBuiltins: boolean;
+  private readonly builtinOverrides: BuiltinRoutineOverrides;
 
   constructor(path: string, opts: RoutineStoreOptions = {}) {
     this.path = path;
@@ -48,6 +56,7 @@ export class RoutineStore {
     this.id = opts.id ?? (() => randomUUID().slice(0, 8));
     this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.seedBuiltins = opts.seedBuiltins ?? true;
+    this.builtinOverrides = opts.builtins ?? {};
   }
 
   /** All routines (seeding built-ins if needed), sorted by id for stable output. */
@@ -164,7 +173,7 @@ export class RoutineStore {
     if (!this.seedBuiltins) return false;
     let changed = false;
     const now = this.now().toISOString();
-    for (const def of builtinRoutineDefs()) {
+    for (const def of builtinRoutineDefs(this.builtinOverrides)) {
       if (reg.removedBuiltins.includes(def.id)) continue;
       if (reg.routines.some((r) => r.id === def.id)) continue;
       reg.routines.push({
