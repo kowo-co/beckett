@@ -4530,7 +4530,7 @@ export class Concierge {
                   url: activePage?.url,
                   title: activePage?.title,
                   pages: payload.pages.length,
-                  screenshots: payload.screenshots.length,
+                  screenshots: payload.screenshots?.length ?? 0,
                 });
                 // Steering notes ride the eval response so the MCP bridge can surface them in the
                 // same tool result the agent is already waiting on — no side channel needed.

@@ -73,6 +73,20 @@ function boundMcpText(value: string, maxChars: number): string {
   return `${value.slice(0, Math.max(0, maxChars - suffix.length))}${suffix}`;
 }
 
+/** Envelope keys compacted before serialization. `value`/`pages` are model data — never touched. */
+const OMIT_WHEN_EMPTY = ["console", "events", "screenshots", "attachments", "warnings", "challenges", "skills"] as const;
+export function compactEvalPayload<T extends Record<string, unknown>>(payload: T): T {
+  const compact = { ...payload } as Record<string, unknown>;
+  for (const key of OMIT_WHEN_EMPTY) {
+    const entry = compact[key];
+    if (Array.isArray(entry) && entry.length === 0) delete compact[key];
+  }
+  if (compact.truncated === false) delete compact.truncated;
+  if (compact.elapsedMs === 0) delete compact.elapsedMs;
+  if (compact.pendingCredential == null) delete compact.pendingCredential;
+  return compact as T;
+}
+
 export async function handleMcpRequest(message: JsonRpcRequest, deps: McpDeps): Promise<Record<string, unknown> | null> {
   if (message.id === undefined) return null;
   const result = (value: unknown) => ({ jsonrpc: "2.0", id: message.id, result: value });
@@ -124,7 +138,7 @@ export async function handleMcpRequest(message: JsonRpcRequest, deps: McpDeps): 
     const { steering, ...payload } = evaluated as BrowserEvalResult & { steering?: unknown };
     const notes = Array.isArray(steering) ? steering.filter((note): note is string => typeof note === "string") : [];
     const content: Record<string, unknown>[] = [
-      { type: "text", text: boundMcpText(JSON.stringify(payload), maxOutputChars) },
+      { type: "text", text: boundMcpText(JSON.stringify(compactEvalPayload(payload)), maxOutputChars) },
     ];
     if (notes.length > 0) {
       content.push({
@@ -135,7 +149,7 @@ export async function handleMcpRequest(message: JsonRpcRequest, deps: McpDeps): 
           notes.map((note) => `- ${note}`).join("\n"),
       });
     }
-    for (const path of evaluated.screenshots.slice(0, 3)) {
+    for (const path of (evaluated.screenshots ?? []).slice(0, 3)) {
       try {
         content.push({ type: "image", data: readFileSync(path).toString("base64"), mimeType: "image/png" });
       } catch {

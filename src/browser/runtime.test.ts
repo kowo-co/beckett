@@ -70,7 +70,7 @@ async function leaseEventsContaining(
     // fail the test in place of the assertion below.
     const drained = await runtime.evaluate(runId, "await page.waitForTimeout(100);")
       .catch(() => ({ events: [] as string[] }));
-    collected.push(...drained.events);
+    collected.push(...(drained.events ?? []));
   }
   return collected.join("\n");
 }
@@ -371,7 +371,7 @@ test("CDP cancels slow and concurrent downloads before they exceed the lease agg
       await started;
       await page.waitForTimeout(500);
     `);
-    expect(await leaseEventsContaining(runtime, "slow-download", slowState.events, "aggregate budget exceeded"))
+    expect(await leaseEventsContaining(runtime, "slow-download", slowState.events ?? [], "aggregate budget exceeded"))
       .toContain("aggregate budget exceeded");
     await runtime.release("slow-download", false);
     expect(slowDownloadCanceled).toBeGreaterThan(0);
@@ -394,7 +394,7 @@ test("CDP cancels slow and concurrent downloads before they exceed the lease agg
       }));
       await page.waitForTimeout(500);
     `);
-    expect(await leaseEventsContaining(runtime, "concurrent-downloads", concurrentState.events, "aggregate budget exceeded"))
+    expect(await leaseEventsContaining(runtime, "concurrent-downloads", concurrentState.events ?? [], "aggregate budget exceeded"))
       .toContain("aggregate budget exceeded");
     await runtime.release("concurrent-downloads", false);
     const artifactBytes = readdirSync(concurrentArtifacts)
@@ -447,7 +447,7 @@ test("root CDP counts raw-target downloads once, caps their files, and restores 
         await session.detach().catch(() => undefined);
       }
     `);
-    expect(await leaseEventsContaining(runtime, "raw-downloads", attempted.events, "download count exceeded 2"))
+    expect(await leaseEventsContaining(runtime, "raw-downloads", attempted.events ?? [], "download count exceeded 2"))
       .toContain("download count exceeded 2");
     // Tiny transfers can complete before Browser.cancelDownload lands; the guard then deletes
     // the landed file on the completion event, ~100ms deferred. Wait for that cleanup rather
@@ -712,7 +712,7 @@ test("the controller closes excess tabs and force-disposes raw browser contexts"
       return context.pages().length;
     `);
     expect(opened.pages.length).toBeLessThanOrEqual(32);
-    expect(opened.events.join("\n")).toContain("32-page ceiling");
+    expect((opened.events ?? []).join("\n")).toContain("32-page ceiling");
     expect((await runtime.evaluate("tab-ceiling", "return context.pages().length")).value).toBeLessThanOrEqual(32);
     const rawEscape = await runtime.evaluate("tab-ceiling", `
       let cdpError = '';
@@ -748,7 +748,7 @@ test("the controller closes excess tabs and force-disposes raw browser contexts"
       }
     `);
     expect(rawContextEscape.value).toEqual({ created: true, stillPresent: false });
-    expect(rawContextEscape.events.join("\n")).toContain("[browser context blocked]");
+    expect((rawContextEscape.events ?? []).join("\n")).toContain("[browser context blocked]");
     const rawTargetEscape = await runtime.evaluate("tab-ceiling", `
       const internalBrowser = [...page.context()._connection._objects.values()]
         .find((candidate) => typeof candidate.newBrowserCDPSession === 'function');
@@ -772,7 +772,7 @@ test("the controller closes excess tabs and force-disposes raw browser contexts"
       }
     `);
     expect(rawTargetEscape.value).toEqual({ defaultPages: 32, rawSurvivors: 0 });
-    expect(rawTargetEscape.events.join("\n")).toContain("32-page ceiling");
+    expect((rawTargetEscape.events ?? []).join("\n")).toContain("32-page ceiling");
     await runtime.release("tab-ceiling", false);
   } finally {
     if (runtime.hasLease("tab-ceiling")) await runtime.release("tab-ceiling", false).catch(() => undefined);

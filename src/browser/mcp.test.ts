@@ -8,12 +8,8 @@ import type { BrowserEvalResult } from "./runtime.ts";
 
 const emptyEval: BrowserEvalResult = {
   value: { ok: true },
-  console: [],
   pages: [{ index: 0, active: true, url: "https://example.test", title: "Example" }],
-  events: [],
-  screenshots: [],
   elapsedMs: 7,
-  truncated: false,
 };
 
 describe("browser MCP", () => {
@@ -179,6 +175,36 @@ describe("browser MCP", () => {
     const failureText = ((failure!.result as { content: { text: string }[] }).content[0]!.text);
     expect(failureText.length).toBeLessThanOrEqual(4_096);
     expect(failureText).toEndWith("...[truncated to MCP output budget]");
+  });
+
+  test("an empty envelope serializes to the minimal payload", async () => {
+    const padded = { ...emptyEval, console: [], events: [], screenshots: [], truncated: false } as BrowserEvalResult;
+    const response = await handleMcpRequest(
+      { jsonrpc: "2.0", id: 21, method: "tools/call", params: { name: "betterwright_browser", arguments: { code: "return 1" } } },
+      { evaluate: async () => padded },
+    );
+    const text = (response!.result as { content: { text: string }[] }).content[0]!.text;
+    expect(text).toBe(JSON.stringify(emptyEval));
+    expect(text).not.toContain("truncated");
+  });
+
+  test("challenges, warnings, skills, and pendingCredential pass through the payload", async () => {
+    const rich = {
+      ...emptyEval,
+      warnings: ["dropped duplicate --disable-gpu"],
+      challenges: [{ type: "bot_challenge", provider: "turnstile" }],
+      skills: [{ name: "github", description: "GitHub flows", path: "/skills/github.md" }],
+      pendingCredential: { pendingId: "p1", origin: "https://x.test", matchMode: "base-domain", username: null, label: null, expiresAt: null },
+    } as BrowserEvalResult;
+    const response = await handleMcpRequest(
+      { jsonrpc: "2.0", id: 22, method: "tools/call", params: { name: "betterwright_browser", arguments: { code: "return 1" } } },
+      { evaluate: async () => rich },
+    );
+    const parsed = JSON.parse((response!.result as { content: { text: string }[] }).content[0]!.text);
+    expect(parsed.warnings).toEqual(["dropped duplicate --disable-gpu"]);
+    expect(parsed.challenges[0].provider).toBe("turnstile");
+    expect(parsed.skills[0].name).toBe("github");
+    expect(parsed.pendingCredential.pendingId).toBe("p1");
   });
 });
 

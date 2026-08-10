@@ -82,16 +82,33 @@ export interface BrowserPageSummary {
   title: string;
 }
 
+/** Skill pack surfaced by betterwright whose autoInject.url matches an open page. */
+export interface BrowserSkillHint { name: string; description: string; path: string; }
+/** Secret-free metadata for a generated credential still awaiting recovery. */
+export interface BrowserPendingCredential {
+  pendingId: string;
+  origin: string;
+  matchMode: string;
+  username: string | null;
+  label: string | null;
+  expiresAt: string | null;
+}
+
 export interface BrowserEvalResult {
   value: unknown;
-  console: string[];
+  console?: string[];
   pages: BrowserPageSummary[];
-  events: string[];
-  screenshots: string[];
+  events?: string[];
+  screenshots?: string[];
   /** Trusted PNG screenshots the agent may attach later in this same run. */
   attachments?: string[];
   elapsedMs: number;
-  truncated: boolean;
+  truncated?: boolean;
+  /** 1.7.1 envelope passthrough — omitted when empty. */
+  warnings?: string[];
+  challenges?: unknown[];
+  skills?: BrowserSkillHint[];
+  pendingCredential?: BrowserPendingCredential;
 }
 
 /** Optional per-call evaluation controls threaded from the MCP tool input to BetterWright run(). */
@@ -1992,8 +2009,8 @@ function boundBrowserEvalResult(result: BrowserEvalResult, maxChars: number): Br
   const length = () => JSON.stringify(result).length;
   if (length() <= maxChars) return result;
   result.truncated = true;
-  result.console = boundStringList(result.console, Math.min(2_000, Math.floor(maxChars / 8)));
-  result.events = boundStringList(result.events, Math.min(2_000, Math.floor(maxChars / 8)));
+  result.console = boundStringList(result.console ?? [], Math.min(2_000, Math.floor(maxChars / 8)));
+  result.events = boundStringList(result.events ?? [], Math.min(2_000, Math.floor(maxChars / 8)));
   result.pages = result.pages.slice(0, 8).map((page) => ({
     ...page,
     url: truncatePlain(page.url, 512),
@@ -2025,7 +2042,7 @@ function boundBrowserEvalResult(result: BrowserEvalResult, maxChars: number): Br
     console: [],
     pages: [],
     events: [],
-    screenshots: result.screenshots.slice(0, MAX_SCREENSHOTS_PER_EVAL),
+    screenshots: (result.screenshots ?? []).slice(0, MAX_SCREENSHOTS_PER_EVAL),
     elapsedMs: result.elapsedMs,
     truncated: true,
   };

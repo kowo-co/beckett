@@ -757,7 +757,9 @@ export function createIsolatedBrowserRuntime(deps: CreateIsolatedBrowserRuntimeD
   }
 
   function deliverEvaluation(result: BrowserEvalResult, current: BrowserLease): BrowserEvalResult {
-    const attachments = result.screenshots.map((path) => assertTrustedArtifactPng(path, current.artifactsDir));
+    const sources = result.screenshots ?? [];
+    if (sources.length === 0) return result;
+    const attachments = sources.map((path) => assertTrustedArtifactPng(path, current.artifactsDir));
     return {
       ...result,
       screenshots: attachments.map((path) => trustedPng(path, current, true)),

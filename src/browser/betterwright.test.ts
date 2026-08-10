@@ -35,6 +35,10 @@ interface FakeResult {
   pages?: Array<Record<string, unknown>>;
   console?: unknown[];
   durationMs?: number;
+  warnings?: unknown[];
+  challenges?: unknown[];
+  skills?: Array<Record<string, unknown>>;
+  pendingCredential?: unknown;
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
@@ -79,6 +83,10 @@ class FakeBetterWright implements BetterWrightClient {
       pages: raw.pages ?? [{ url: "about:blank", title: "", active: true }],
       console: raw.console ?? [],
       durationMs: raw.durationMs ?? 1,
+      ...(raw.warnings !== undefined ? { warnings: raw.warnings } : {}),
+      ...(raw.challenges !== undefined ? { challenges: raw.challenges } : {}),
+      ...(raw.skills !== undefined ? { skills: raw.skills } : {}),
+      ...(raw.pendingCredential !== undefined ? { pendingCredential: raw.pendingCredential } : {}),
     };
   }
 
@@ -244,10 +252,10 @@ test("the per-lease event ring does not leak across leases", async () => {
     await runtime.acquire(leaseFor("beta"));
     const a = await runtime.evaluate("alpha", "return 1");
     const b = await runtime.evaluate("beta", "return 2");
-    expect(a.events.every((event) => event.startsWith("alpha#"))).toBe(true);
-    expect(b.events.every((event) => event.startsWith("beta#"))).toBe(true);
-    expect(a.events.some((event) => event.startsWith("beta#"))).toBe(false);
-    expect(b.events.some((event) => event.startsWith("alpha#"))).toBe(false);
+    expect((a.events ?? []).every((event) => event.startsWith("alpha#"))).toBe(true);
+    expect((b.events ?? []).every((event) => event.startsWith("beta#"))).toBe(true);
+    expect((a.events ?? []).some((event) => event.startsWith("beta#"))).toBe(false);
+    expect((b.events ?? []).some((event) => event.startsWith("alpha#"))).toBe(false);
   } finally {
     await runtime.stop();
   }
@@ -290,7 +298,7 @@ test("the bridge exposes attachFile only for screenshots captured by this lease"
   try {
     await runtime.acquire(leaseFor("attachable"));
     const captured = await runtime.evaluate("attachable", "return await screenshot('CAPTURE_ATTACHABLE')");
-    const source = captured.screenshots[0]!;
+    const source = captured.screenshots?.[0]!;
     await runtime.evaluate("attachable", `return await attachFile('input[type=file]', ${JSON.stringify(source)})`);
     const call = fake.calls.at(-1)!;
     expect(call.code).toContain("const attachFile");
@@ -392,7 +400,7 @@ test("acquire prunes an oversized disposable cache before warming a lease", asyn
     expect(existsSync(join(defaultDir, "Cache"))).toBe(false);
     expect(readFileSync(join(defaultDir, "Cookies"), "utf8")).toBe("signed-in");
     const result = await runtime.evaluate("cache-recovery", "return 1");
-    expect(result.events.join("\n")).toContain("profile cache pruned] reclaimed");
+    expect((result.events ?? []).join("\n")).toContain("profile cache pruned] reclaimed");
   } finally {
     await runtime.stop();
   }
@@ -412,7 +420,7 @@ test("acquire leaves caches alone below the prune high-water mark", async () => 
     await runtime.acquire(leaseFor("below-high-water"));
     expect(existsSync(cache)).toBe(true);
     const result = await runtime.evaluate("below-high-water", "return 1");
-    expect(result.events.join("\n")).not.toContain("profile cache pruned");
+    expect((result.events ?? []).join("\n")).not.toContain("profile cache pruned");
   } finally {
     await runtime.stop();
   }
@@ -518,7 +526,7 @@ test("a multi-GB CacheStorage write survives the lease budget and the next acqui
     await runtime.acquire(leaseFor("second-run"));
     expect(existsSync(join(cacheStorage, "shard-0.bin"))).toBe(true);
     const next = await runtime.evaluate("second-run", "return 2");
-    expect(next.events.join("\n")).not.toContain("profile cache pruned");
+    expect((next.events ?? []).join("\n")).not.toContain("profile cache pruned");
 
     // Real profile state is still bounded by its own, much smaller ceiling.
     writeFileSync(join(defaultDir, "runaway-state.bin"), Buffer.alloc(1024 * 1024));
@@ -601,7 +609,7 @@ test("an unset or unusable advertised quota falls back to the lane ceiling", asy
   try {
     await runtime.acquire(leaseFor("fallback"));
     const result = await runtime.evaluate("fallback", "return 1");
-    expect(result.events.join("\n")).not.toContain("profile blocked");
+    expect((result.events ?? []).join("\n")).not.toContain("profile blocked");
   } finally {
     await runtime.stop();
   }
@@ -699,4 +707,28 @@ test("releasing a lease closes only its own betterwright session", async () => {
   } finally {
     await runtime.stop();
   }
+});
+
+test("a deflated 1.7.1 envelope stays deflated and new fields pass through", async () => {
+  const fake = new FakeBetterWright(() => ({
+    events: [],
+    console: [],
+    warnings: ["switch dropped"],
+    challenges: [{ type: "bot_challenge" }],
+    skills: [{ name: "s", description: "d", path: "/p" }],
+    pendingCredential: { pendingId: "p2", origin: "o", matchMode: "base-domain", username: null, label: null, expiresAt: null },
+  }));
+  const runtime = createBetterWrightRuntime(settingsFor(), quietLog, { createBrowser: () => fake });
+  try {
+    await runtime.acquire(leaseFor("sparse"));
+    const result = await runtime.evaluate("sparse", "return 1");
+    expect("console" in result).toBe(false);
+    expect("events" in result).toBe(false);
+    expect("screenshots" in result).toBe(false);
+    expect("truncated" in result).toBe(false);
+    expect(result.warnings).toEqual(["switch dropped"]);
+    expect(result.challenges).toEqual([{ type: "bot_challenge" }]);
+    expect(result.skills).toEqual([{ name: "s", description: "d", path: "/p" }]);
+    expect(result.pendingCredential?.pendingId).toBe("p2");
+  } finally { await runtime.stop(); }
 });

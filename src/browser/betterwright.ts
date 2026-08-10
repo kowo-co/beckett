@@ -40,6 +40,7 @@ import type {
   BrowserEvalResult,
   BrowserHostSettings,
   BrowserLease,
+  BrowserPendingCredential,
   BrowserRuntime,
   BrowserRuntimeStats,
 } from "./runtime.ts";
@@ -119,6 +120,10 @@ interface BetterWrightResult {
   artifacts?: Array<{ path?: unknown; kind?: unknown; media?: unknown }>;
   pages?: Array<{ url?: unknown; title?: unknown; active?: unknown }>;
   durationMs?: unknown;
+  warnings?: unknown[];
+  challenges?: unknown[];
+  skills?: Array<{ name?: unknown; description?: unknown; path?: unknown }>;
+  pendingCredential?: unknown;
   [key: string]: unknown;
 }
 
@@ -429,19 +434,35 @@ const attachFile = async (target, screenshotPath) => {
     const pendingEvents = lease.events.splice(0);
     const events = (raw.events ?? []).map((entry) => typeof entry === "string" ? entry : JSON.stringify(entry));
     for (const entry of events) pushLeaseEvent(lease, entry);
+    const consoleLines = (raw.console ?? []).map((entry) => typeof entry === "string" ? entry : JSON.stringify(entry));
+    const eventLines = [...pendingEvents, ...events];
+    const warnings = (raw.warnings ?? []).filter((entry): entry is string => typeof entry === "string");
+    const challenges = Array.isArray(raw.challenges) ? raw.challenges : [];
+    const skills = (Array.isArray(raw.skills) ? raw.skills : []).filter(
+      (entry): entry is { name: string; description: string; path: string } =>
+        !!entry && typeof entry.name === "string" && typeof entry.description === "string" && typeof entry.path === "string",
+    );
+    const pendingCredential = raw.pendingCredential && typeof raw.pendingCredential === "object"
+      && typeof (raw.pendingCredential as { pendingId?: unknown }).pendingId === "string"
+      ? raw.pendingCredential as BrowserPendingCredential
+      : undefined;
     const result: BrowserEvalResult = {
       value: raw.result,
-      console: (raw.console ?? []).map((entry) => typeof entry === "string" ? entry : JSON.stringify(entry)),
       pages: summaries.map((entry, index) => ({
         index,
         active: entry.active === true,
         url: typeof entry.url === "string" ? entry.url : "about:blank",
         title: typeof entry.title === "string" ? entry.title : "",
       })),
-      events: [...pendingEvents, ...events],
-      screenshots,
       elapsedMs: typeof raw.durationMs === "number" ? raw.durationMs : 0,
-      truncated: false,
+      // 1.7.1 omits empty envelope fields; do not re-inflate them here.
+      ...(consoleLines.length > 0 ? { console: consoleLines } : {}),
+      ...(eventLines.length > 0 ? { events: eventLines } : {}),
+      ...(screenshots.length > 0 ? { screenshots } : {}),
+      ...(warnings.length > 0 ? { warnings } : {}),
+      ...(challenges.length > 0 ? { challenges } : {}),
+      ...(skills.length > 0 ? { skills } : {}),
+      ...(pendingCredential ? { pendingCredential } : {}),
     };
     pages = result.pages.length;
     evaluations++;
@@ -456,7 +477,7 @@ const attachFile = async (target, screenshotPath) => {
       lease,
       `return await screenshot({ kind: ${JSON.stringify(name === "proof-auto" ? "proof" : "question")}, name: ${JSON.stringify(name)} })`,
     );
-    const screenshot = result.screenshots[0];
+    const screenshot = result.screenshots?.[0];
     if (!screenshot) throw new Error("BetterWright did not produce a screenshot");
     return screenshot;
   }
