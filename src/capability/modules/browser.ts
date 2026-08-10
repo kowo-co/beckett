@@ -87,6 +87,16 @@ const WatchArgs = z.object({
   runId: z.string().trim().min(1, "browser.watch needs a runId"),
   tail: z.number().int().positive().optional(),
   screenshot: z.boolean().optional(),
+  /** Opt into the live-view link. Off by default — it hands over control and costs a launch. */
+  live: z
+    .boolean()
+    .optional()
+    .describe(
+      "Set only when the person asked to WATCH THE BROWSER LIVE. It returns liveViewUrl, a " +
+        "private link that grants full control of that browser (take-control input, chat, " +
+        "handoff), and it promotes the run's session to a resident streaming browser for the " +
+        "rest of the run. Only the channel that dispatched the run may ask for it.",
+    ),
 });
 
 const SteerArgs = z.object({
@@ -195,9 +205,10 @@ export const createBrowserExtension =
             "Snapshot exactly the background browser run named by runId: its state (including " +
             "queued), redacted activity journal, and — while that run is live — a fresh page " +
             "screenshot from its own session. Use when someone asks what it is doing, or before " +
-            "steering. While the run is live the response also carries liveViewUrl — a private " +
-            "watch-the-browser-live link (treat it like a password; share it only with the " +
-            "requesting person).",
+            "steering. Pass live:true ONLY when the person asked to watch the browser live: the " +
+            "response then carries liveViewUrl, a private link that grants full control of that " +
+            "browser (treat it like a password; share it only with the requesting person), and " +
+            "it is available only in the channel that dispatched the run.",
           actionClass: ActionClass.FREE,
           input: WatchArgs,
           examples: ["what is the browser run doing right now?"],
@@ -232,7 +243,8 @@ export const createBrowserExtension =
         // The `call.origin` identity is TRUSTED here because the core derives it from the
         // issuing turn before dispatch (`ext.invoke` strips caller-supplied userId/channelId);
         // this body enforces the same gates as the v5 bus verbs — an origin identity on
-        // everything that acts, and the run-belongs-to-its-channel lock on task/steer/stop.
+        // everything that acts, and the run-belongs-to-its-channel lock on task/steer/stop
+        // (plus watch's live view, which is control of the browser, not a read of it).
         try {
           switch (call.capabilityId) {
             case "browser.task": {
@@ -264,9 +276,27 @@ export const createBrowserExtension =
             }
             case "browser.watch": {
               const a = call.args as z.infer<typeof WatchArgs>;
-              const inspection = await requireAgent().inspect(a.runId, {
+              const agent = requireAgent();
+              // The journal + screenshot stay an open read, but the live view is FULL BROWSER
+              // CONTROL (take-control CDP input, chat, handoff), so it rides the same gate as
+              // steer/stop: an origin identity, and only the run's own channel.
+              if (a.live) {
+                if (!call.origin?.userId || !call.origin.channelId) {
+                  return { ok: false, error: "the live browser view needs an authenticated authorized request" };
+                }
+                const authorized = await agent.inspect(a.runId, { tail: 1, screenshot: false });
+                if (!authorized) return { ok: false, error: `browser run ${a.runId} is unknown` };
+                if (authorized.run.channelId !== call.origin.channelId) {
+                  return {
+                    ok: false,
+                    error: "browser runs can only be watched live from the channel that dispatched them",
+                  };
+                }
+              }
+              const inspection = await agent.inspect(a.runId, {
                 ...(a.tail !== undefined ? { tail: a.tail } : {}),
                 ...(a.screenshot !== undefined ? { screenshot: a.screenshot } : {}),
+                ...(a.live ? { live: true } : {}),
               });
               if (!inspection) return { ok: false, error: `browser run ${a.runId} is unknown` };
               return { ok: true, data: inspection };
