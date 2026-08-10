@@ -288,3 +288,28 @@ describe("the stages extension (v6 Phase 5)", () => {
     expect(() => registry.register(createStagesExtension(extCtx))).toThrow(/already registered/);
   });
 });
+
+describe("environment bootstrap (prompt wiring)", () => {
+  const block = "<environment>\nX\n</environment>";
+
+  test("only the implement stage opts in", () => {
+    expect(stageRegistry.get("implement")!.wantsEnvBootstrap).toBe(true);
+    for (const name of ["review", "design", "design_check"]) {
+      expect(stageRegistry.get(name)!.wantsEnvBootstrap).toBeFalsy();
+    }
+  });
+
+  test("implement appends the block, and omits it entirely when absent", () => {
+    const ticket = makeTicket();
+    expect(stageRegistry.prompt("implement", { ticket, envBootstrap: block }).endsWith(block)).toBe(true);
+    expect(stageRegistry.prompt("implement", { ticket })).not.toContain("<environment>");
+  });
+
+  test("review never carries it — the judge already has the pre-read diff", () => {
+    expect(stageRegistry.prompt("review", { ticket: makeTicket(), envBootstrap: block })).not.toContain("<environment>");
+  });
+
+  test("the unknown-stage fallback carries it (it renders the generic brief)", () => {
+    expect(stageRegistry.prompt("mystery", { ticket: makeTicket(), envBootstrap: block })).toContain(block);
+  });
+});
