@@ -1891,6 +1891,7 @@ per_task_usd_cap = 0
 worker_hard_cap_s = 3600
 worker_stall_s = 300
 worker_checkpoint_s = 120
+worker_slow_tool_s = 30
 staffing_watchdog_s = 120
 max_repeated_stall_fingerprints = 2
 max_rework_cycles = 3

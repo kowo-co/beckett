@@ -49,6 +49,7 @@ import { workerId as mintWorkerId } from "../ids.ts";
 import { log } from "../log.ts";
 import { excludeFromGit, installScaffoldingGuardHook, SCAFFOLDING_DIR } from "../worker/worktree.ts";
 import { scopeGuardSpec } from "../hooks/scope-guard.ts";
+import { runtimeAwarenessSpec } from "../hooks/runtime-awareness.ts";
 import { renderClaudeSettings } from "../hooks/registry.ts";
 import { buildResumeBrief } from "./resume-brief.ts";
 import { gatherEnvBootstrap } from "./env-bootstrap.ts";
@@ -258,21 +259,26 @@ function buildEnvelope(harness: HarnessSpec, config: Config): ResourceEnvelope {
  * settings and the done-signal schema. v3.1 runs the worker IN the project checkout, so the
  * scope-guard is delivered via `claude --settings <file>` (NOT `.claude/settings.json`) — claude
  * layers it on top of the project's own settings rather than overwriting them. The scope-guard's
- * boundary is the repo root, so the worker may edit the whole repo but nothing outside it.
+ * boundary is the repo root, so the worker may edit the whole repo but nothing outside it. Also
+ * delivers the runtime-awareness PostToolUse hook (when enabled), which notices slow tool calls
+ * back into the worker's own context.
  */
 function writeWorkerMeta(
   repoRoot: string,
   scopeGuardPath: string,
   ownedGlobs: string[],
+  runtimeAwarenessPath: string,
+  slowToolMs: number,
 ): { doneSchemaPath: string; settingsPath: string; mcpConfigPath: string } {
   const metaDir = join(repoRoot, SCAFFOLDING_DIR);
   mkdirSync(metaDir, { recursive: true });
 
+  const hookSpecs = [scopeGuardSpec(scopeGuardPath, repoRoot, ownedGlobs)];
+  // Runtime awareness (PostToolUse): only registered when enabled — 0 means no hook at all,
+  // so a disabled install pays zero subprocess overhead per tool call.
+  if (slowToolMs > 0) hookSpecs.push(runtimeAwarenessSpec(runtimeAwarenessPath, slowToolMs));
   const settingsPath = join(metaDir, "worker-settings.json");
-  writeFileSync(
-    settingsPath,
-    JSON.stringify(renderClaudeSettings([scopeGuardSpec(scopeGuardPath, repoRoot, ownedGlobs)]), null, 2),
-  );
+  writeFileSync(settingsPath, JSON.stringify(renderClaudeSettings(hookSpecs), null, 2));
 
   const doneSchemaPath = join(metaDir, "done-schema.json");
   writeFileSync(doneSchemaPath, JSON.stringify(DONE_SCHEMA, null, 2));
@@ -344,6 +350,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<TicketWorkerHa
   const scope = buildScope(ticket);
   const envelope = buildEnvelope(harness, config);
   const scopeGuardPath = join(import.meta.dir, "../hooks/scope-guard.ts");
+  const runtimeAwarenessPath = join(import.meta.dir, "../hooks/runtime-awareness.ts");
 
   // claude and modern pi both own their resume identity from t=0 via a pre-minted UUID. PiDriver's
   // preflight requires pi >=0.78 and `--session-id` support so stale 0.72.x installs fail loudly
@@ -442,7 +449,13 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<TicketWorkerHa
     // Universal guard: strip the scaffolding from the index on every commit, whoever runs it — so a
     // worker's own `git add -f .beckett && git commit` can never sweep bookkeeping into the diff (OPS-61).
     await installScaffoldingGuardHook(workspace);
-    const { doneSchemaPath, settingsPath, mcpConfigPath } = writeWorkerMeta(workspace, scopeGuardPath, scope.ownedGlobs);
+    const { doneSchemaPath, settingsPath, mcpConfigPath } = writeWorkerMeta(
+      workspace,
+      scopeGuardPath,
+      scope.ownedGlobs,
+      runtimeAwarenessPath,
+      config.supervise.worker_slow_tool_s * 1000,
+    );
 
     // Environment bootstrap: a spawn-time workspace snapshot appended to implement/rework (and
     // unknown-stage fallback) briefs so the worker's first turns never rediscover the obvious.
