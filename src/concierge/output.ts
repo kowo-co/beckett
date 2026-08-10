@@ -21,9 +21,15 @@ export const DISCORD_TURN_OUTPUT_SCHEMA = {
   type: "object",
   properties: {
     decision: { type: "string", enum: ["send", "pass"] },
+    voice_check: {
+      type: "string",
+      description:
+        "One short line stating how the message you are about to write honors the persona voice " +
+        "rules. Empty string when decision is \"pass\".",
+    },
     message: { type: ["string", "null"] },
   },
-  required: ["decision", "message"],
+  required: ["decision", "voice_check", "message"],
   additionalProperties: false,
 } as const;
 
@@ -32,7 +38,14 @@ export function parseDiscordTurnOutput(value: unknown): DiscordTurnOutput | null
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const output = value as Record<string, unknown>;
   const keys = Object.keys(output);
-  if (keys.length !== 2 || !keys.includes("decision") || !keys.includes("message")) return null;
+  if (
+    keys.length !== 3 ||
+    !keys.includes("decision") ||
+    !keys.includes("voice_check") ||
+    !keys.includes("message")
+  )
+    return null;
+  if (typeof output.voice_check !== "string") return null;
   if (output.decision === "send" && typeof output.message === "string" && output.message.trim()) {
     return { decision: "send", message: output.message.trim() };
   }
