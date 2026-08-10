@@ -138,6 +138,7 @@ browser_eval_timeout_ms = 60000
 browser_max_output_chars = 24000
 browser_question_wait_secs = 3600
 browser_attach_roots = []
+browser_live_view_expose = "tailscale"
 
 [announce]
 changes_channel_id = ""

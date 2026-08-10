@@ -122,10 +122,18 @@ export interface BrowserCheckpoint {
   activeIndex: number;
 }
 
+export interface BrowserLiveViewStatus {
+  running: boolean;
+  /** Capability URL — embeds a bearer token; surface to the requesting human only, never journal it. */
+  url: string | null;
+}
+
 export interface BrowserRuntime {
   acquire(lease: BrowserLease): Promise<void>;
   evaluate(runId: string, code: string, controlToken?: string): Promise<BrowserEvalResult>;
   capture(runId: string, name: string): Promise<string>;
+  /** Optional: backends without a live-view server simply omit it. */
+  liveView?(runId: string, action: "start" | "stop" | "status"): Promise<BrowserLiveViewStatus>;
   checkpoint(runId: string): Promise<BrowserCheckpoint>;
   restore(runId: string, checkpoint: BrowserCheckpoint): Promise<void>;
   release(runId: string, captureProof: boolean): Promise<string[]>;
@@ -153,6 +161,8 @@ export interface BrowserHostSettings {
   maxOutputChars: number;
   /** Global configured roots; each lease adds its own artifactsDir at attachment time. */
   attachmentRoots?: string[];
+  /** Live-view exposure preset; absent means "tailscale". "off" disables. */
+  liveViewExpose?: "off" | "local" | "lan" | "tailscale";
 }
 
 interface ActiveLease extends BrowserLease {
@@ -247,6 +257,7 @@ export function browserHostSettings(config: Config): BrowserHostSettings {
     evalTimeoutMs: config.quick.browser_eval_timeout_ms,
     maxOutputChars: config.quick.browser_max_output_chars,
     attachmentRoots: [...new Set([resolve(paths.imagesDir), ...config.quick.browser_attach_roots])],
+    liveViewExpose: config.quick.browser_live_view_expose,
   };
 }
 

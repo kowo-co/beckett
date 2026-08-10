@@ -656,3 +656,120 @@ test("releasing a lease closes only its own betterwright session", async () => {
     await runtime.stop();
   }
 });
+
+/** Adds the optional live-view surface the real client exposes. */
+class LiveViewFake extends FakeBetterWright {
+  readonly startCalls: Array<{ session?: string; expose?: string }> = [];
+  stopCalls = 0;
+
+  constructor(private readonly startResult: { ok: boolean; url?: string; error?: string } = { ok: true, url: "https://100.108.167.104:7788/#tok" }) {
+    super();
+  }
+
+  async startLiveView(options?: { session?: string; expose?: "lan" | "local" | "tailscale" }) {
+    this.startCalls.push({ session: options?.session, expose: options?.expose });
+    return { running: this.startResult.ok, ...this.startResult };
+  }
+
+  async stopLiveView() {
+    this.stopCalls++;
+    return { ok: true, running: false };
+  }
+}
+
+describe("live view", () => {
+  test("start on an acquired lease streams that lease's session over tailscale", async () => {
+    const fake = new LiveViewFake();
+    const runtime = createBetterWrightRuntime(settingsFor(), quietLog, { createBrowser: () => fake });
+    try {
+      await runtime.acquire(leaseFor("alpha"));
+      const status = await runtime.liveView!("alpha", "start");
+      expect(status).toEqual({ running: true, url: "https://100.108.167.104:7788/#tok" });
+      expect(fake.startCalls).toEqual([{ session: "alpha", expose: "tailscale" }]);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  test("expose 'off' never touches the client", async () => {
+    const fake = new LiveViewFake();
+    const runtime = createBetterWrightRuntime(
+      { ...settingsFor(), liveViewExpose: "off" },
+      quietLog,
+      { createBrowser: () => fake },
+    );
+    try {
+      await runtime.acquire(leaseFor("alpha"));
+      expect(await runtime.liveView!("alpha", "start")).toEqual({ running: false, url: null });
+      expect(fake.startCalls).toEqual([]);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  test("a client that cannot start the server rejects", async () => {
+    const fake = new LiveViewFake({ ok: false, error: "no tailscale" });
+    const runtime = createBetterWrightRuntime(settingsFor(), quietLog, { createBrowser: () => fake });
+    try {
+      await runtime.acquire(leaseFor("alpha"));
+      await expect(runtime.liveView!("alpha", "start")).rejects.toThrow("no tailscale");
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  test("the shared server stops only when the last live-viewed lease releases", async () => {
+    const fake = new LiveViewFake();
+    const runtime = createBetterWrightRuntime(settingsFor(), quietLog, {
+      createBrowser: () => fake,
+      maxLeases: 5,
+    });
+    try {
+      await runtime.acquire(leaseFor("alpha"));
+      await runtime.acquire(leaseFor("beta"));
+      await runtime.liveView!("alpha", "start");
+      await runtime.liveView!("beta", "start");
+      await runtime.release("alpha", false);
+      expect(fake.stopCalls).toBe(0);
+      await runtime.release("beta", false);
+      expect(fake.stopCalls).toBe(1);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  test("a single live-viewed lease stops the server on release", async () => {
+    const fake = new LiveViewFake();
+    const runtime = createBetterWrightRuntime(settingsFor(), quietLog, { createBrowser: () => fake });
+    try {
+      await runtime.acquire(leaseFor("alpha"));
+      await runtime.liveView!("alpha", "start");
+      await runtime.release("alpha", false);
+      expect(fake.stopCalls).toBe(1);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  test("a client without live view rejects start but still resolves stop", async () => {
+    const fake = new FakeBetterWright();
+    const runtime = createBetterWrightRuntime(settingsFor(), quietLog, { createBrowser: () => fake });
+    try {
+      await runtime.acquire(leaseFor("alpha"));
+      await expect(runtime.liveView!("alpha", "start")).rejects.toThrow("does not support live view");
+      expect(await runtime.liveView!("alpha", "stop")).toEqual({ running: false, url: null });
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  test("live view on an unknown run rejects", async () => {
+    const fake = new LiveViewFake();
+    const runtime = createBetterWrightRuntime(settingsFor(), quietLog, { createBrowser: () => fake });
+    try {
+      await expect(runtime.liveView!("ghost", "start")).rejects.toThrow("is not active");
+    } finally {
+      await runtime.stop();
+    }
+  });
+});

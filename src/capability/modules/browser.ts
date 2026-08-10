@@ -195,7 +195,9 @@ export const createBrowserExtension =
             "Snapshot exactly the background browser run named by runId: its state (including " +
             "queued), redacted activity journal, and — while that run is live — a fresh page " +
             "screenshot from its own session. Use when someone asks what it is doing, or before " +
-            "steering.",
+            "steering. While the run is live the response also carries liveViewUrl — a private " +
+            "watch-the-browser-live link (treat it like a password; share it only with the " +
+            "requesting person).",
           actionClass: ActionClass.FREE,
           input: WatchArgs,
           examples: ["what is the browser run doing right now?"],

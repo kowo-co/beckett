@@ -43,6 +43,7 @@ import type {
   BrowserEvaluatorSession,
   BrowserHostSettings,
   BrowserLease,
+  BrowserLiveViewStatus,
   BrowserRuntime,
   BrowserRuntimeStats,
 } from "./runtime.ts";
@@ -937,6 +938,14 @@ export function createIsolatedBrowserRuntime(deps: CreateIsolatedBrowserRuntimeD
       await acquireInHost(current);
       const source = await rpc("capture", { runId, name }, settings.actionTimeoutMs + 5_000) as string;
       return trustedPng(source, current);
+    },
+
+    async liveView(runId, action) {
+      requireLease(runId);
+      // Start may promote an Obscura session to the visual compatibility browser
+      // (a browser launch), so it gets the launch budget; stop/status are cheap.
+      const timeoutMs = action === "start" ? settings.launchTimeoutMs + 5_000 : settings.actionTimeoutMs + 2_000;
+      return (await rpc("liveView", { runId, action }, timeoutMs)) as BrowserLiveViewStatus;
     },
 
     async checkpoint(runId) {

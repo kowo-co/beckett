@@ -31,6 +31,7 @@ export type BrowserHostMethod =
   | "prepareEvaluation"
   | "applyEvaluation"
   | "capture"
+  | "liveView"
   | "checkpoint"
   | "restore"
   | "release"
@@ -151,6 +152,12 @@ async function handle(runtime: BrowserRuntime, request: BrowserHostRequest): Pro
     }
     case "capture":
       return runtime.capture(requireString(request.params, "runId"), requireString(request.params, "name"));
+    case "liveView": {
+      const action = requireString(request.params, "action");
+      if (action !== "start" && action !== "stop" && action !== "status") throw new Error("invalid live view action");
+      if (!runtime.liveView) throw new Error("live view is not supported by this browser backend");
+      return runtime.liveView(requireString(request.params, "runId"), action);
+    }
     case "checkpoint":
       return runtime.checkpoint(requireString(request.params, "runId"));
     case "restore": {
