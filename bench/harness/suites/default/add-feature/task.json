@@ -1,0 +1,7 @@
+{
+  "id": "add-feature",
+  "prompt": "Implement the `slugify` function in slug.ts so that `bun test` passes. The tests in slug.test.ts define the contract. Do not modify slug.test.ts.",
+  "model": "",
+  "effort": "low",
+  "timeout_s": 600
+}

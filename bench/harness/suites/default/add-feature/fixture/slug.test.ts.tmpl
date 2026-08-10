@@ -1,0 +1,14 @@
+import { expect, test } from "bun:test";
+import { slugify } from "./slug.ts";
+
+test("lowercases and joins words with single dashes", () => {
+  expect(slugify("Hello World")).toBe("hello-world");
+});
+
+test("maps runs of non-alphanumeric characters to a single dash", () => {
+  expect(slugify("Beckett v6.26: eval harness!")).toBe("beckett-v6-26-eval-harness");
+});
+
+test("collapses separators and trims edge dashes", () => {
+  expect(slugify("  --Weird   input--  ")).toBe("weird-input");
+});

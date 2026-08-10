@@ -1,0 +1,11 @@
+import { expect, test } from "bun:test";
+import { renderReport } from "./report.ts";
+
+test("report totals orders", () => {
+  expect(
+    renderReport([
+      { id: "a", quantity: 2, unitPrice: 3.5 },
+      { id: "b", quantity: 1, unitPrice: 1.25 },
+    ]),
+  ).toBe("2 orders, total 8.25");
+});
