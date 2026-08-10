@@ -25,6 +25,7 @@ import { isAbsolute, resolve } from "node:path";
 import { z } from "zod";
 import type { Config } from "../types.ts";
 import { HHMM, WEEKDAYS } from "../routine/types.ts";
+import { DIRECTED_SETTLE_MAX_MS } from "../concierge/directed-settle.ts";
 import { ActionClass, CapabilityRegistry, type Capability } from "./index.ts";
 
 // =======================================================================================
@@ -525,6 +526,24 @@ export const configFragments = {
       max_live_sessions: posInt.default(6),
       // Recycle a session's child after this much idle time (same resume-on-demand semantics).
       idle_recycle_minutes: posInt.default(30),
+      // Directed-message SETTLE WINDOW (src/concierge/directed-settle.ts). A thought typed as three
+      // messages starts a turn on the first fragment and answers half a question. With this set,
+      // a directed message that would start a NEW turn waits this many milliseconds first; another
+      // message from the SAME author in the SAME channel inside the hold folds into one turn
+      // (the same coalesced-burst preamble a superseded queued turn already uses) and restarts the
+      // hold, capped at 2× the window so a fast typist cannot delay their own answer forever.
+      //
+      // 0 = OFF, and off is today's behavior byte-for-byte: no hold, no timer, no state. That is
+      // the shipped default deliberately — the amend/inject repair paths already cover the common
+      // burst, so this is a capability to switch on after watching a room, not a new default.
+      // Clamped rather than rejected: an over-eager value should degrade to the ceiling, not
+      // refuse to boot, since the failure mode of a too-long hold is only latency.
+      directed_settle_ms: z
+        .number()
+        .int()
+        .min(0)
+        .default(0)
+        .transform((ms) => Math.min(ms, DIRECTED_SETTLE_MAX_MS)),
     })
     .default({}),
   // Quick agents — the no-ticket lane. Sonnet at medium: these are errands where
