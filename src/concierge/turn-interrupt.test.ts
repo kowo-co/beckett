@@ -522,13 +522,14 @@ test("a different author's message, or one on a different channel, after tool-us
   expect(posts.map((p) => p.text).sort()).toEqual(["original answer", "queued answer 2"]);
 });
 
-// ── 4b. injectLiveTurn commits the watermark to the INJECTED message's own id ─────────────
+// ── 4b. the injected message's watermark commits when its turn FINISHES, not at injection ──
 //
-// channel-context.ts's markSeen was made monotonic per (channelId, sessionId) specifically so
-// this commit — made immediately, during injection — survives the live turn's OWN eventual
-// watermark commit (computed from state before the injected message existed, landing later on
-// the try path below). Real ChannelContextStore, real dir: this is the one behavior a fake
-// channelStore can't stand in for without re-implementing the bug it's proving fixed.
+// Marking it seen at injection time claimed an absorption nothing had proven: the line only
+// reaches the model at the next turn boundary, so a turn that died (or never consumed it) left a
+// message that was both unanswered AND invisible to every later turn's unseen window. The commit
+// now waits for the consuming turn's result. channel-context.ts's markSeen stays monotonic per
+// (channelId, sessionId) because the two commits still land out of order: the live turn's own
+// watermark was computed BEFORE the injected message existed. Real ChannelContextStore, real dir.
 
 function sharedContextHarness(session: Partial<ConciergeSession> & Record<string, unknown>) {
   tempBeckettDir();
@@ -565,7 +566,7 @@ function shMsg(channelId: string, messageId: string, userId = "11111111111111111
   } as unknown as IncomingMessage;
 }
 
-test("a successful injection commits the watermark to the injected message's own id", async () => {
+test("a successful injection commits the watermark only once its consuming turn completes", async () => {
   let live: { resolve: (o: DiscordTurnOutput) => void; meta: unknown } | null = null;
   let asks = 0;
   const session = {
@@ -594,17 +595,28 @@ test("a successful injection commits the watermark to the injected message's own
 
   await concierge.onMessage(shMsg("chan-1", "m-2")); // folds in via injectLiveTurn
 
-  // A fresh store over the SAME channelsDir (restart-survival pattern, channel-context.test.ts):
-  // the injected message's own id must already be the watermark for this session.
-  const store = createChannelContextStore({
-    channelsDir: join(process.env.BECKETT_DIR!, "channels"),
-    maxEntriesPerChannel: 500,
-    maxAgeHours: 999_999,
-    logger: quietLog,
-  });
-  expect(store.takeUnseen("chan-1", "sid-1")).toEqual([]); // m-2 already marked seen
+  // A fresh store over the SAME channelsDir (restart-survival pattern, channel-context.test.ts).
+  const openStore = () =>
+    createChannelContextStore({
+      channelsDir: join(process.env.BECKETT_DIR!, "channels"),
+      maxEntriesPerChannel: 500,
+      maxAgeHours: 999_999,
+      logger: quietLog,
+    });
+  // Mid-flight: nothing has absorbed m-2 yet, so it is still unseen — a turn that died here would
+  // leave it in the window for the next one instead of hiding it.
+  expect(openStore().takeUnseen("chan-1", "sid-1").map((e) => e.messageId)).toEqual(["m-1", "m-2"]);
 
   live!.resolve({ decision: "send", message: "done" });
   await first;
   expect(asks).toBe(1); // the live turn's own eventual watermark commit never started a second ask
+  // The consuming turn finished, so the injected message's own id is the watermark now — committed
+  // AFTER the turn's older, pre-injection mark, which monotonic markSeen keeps from regressing it.
+  // (Beckett's own reply lands in the record after the watermark, so filter to the human lines.)
+  expect(
+    openStore()
+      .takeUnseen("chan-1", "sid-1")
+      .filter((e) => e.kind === "user")
+      .map((e) => e.messageId),
+  ).toEqual([]);
 });

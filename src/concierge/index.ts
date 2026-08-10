@@ -440,6 +440,47 @@ export const TURN_SILENCE_MS = 240_000;
  */
 const MAX_LIVE_TURN_INJECTIONS = 8;
 /**
+ * Folded-in messages the Concierge keeps answerable at once (see `injectedMessages`). A bound, not
+ * a policy: entries drop as their turns settle, and this only stops a pathological burst from
+ * pinning message objects forever.
+ */
+const MAX_TRACKED_INJECTIONS = 64;
+
+/**
+ * One mid-flow message handed to a live turn ({@link ConciergeSession.injectIntoLiveTurn}), tracked
+ * until the turn that consumed it says so. `absorbed` flips when a `result` arrives for the turn the
+ * line was written into — the only proof the session ever gets that the model saw it.
+ */
+export interface InjectedMessageRecord {
+  messageId: string;
+  absorbed: boolean;
+}
+
+/**
+ * Which injected messages a `result` leaves UNANSWERED, so their ids can be re-run as their own
+ * turns instead of vanishing.
+ *
+ * The failure: an injection can race the live turn's own `result`. The line is written a beat after
+ * the pending turn settled, so `claude` treats it as a turn of its own — and that turn's result
+ * arrives with no pending turn to resolve, where onResult discards it (never posting assistant
+ * text, correctly). Before this, the person's message died right there: seen by the model, answered
+ * by nothing. A result WITH a pending turn is the normal case and orphans nothing: that turn is the
+ * one absorbing the injections, and its own reply covers them.
+ */
+export function orphanedInjectionIds(
+  records: readonly InjectedMessageRecord[],
+  resultHadPendingTurn: boolean,
+): string[] {
+  if (resultHadPendingTurn) return [];
+  const ids: string[] = [];
+  for (const record of records) {
+    if (record.absorbed || !record.messageId || ids.includes(record.messageId)) continue;
+    ids.push(record.messageId);
+  }
+  return ids;
+}
+
+/**
  * Soft, log-only budget for a turn shaped like a filing/staffing arc (see
  * {@link isFilingShapedToolUse}). This is observability, NOT a gate: the owner's complaint is
  * that a tool-heavy turn runs long and silent, and this line is how a future pass would learn
@@ -504,10 +545,50 @@ const AMEND_MIN_CHARS = 16;
  * Posted when an in-flight turn is cancelled mid-answer and the person who was waiting is owed a
  * word (issue #138). The #117 cancel resolved as a SILENT pass so a correction wouldn't produce
  * two answers — but a silent drop with no follow-up is exactly how the room read fifteen minutes
- * of muteness. One short line, in voice, is the floor: the earlier take is gone, the latest is
- * what I'm on.
+ * of muteness. One short line, in voice, is the floor. It says FOLDING, not scrapping, because
+ * that is now what happens: the restarted turn is told the earlier ask still stands
+ * ({@link AMENDED_TURN_NOTE}), so the reply to the latest message answers this one too — promising
+ * anything less would be the same silent half-drop in politer words.
  */
-const SUPERSEDED_TURN_NOTICE = "Scrapping my half-written reply to that — going with your latest.";
+const SUPERSEDED_TURN_NOTICE = "Folding that into my reply to your latest.";
+
+/**
+ * Prepended to the turn that RESTARTS after a cancel-and-amend ({@link ConciergeSession.cancelLiveTurn}).
+ *
+ * The restart `--resume`s the same transcript, so the earlier message is right there — but nothing
+ * in the turn says the earlier ask is still UNANSWERED. Its half-written reply was killed before a
+ * word of it posted, and the channel notice says only "going with your latest", so a model reading
+ * the transcript can reasonably conclude the first message was already handled and answer just the
+ * second. That is the silent half of the amend path: two messages in, one answered.
+ */
+const AMENDED_TURN_NOTE =
+  "SYSTEM: the message below AMENDS the one you were mid-answer on when it arrived. That earlier " +
+  "reply was killed before a single word of it posted — nothing has been said to EITHER message. " +
+  "The earlier ask still stands: address both together, in one reply.";
+
+/**
+ * Frame a burst of messages one person fired faster than turns drain as a single ask.
+ *
+ * The failure this prevents: a same-author message still QUEUED when the next one arrives used to
+ * be dropped silently ({@link ConciergeSession.supersedeQueuedTurns}) on the theory that the shared
+ * channel window carries its text anyway. It does not always — a two-message burst inside one
+ * session's watermark window leaves message #1 with no turn, no reply and no notice, which is the
+ * silent-loss shape "no directed message is ever unanswered" exists to close. Carrying the text
+ * INTO the surviving turn costs one preamble and loses nothing.
+ *
+ * Empty string for fewer than two texts: nothing was superseded, so the ordinary turn is unchanged.
+ */
+export function coalescedBurstNote(texts: readonly string[]): string {
+  const parts = texts.map((text) => text.trim()).filter(Boolean);
+  if (parts.length < 2) return "";
+  return (
+    "SYSTEM: this person sent these messages in quick succession and only the last one is running " +
+    "as a turn — the earlier ones were folded in here rather than answered separately, so nothing " +
+    "has been said to any of them yet. Treat them as ONE thought and answer them together, oldest " +
+    "first:\n\n" +
+    parts.map((text, i) => `${i + 1}. ${text}`).join("\n\n")
+  );
+}
 
 /**
  * Prepended to a turn the boot replay is re-running (issue #3), telling the session the one thing
@@ -932,6 +1013,12 @@ export interface ConciergeSessionOptions {
   calibrationBlock?: () => string;
   /** Freshly-read, hard-capped open proposal queue (issue #37). Empty → no block, silent queue. */
   proposalsBlock?: () => string;
+  /**
+   * Fired once per mid-flow message whose consuming turn never absorbed it (see
+   * {@link orphanedInjectionIds}). The owner re-runs it as its own priority turn; the session
+   * itself has no route back to the Discord path, so it only reports.
+   */
+  onOrphanedInjection?: (messageId: string) => void;
 }
 
 /**
@@ -1010,6 +1097,8 @@ export class ConciergeSession {
   private rotateFailedAt = 0;
   /** Alerted when the child crash-loops (wired by the Concierge to the ops channel). */
   private readonly onCrashLoop?: (info: { count: number; code: number }) => void;
+  /** Reports a mid-flow message no turn ever answered, so the owner can re-run it (see options). */
+  private readonly onOrphanedInjection?: (messageId: string) => void;
 
   // ── turn bookkeeping (issue #24) ─────────────────────────────────────────────────────────
   /** Caller-supplied metadata of the CURRENTLY EXECUTING turn (reply-claim correlation). */
@@ -1018,6 +1107,12 @@ export class ConciergeSession {
   private liveTurnToolUsed = false;
   /** Mid-flow messages handed to the CURRENT live turn; reset with {@link liveTurnToolUsed}. */
   private liveTurnInjections = 0;
+  /**
+   * Mid-flow messages written into the child but not yet proven absorbed. Deliberately NOT reset at
+   * turn start like {@link liveTurnInjections}: the case it exists for is an injection that landed
+   * BETWEEN turns, which only the next `result` can settle (see {@link orphanedInjectionIds}).
+   */
+  private injectedRecords: InjectedMessageRecord[] = [];
   /** True once the LIVE turn has invoked a filing/staffing-shaped tool call (see onAssistant). */
   private liveTurnFilingShaped = false;
   /** `Date.now()` when the LIVE turn started — the clock {@link FILING_TURN_BUDGET_MS} measures against. */
@@ -1048,6 +1143,7 @@ export class ConciergeSession {
     this.model = opts.config.concierge.model;
     this.rotateAtTokens = opts.config.concierge.rotate_at_tokens ?? DEFAULT_ROTATE_AT_TOKENS;
     this.onCrashLoop = opts.onCrashLoop;
+    this.onOrphanedInjection = opts.onOrphanedInjection;
     this.scope = opts.scope?.trim() || GLOBAL_SCOPE;
     this.gate = opts.gate ?? null;
     this.handoffWindow = opts.handoffWindow ?? (() => "");
@@ -1251,7 +1347,7 @@ export class ConciergeSession {
    * routed through `SessionPool.injectLiveTurn`, which applies the same channel/author
    * eligibility gate as `cancelLiveTurn` before ever reaching this method.
    */
-  injectIntoLiveTurn(text: string): "injected" | "no-live-turn" | "capped" {
+  injectIntoLiveTurn(text: string, messageId?: string): "injected" | "no-live-turn" | "capped" {
     const p = this.pending;
     if (!p || !this.child) return "no-live-turn";
     if (this.liveTurnInjections >= MAX_LIVE_TURN_INJECTIONS) return "capped";
@@ -1266,6 +1362,10 @@ export class ConciergeSession {
       return "no-live-turn";
     }
     this.liveTurnInjections += 1;
+    // Written, not yet absorbed. The distinction is the whole point: the line reaches the model only
+    // at the next turn boundary, and if the live turn's `result` beat it there, no turn will ever
+    // answer it (see {@link orphanedInjectionIds}).
+    if (messageId) this.injectedRecords.push({ messageId, absorbed: false });
     // Push the silence window out. The turn is now doing work the person added mid-flight; letting
     // their own interjection trigger the "this took a while" framing would be backwards. Same reset
     // a streamed event gets — including disarming an already-armed reaper (issue #150).
@@ -1282,24 +1382,33 @@ export class ConciergeSession {
    * Drop QUEUED (not yet started) turns the caller considers superseded — the queue-free
    * converse of {@link cancelLiveTurn}. A rapid-fire follow-up from the same author shouldn't
    * produce two answers in a row: the earlier message's turn resolves as a silent pass and the
-   * newest message runs instead. Its text is NOT lost to the model — the shared channel store
-   * captured it at intake, so it rides the next turn's unseen-window block exactly as if the
-   * turn had run. Only queued turns match; the live turn is {@link cancelLiveTurn}'s job, and
-   * system/update turns never match (the caller's predicate only sees mention metas).
+   * newest message runs instead. Only queued turns match; the live turn is {@link cancelLiveTurn}'s
+   * job, and system/update turns never match (the caller's predicate only sees mention metas).
+   *
+   * The dropped text is CARRIED, not trusted to land elsewhere. The original design leaned on the
+   * shared channel window to re-surface it, which holds only while that window and its watermark
+   * cooperate — a fast two-message burst could lose message #1 outright, with no turn, no reply and
+   * no notice. `onSuperseded` hands each dropped turn's meta back to the caller, OLDEST FIRST, so
+   * the surviving turn can fold their text into its own prompt ({@link coalescedBurstNote}).
    *
    * Returns the number of turns dropped (0 = nothing queued matched; the caller just queues
    * normally). Dropped turns resolve as a silent pass — never a reject — so their handlers
    * post nothing, exactly like an interrupted live turn.
    */
-  supersedeQueuedTurns(match: (meta: unknown) => boolean): number {
+  supersedeQueuedTurns(match: (meta: unknown) => boolean, onSuperseded?: (meta: unknown) => void): number {
     let dropped = 0;
+    const supersededMetas: unknown[] = [];
     for (let i = this.turnQueue.length - 1; i >= 0; i--) {
       const entry = this.turnQueue[i]!;
       if (!match(entry.meta)) continue;
       this.turnQueue.splice(i, 1);
       entry.resolve({ decision: "pass", message: null });
+      supersededMetas.push(entry.meta);
       dropped += 1;
     }
+    // The scan runs newest-first (splicing forward would skip entries); the caller wants the burst
+    // back in the order it was typed.
+    for (const meta of supersededMetas.reverse()) onSuperseded?.(meta);
     if (dropped > 0) {
       this.log.info("superseded queued concierge turn(s)", {
         dropped,
@@ -1312,6 +1421,9 @@ export class ConciergeSession {
   /** Stop the session and reject any in-flight or queued turn. */
   async stop(): Promise<void> {
     this.stopped = true;
+    // A shutdown is the one exit that must not re-run anything: the owed-mention ledger already
+    // holds every injected message (claimed at injection time), so boot replay is the recovery.
+    this.injectedRecords = [];
     if (this.pending) {
       this.clearPendingTimers(this.pending);
       this.pending.reject(new Error("concierge session stopped"));
@@ -1899,6 +2011,22 @@ export class ConciergeSession {
       return;
     }
     this.consecutiveCrashes = 0; // a completed turn = the child is healthy again
+    // Settle the mid-flow injections against THIS result before anything else reads it. With a
+    // pending turn they are absorbed — that turn's single reply covers them. Without one, this
+    // result is the orphan turn an injection spawned by racing the previous result: its output is
+    // discarded exactly as before (assistant text never posts), but each message it swallowed is
+    // handed back for a real turn instead of disappearing.
+    if (this.injectedRecords.length > 0) {
+      const orphans = orphanedInjectionIds(this.injectedRecords, p !== null);
+      this.injectedRecords = [];
+      for (const messageId of orphans) {
+        this.log.debug("requeueing a mid-flow message no turn ever absorbed", {
+          sessionId: this.sessionId,
+          messageId,
+        });
+        this.onOrphanedInjection?.(messageId);
+      }
+    }
     if (!p) return;
     this.clearPendingTimers(p);
     if (this.liveTurnFilingShaped && filingTurnBudgetExceeded(Date.now() - this.turnStartedAt)) {
@@ -2281,6 +2409,18 @@ interface MentionClaim {
   repliedViaCli: boolean;
   /** Id of the ack message the Concierge posted this turn (null until posted). */
   ackMessageId: string | null;
+  /**
+   * The message text this turn was asked to answer, framing stripped. Carried so a turn superseded
+   * before it ever started can be folded into the turn that replaced it ({@link coalescedBurstNote})
+   * instead of vanishing with its queue entry.
+   */
+  text?: string;
+  /**
+   * Mid-flow messages folded into THIS turn (`injectLiveTurn`). They ride this turn's single reply,
+   * so their watermark commit and their owed-ledger settle wait on this turn finishing — marking
+   * them seen at injection time claimed absorption the turn had not yet proven.
+   */
+  injectedMessageIds?: string[];
   /** Shared-context cursor rendered into this turn; committed only after a real model result. */
   contextWatermark?: { channelId: string; sessionId: string; lastMessageId: string };
   /** Set by a real ConciergeSession: false until it receives a valid structured result. */
@@ -2520,6 +2660,18 @@ export class Concierge {
    */
   private readonly replayingMentions = new Set<string>();
   /**
+   * Mid-flow messages folded into a live turn, kept verbatim until that turn proves it absorbed
+   * them. An injection that raced the turn's own `result` has no turn to answer it, and
+   * {@link requeueOrphanedInjection} re-runs it from here — the same "replay the real message
+   * through the real path" shape the owed-mention drain uses. Bounded; entries drop as they settle.
+   */
+  private readonly injectedMessages = new Map<string, IncomingMessage>();
+  /**
+   * Injected messages being re-run RIGHT NOW. Only {@link captureInbound} reads it: the shared
+   * record already holds these lines from their first pass, and the store appends blind.
+   */
+  private readonly requeuedInjections = new Set<string>();
+  /**
    * The boot replay drain ({@link replayOwedMentions}), kept so tests — and any future shutdown
    * path that wants to wait for it — can await something. Resolved when no replay is running.
    */
@@ -2624,6 +2776,9 @@ export class Concierge {
           // What last night's dream ASKED for. Read per launch like the rest; a decision is a
           // CLI verb the session runs, never something the block itself can do.
           proposalsBlock: () => this.proposalsBlock(),
+          // A mid-flow message whose turn never absorbed it (it raced the result) gets its own
+          // turn rather than dying with the discarded orphan result.
+          onOrphanedInjection: (messageId) => this.requeueOrphanedInjection(messageId),
           // Crash-loop alarm (issue #24): a repeating child crash (bad auth/config) pings the ops
           // channel instead of surfacing only as per-message "something broke" replies.
           onCrashLoop: (info) => {
@@ -3489,6 +3644,45 @@ export class Concierge {
         });
       }
     }
+  }
+
+  /** Keep a folded-in message answerable until its turn proves it absorbed it. A bound, not a policy. */
+  private rememberInjectedMessage(m: IncomingMessage): void {
+    this.injectedMessages.set(m.messageId, m);
+    while (this.injectedMessages.size > MAX_TRACKED_INJECTIONS) {
+      const oldest = this.injectedMessages.keys().next();
+      if (oldest.done) break;
+      this.injectedMessages.delete(oldest.value);
+    }
+  }
+
+  /**
+   * Re-run a mid-flow message no turn ever answered (see {@link orphanedInjectionIds}).
+   *
+   * The injection landed after the live turn's `result`, so `claude` answered it as a turn of its
+   * own and onResult discarded that result — correct (assistant text must never post), and silent.
+   * The message goes back through {@link onMessage} VERBATIM, exactly like the owed-mention drain:
+   * same gates, same context, same reply path, so it gets a real answer rather than an apology. Its
+   * owed-ledger claim is already on the books, so a shutdown mid-requeue still replays it at boot.
+   */
+  private requeueOrphanedInjection(messageId: string): void {
+    const m = this.injectedMessages.get(messageId);
+    if (!m) return;
+    this.injectedMessages.delete(messageId);
+    if (this.stopping) return;
+    this.requeuedInjections.add(messageId);
+    // This process HAS seen the message — the dedupe set is what stands between the requeue and a
+    // no-op, exactly as on the replay path.
+    this.inboundMessageIds.delete(messageId);
+    void this.onMessage(m)
+      .catch((err) =>
+        this.log.warn("requeued mid-flow message failed its own turn", {
+          channelId: m.channelId,
+          messageId,
+          err: String(err),
+        }),
+      )
+      .finally(() => this.requeuedInjections.delete(messageId));
   }
 
   /**
@@ -5489,6 +5683,7 @@ export class Concierge {
       isOwner: this.ownerId() !== undefined && m.userId === this.ownerId(),
       repliedViaCli: false,
       ackMessageId: null,
+      text: turnContent,
     };
     this.activeMentions.set(m.channelId, mention);
 
@@ -5508,12 +5703,16 @@ export class Concierge {
     // the inject/queue path below, so the real answer in flight survives. An ambient turn is
     // exempt (cancelLiveTurn always yields it to a person); the predicate only guards the directed
     // same-author case where killing a genuine answer-in-progress was the incident.
+    // The restarted turn is told the earlier ask still stands (see AMENDED_TURN_NOTE) — the resumed
+    // transcript shows the first message but nothing in it says that message was never answered.
+    let amended = false;
     if (
       this.pool.cancelLiveTurn(m.channelId, "superseded by same-channel message", {
         byUserId: m.userId,
         amends: messagePlausiblyAmends(turnContent),
       })
     ) {
+      amended = true;
       this.log.info("cancelled stale in-flight turn superseded by same-channel message", {
         channelId: m.channelId,
         messageId: m.messageId,
@@ -5530,19 +5729,31 @@ export class Concierge {
       const injected = this.pool.injectLiveTurn(
         m.channelId,
         formatInjectedMessage(m.channelId, speaker, m.messageId, turnContent),
-        { byUserId: m.userId },
+        { byUserId: m.userId, messageId: m.messageId },
       );
       if (injected === "injected") {
         this.log.info("folded a mid-flow message into the live turn", {
           channelId: m.channelId,
           messageId: m.messageId,
         });
-        // Commit the watermark to THIS message now — the live turn's own eventual watermark
-        // commit (below, on the try path) was computed from state before this message existed
-        // and would otherwise regress the cursor backward. markSeen is monotonic per
-        // (channelId, sessionId) precisely to make that later, stale commit a no-op instead of a
-        // silent re-surfacing of a message the session already absorbed (channel-context.ts).
-        this.channelStore?.markSeen(m.channelId, this.pool.sessionIdFor(m.channelId), m.messageId);
+        // LEDGER FIRST, exactly like a turn of its own. This message has no promise and no reply of
+        // its own — it rides the live turn's single output — so from here until that turn posts, it
+        // is durably owed. Deleting the claim instead (the original wiring) meant an injection that
+        // died with the daemon, or was swallowed by an orphan turn, left nothing on the books at
+        // all: the one directed-message shape with no recovery path anywhere.
+        this.owed.claim(m);
+        // Hang it on the LIVE turn's claim, not this one: that turn's completion is what proves the
+        // model absorbed the line, and its handler settles the debt and commits the watermark. The
+        // watermark is deliberately NOT committed here — marking a message seen before any turn
+        // consumed it is how an unabsorbed injection became invisible to every later turn too.
+        // `!== mention` is the guard for the legacy fake-session fallback in currentMention, which
+        // resolves to the claim we just set — hanging the id on THIS message's own claim would
+        // leave nobody watching for it.
+        const liveMention = this.currentMention(m.channelId);
+        if (liveMention && liveMention !== mention) (liveMention.injectedMessageIds ??= []).push(m.messageId);
+        // Kept verbatim so an orphaned injection can be re-run through the ordinary directed path
+        // (see requeueOrphanedInjection) rather than through a cut-down imitation of it.
+        this.rememberInjectedMessage(m);
         // This message rides the live turn's own single output — no second promise, no second
         // reply started here. Clear the claim we just set so a stale entry doesn't linger, and
         // stop before typing/the ask path start for a message that isn't running its own turn.
@@ -5555,12 +5766,18 @@ export class Concierge {
     }
     // The queue-free converse of the interrupt above: this same speaker's earlier message may be
     // sitting QUEUED behind another turn (a burst fires faster than turns drain). Answering it
-    // after this one would be two stale replies in a row — drop it; its text still reaches the
-    // session via this turn's shared-window block. Other speakers' queued turns are untouched
-    // (their questions still deserve their own answers), and system/update turns never match.
+    // after this one would be two stale replies in a row — so it is dropped, and its TEXT is
+    // carried into this turn's prompt instead of being trusted to reappear on its own (the silent
+    // loss coalescedBurstNote exists to close). Other speakers' queued turns are untouched (their
+    // questions still deserve their own answers), and system/update turns never match.
+    const carriedTexts: string[] = [];
     this.pool.supersedeQueuedTurns(
       m.channelId,
       (meta) => isMentionClaim(meta) && meta.userId === m.userId && meta.channelId === m.channelId,
+      (meta) => {
+        const text = isMentionClaim(meta) ? meta.text?.trim() : "";
+        if (text) carriedTexts.push(text);
+      },
     );
 
     // Write the debt down BEFORE the turn can start (issue #3). From here until this message is
@@ -5585,9 +5802,16 @@ export class Concierge {
     // a person pausing mid-thought to hear you needs no "hold on" signage.
 
     try {
-      const turn = await this.buildTurn(m, turnContent, workspace, (watermark) => {
+      const built = await this.buildTurn(m, turnContent, workspace, (watermark) => {
         mention.contextWatermark = watermark;
       });
+      // Both notes say the same thing in different shapes — an earlier message of this person's is
+      // still unanswered and this turn owes it a reply too. Empty on an ordinary turn, so the
+      // composed prompt stays byte-identical when neither path fired.
+      const note = [coalescedBurstNote([...carriedTexts, turnContent]), amended ? AMENDED_TURN_NOTE : ""]
+        .filter(Boolean)
+        .join("\n\n");
+      const turn = note ? prependTurnNote(built, note) : built;
       // The mention rides as the turn's meta so CLI replies correlate to THIS turn (issue #24);
       // person turns take PRIORITY over queued ticket-update turns (issue #25).
       const output = await this.pool.ask(m.channelId, turn, mention, { priority: true });
@@ -5597,6 +5821,19 @@ export class Concierge {
         const mark = mention.contextWatermark;
         this.channelStore?.markSeen(mark.channelId, mark.sessionId, mark.lastMessageId);
       }
+      // Mid-flow messages this turn swallowed are marked seen ONLY now, and only because this turn
+      // reached a real result: absorption is what the reply proves, and claiming it at injection
+      // time hid an unabsorbed message from every later turn as well. Committed after the turn's own
+      // (older) watermark — markSeen is monotonic, so the ordering is safe either way.
+      const absorbedInjections = mention.turnSucceeded === false ? [] : (mention.injectedMessageIds ?? []);
+      for (const injectedId of absorbedInjections) {
+        this.channelStore?.markSeen(
+          m.channelId,
+          mention.contextWatermark?.sessionId ?? this.pool.sessionIdFor(m.channelId),
+          injectedId,
+        );
+        this.injectedMessages.delete(injectedId);
+      }
       keepTyping = false;
       clearInterval(typing);
       // Only the schema-validated `message` crosses this boundary. Assistant text is intentionally
@@ -5605,8 +5842,10 @@ export class Concierge {
         const text = output.message;
         // Stamp the ledger BEFORE the post, never after: if this process dies in the window
         // between "posted" and "settled", the entry has to say "I may already have answered" so
-        // boot replay verifies instead of answering twice (owed-mentions.ts).
+        // boot replay verifies instead of answering twice (owed-mentions.ts). The folded-in
+        // messages are covered by this same post, so they carry the same stamp.
         this.owed.markDelivering(m.messageId);
+        for (const injectedId of absorbedInjections) this.owed.markDelivering(injectedId);
         // The Concierge's conversational reply is a native reply, which notifies only its author.
         const ackId = await this.gateway.post(m.channelId, text, {
           replyToMessageId: m.messageId,
@@ -5630,8 +5869,10 @@ export class Concierge {
         if (ackId) this.recordBeckettPost(m.channelId, notice, ackId);
       }
       // The turn reached a real outcome — an answer, a deliberate pass, or a supersede that said
-      // so. Whichever it was, this message is no longer owed.
+      // so. Whichever it was, this message is no longer owed — nor are the mid-flow messages this
+      // same turn absorbed and answered in the same breath.
       this.owed.settle(m.messageId);
+      for (const injectedId of absorbedInjections) this.owed.settle(injectedId);
     } catch (err) {
       keepTyping = false;
       clearInterval(typing);
@@ -5656,6 +5897,9 @@ export class Concierge {
           })
           .catch(() => undefined);
         this.owed.settle(m.messageId);
+        // Anything folded into this dead turn was never absorbed either, and the one line above
+        // answers only the message it replied to — re-run each mid-flow message as its own turn.
+        for (const injectedId of mention.injectedMessageIds ?? []) this.requeueOrphanedInjection(injectedId);
       }
     } finally {
       if (this.activeMentions.get(m.channelId) === mention) this.activeMentions.delete(m.channelId);
@@ -6053,8 +6297,9 @@ export class Concierge {
     // A replayed mention (issue #3) was already captured by the run that RECEIVED it — capture
     // happens before the turn, so it is the one part of that run that provably completed. The
     // store appends blind (no dedupe by message id), so re-capturing here would leave the shared
-    // record holding the same line twice, forever.
-    if (this.replayingMentions.has(m.messageId)) return;
+    // record holding the same line twice, forever. A requeued mid-flow injection is the same case
+    // inside one process: its first pass captured it before folding it into the live turn.
+    if (this.replayingMentions.has(m.messageId) || this.requeuedInjections.has(m.messageId)) return;
     const files = m.attachments.map((a) => `[file: ${a.name}]`).join(" ");
     // A Discord forward stores its original in message snapshots, not `content` — fold it in
     // BEFORE the empty-content guard below, or a forward-only message (the common case: forward
