@@ -17,16 +17,39 @@ export type SpendOutcome = "done" | "rework" | "failed" | "cancelled" | "launch_
  * True when a row represents the harness actually ATTEMPTING the work — the denominator any
  * per-cast quality rate should use. A `launch_failed` row is a launcher/provider event, not an
  * attempt by the model.
+ *
+ * A `free-time` row is excluded for a different reason: nobody asked for it, nothing was owed, and
+ * nothing was reviewed (docs/freetime.md), so there is no work for it to have succeeded or failed
+ * at. Counting it would move a cast's quality rate on a session that had no bar to clear.
  */
-export function isAttempt(row: Pick<SpendRecord, "outcome">): boolean {
-  return row.outcome !== "launch_failed";
+export function isAttempt(row: Pick<SpendRecord, "outcome" | "stage">): boolean {
+  return row.outcome !== "launch_failed" && row.stage !== "free-time";
 }
 
+/**
+ * Which lane spent the money. `implement`/`review` are worker stages on a ticket; `free-time` is
+ * the weekly unprompted session (docs/freetime.md), which is on the ledger so "what did free time
+ * cost" is answerable from `beckett spend` — but is never ticket work.
+ */
+export type SpendStage = "implement" | "review" | "free-time";
+
+const SPEND_STAGES: readonly string[] = ["implement", "review", "free-time"];
+
+/**
+ * The synthetic `ticketId` every `free-time` row carries. Free time has no ticket, and the
+ * per-task rollups group by this field, so it needs a STABLE stand-in: one "free-time" line on the
+ * weekly bill totalling every session beats one line per session id masquerading as a task nobody
+ * can look up. The session's own id rides along in `sessionId`, which is where a row is traced
+ * back to its journal entry.
+ */
+export const FREE_TIME_SPEND_TICKET_ID = "free-time";
+
 export interface SpendRecord {
+  /** The ticket the spend belongs to — or {@link FREE_TIME_SPEND_TICKET_ID} when there is none. */
   ticketId: string;
   /** Extra context used by `beckett spend` grouping. */
   project: string | null;
-  stage: "implement" | "review";
+  stage: SpendStage;
   harness: string;
   model: string;
   effort: string;
@@ -45,7 +68,11 @@ export interface SpendRecord {
    * after the fact without correlating timestamps against harness transcripts.
    */
   errorClass?: string;
-  /** The harness session id, so a ledger row can be traced back to its transcript (#159). */
+  /**
+   * The harness session id, so a ledger row can be traced back to its transcript (#159). On a
+   * `free-time` row it is the free-time session id, which names that session's journal entry and
+   * scratch directory — the same job, done by the record that exists for that lane.
+   */
   sessionId?: string;
 }
 
@@ -86,7 +113,7 @@ export function readSpendLedger(path: string): SpendRecord[] {
 function isSpendRecord(v: unknown): v is SpendRecord {
   if (!v || typeof v !== "object") return false;
   const x = v as Record<string, unknown>;
-  return typeof x.ticketId === "string" && (x.stage === "implement" || x.stage === "review") &&
+  return typeof x.ticketId === "string" && typeof x.stage === "string" && SPEND_STAGES.includes(x.stage) &&
     typeof x.ts === "string" && typeof x.turns === "number" && typeof x.toolCalls === "number" &&
     typeof x.tokensIn === "number" && typeof x.tokensOut === "number" &&
     (typeof x.costUsd === "number" || x.costUsd === null);

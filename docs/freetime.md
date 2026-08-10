@@ -100,7 +100,22 @@ carried over as the Job's scope. It is exactly the "path back" initiative.md lea
 `src/dream/`-style generative work — a separate decision with a separate budget, not a new trigger
 kind. Nothing in this v0 shape should be built in a way that assumes its own scheduler survives.
 
-**Spend visibility, honestly:** free time's tokens are counted against its own ceiling and reported
-in its journal entry, and they do **not** appear in `spend.jsonl`. That ledger's `SpendRecord.stage`
-is worker-stage-shaped and widening it is out of scope here. Until it is widened, "what did free
-time cost" is answered by reading the entries, not by `beckett spend`.
+**Spend visibility, honestly:** free time's tokens are counted against its own ceiling, reported in
+its journal entry, **and** written to `spend.jsonl`. `SpendRecord.stage` now carries a third value,
+`free-time`, beside the two worker stages, so `beckett spend` answers "what did free time cost"
+without anyone reading entries to add it up.
+
+What a free-time row does and does not claim:
+
+| Field | Value | Why |
+|---|---|---|
+| `stage` | `free-time` | Its own lane. `isAttempt()` excludes it: nothing was owed and nothing was reviewed, so it is not a run any cast should be scored on |
+| `ticketId` | `free-time` | There is no ticket. A stable sentinel keeps the per-task rollup and the weekly bill on one honest line per lane rather than one fake task per session |
+| `sessionId` | the session id | The trace back to that session's journal entry and scratch dir |
+| `tokensOut` | real | Read from the harness result frame — the same number charged against the ceiling |
+| `tokensIn`, `turns`, `toolCalls` | `0` | The free-time harness call does not carry them. A visible zero beats an invented number |
+| `costUsd` | `null` | Repricing belongs to the telemetry harvest and its rate table; a second pricing path here would eventually disagree with it. Rows show up under `unknownCostRecords` until the harvest prices them |
+| `outcome` | `done` / `cancelled` / `failed` | Finished normally / killed by the wall-clock cap / launched and died. Never `launch_failed`, which asserts zero tokens and zero tool calls that this runner cannot observe |
+
+A session that never launched — `--dry`, or a ceiling of zero — writes no row at all. Nothing
+spawned and nothing was billed, so there is nothing to make visible.
