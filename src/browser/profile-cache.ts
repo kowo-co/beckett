@@ -154,3 +154,49 @@ export async function pruneChromeProfileCaches(
   const after = await measureDirectoryBytes(profileRoot);
   return { reclaimedBytes: Math.max(0, before - after) };
 }
+
+export interface MeasurementCache {
+  /** Cached-or-fresh value for `key`; concurrent callers share one in-flight `produce`. */
+  measure(key: string, produce: () => Promise<number>): Promise<number>;
+  /** Prime `key` with a just-measured value (fresh as of now()). */
+  seed(key: string, value: number): void;
+  /** Drop every cached value; the next measure() per key re-produces. */
+  invalidate(): void;
+}
+
+/**
+ * TTL-gated memoizer for expensive directory scans. `ttlMs <= 0` disables caching entirely
+ * (every measure() produces), which is also the test escape hatch. Failed produces are never
+ * cached, so an error cannot mask a later over-budget state. Staleness contract: a caller may
+ * observe a value up to `ttlMs` old — enforcement built on it is delayed by at most the TTL,
+ * never skipped, because the first call after expiry always re-produces.
+ */
+export function createMeasurementCache(options: { ttlMs: number; now?: () => number }): MeasurementCache {
+  const now = options.now ?? Date.now;
+  const ttlMs = options.ttlMs;
+  const entries = new Map<string, { value: number; at: number }>();
+  const inFlight = new Map<string, Promise<number>>();
+  return {
+    async measure(key, produce) {
+      if (ttlMs <= 0) return produce();
+      const cached = entries.get(key);
+      if (cached && now() - cached.at < ttlMs) return cached.value;
+      const pending = inFlight.get(key);
+      if (pending) return pending;
+      const work = (async () => {
+        const value = await produce();
+        entries.set(key, { value, at: now() });
+        return value;
+      })().finally(() => inFlight.delete(key));
+      inFlight.set(key, work);
+      return work;
+    },
+    seed(key, value) {
+      if (ttlMs <= 0) return;
+      entries.set(key, { value, at: now() });
+    },
+    invalidate() {
+      entries.clear();
+    },
+  };
+}

@@ -435,6 +435,7 @@ test("one lease tripping the profile budget does not blind or kill another", asy
     maxProfileGrowthBytes: 100,
     maxProfileBytes: 10_000,
     maxLeases: 5,
+    profileScanTtlMs: 0,
   });
   try {
     await runtime.acquire(leaseFor("alpha")); // baseline 10
@@ -467,6 +468,7 @@ test("disposable cache growth does not trip the per-lease budget, but real profi
     // Real measureDirectoryBytes (not injected) so cache exclusion actually runs.
     maxProfileGrowthBytes: 512 * 1024,
     maxProfileBytes: 64 * 1024 * 1024,
+    profileScanTtlMs: 0,
   });
   try {
     await runtime.acquire(leaseFor("cache-churn"));
@@ -505,6 +507,7 @@ test("a multi-GB CacheStorage write survives the lease budget and the next acqui
     maxProfileBytes: 256 * 1024,
     maxProfileGrowthBytes: 64 * 1024,
     maxProfileDiskBytes: 32 * 1024 * 1024,
+    profileScanTtlMs: 0,
   });
   try {
     await runtime.acquire(leaseFor("model-cache"));
@@ -544,6 +547,7 @@ test("site storage past the advertised quota still blocks the lease that wrote i
   const runtime = createBetterWrightRuntime(settings, quietLog, {
     createBrowser: () => fake,
     maxProfileDiskBytes: 4 * 1024 * 1024,
+    profileScanTtlMs: 0,
   });
   try {
     await runtime.acquire(leaseFor("greedy"));
@@ -588,6 +592,7 @@ test("the enforced footprint ceiling is the quota the lane advertised, not the c
     createBrowser: () => fake,
     measureProfileBytes: async () => profileSize,
     env: { BECKETT_BROWSER_STORAGE_QUOTA_MIB: "2" },
+    profileScanTtlMs: 0,
   });
   try {
     await runtime.acquire(leaseFor("advertised"));
@@ -643,6 +648,7 @@ test("the global profile ceiling binds every lease regardless of its own baselin
     maxProfileGrowthBytes: 10_000,
     maxProfileBytes: 500,
     maxLeases: 5,
+    profileScanTtlMs: 0,
   });
   try {
     await runtime.acquire(leaseFor("alpha"));
@@ -730,5 +736,40 @@ test("a deflated 1.7.1 envelope stays deflated and new fields pass through", asy
     expect(result.challenges).toEqual([{ type: "bot_challenge" }]);
     expect(result.skills).toEqual([{ name: "s", description: "d", path: "/p" }]);
     expect(result.pendingCredential?.pendingId).toBe("p2");
+  } finally { await runtime.stop(); }
+});
+
+test("steady-state evaluates do zero directory walks", async () => {
+  let scans = 0;
+  const fake = new FakeBetterWright();
+  const runtime = createBetterWrightRuntime(settingsFor(), quietLog, {
+    createBrowser: () => fake,
+    measureProfileBytes: async () => { scans++; return 10; },
+  });
+  try {
+    await runtime.acquire(leaseFor("steady"));
+    const afterAcquire = scans;
+    for (let i = 0; i < 5; i++) await runtime.evaluate("steady", "return 1");
+    expect(scans).toBe(afterAcquire); // acquire seeded the cache; the hot path never walked
+  } finally { await runtime.stop(); }
+});
+
+test("a stale cache delays budget enforcement by at most the window, never skips it", async () => {
+  let clock = 0;
+  let profileSize = 10;
+  const fake = new FakeBetterWright();
+  const runtime = createBetterWrightRuntime(settingsFor(), quietLog, {
+    createBrowser: () => fake,
+    measureProfileBytes: async () => profileSize,
+    maxProfileGrowthBytes: 100,
+    maxProfileBytes: 10_000,
+    now: () => clock,
+  });
+  try {
+    await runtime.acquire(leaseFor("stale"));
+    profileSize = 5_000; // over the growth allowance, but the seeded cache still says 10
+    await runtime.evaluate("stale", "return 1"); // inside the window: allowed (bounded delay)
+    clock = 10_001; // one tick past PROFILE_SCAN_TTL_MS
+    await expect(runtime.evaluate("stale", "return 2")).rejects.toThrow("profile storage budget exceeded");
   } finally { await runtime.stop(); }
 });

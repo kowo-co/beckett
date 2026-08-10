@@ -32,7 +32,7 @@ import { basename, extname, join, resolve } from "node:path";
 import { BetterWright, NetworkPolicy, piImageArtifacts } from "betterwright";
 import { openTrustedBrowserAttachment } from "./attachments.ts";
 import type { Logger } from "../types.ts";
-import { measureDirectoryBytes, pruneChromeProfileCaches } from "./profile-cache.ts";
+import { createMeasurementCache, measureDirectoryBytes, pruneChromeProfileCaches } from "./profile-cache.ts";
 import { LANE_STORAGE_BYTES } from "./storage-quota.ts";
 import type {
   BrowserCheckpoint,
@@ -87,6 +87,18 @@ function advertisedProfileDiskBytes(env: Record<string, string | undefined>): nu
 const MAX_PROFILE_GROWTH_BYTES = 100 * 1024 * 1024;
 /** Prune disposable caches before they can make a dormant profile unavailable. */
 const PROFILE_PRUNE_HIGH_WATER_MARK = 0.7;
+/**
+ * How long one profile-size scan stays authoritative. Steady-state evaluate/capture/checkpoint/
+ * restore/release calls inside this window do ZERO directory walks; budget enforcement is
+ * therefore delayed by at most this window and never skipped (the first budget check after
+ * expiry re-scans). Sticky per-lease breaches (profileBudgetError) are unaffected.
+ *
+ * A lazy TTL cache rather than the interval-driven watcher in runtime.ts: this adapter lives
+ * inside the sandboxed host process, where an interval timer would keep the event loop busy
+ * between runs and need lifecycle plumbing through stop(). A TTL cache does no work at all
+ * while idle and re-measures on the first call after expiry.
+ */
+const PROFILE_SCAN_TTL_MS = 10_000;
 
 /** The slice of the betterwright client this adapter drives; injectable for tests. */
 export interface BetterWrightClient {
@@ -152,6 +164,10 @@ export interface CreateBetterWrightRuntimeDeps {
   /** Whole-footprint ceiling override, caches included; defaults to the lane budget. */
   maxProfileDiskBytes?: number;
   maxProfileGrowthBytes?: number;
+  /** Profile-scan cache window override; 0 disables caching (tests). */
+  profileScanTtlMs?: number;
+  /** Clock override for the scan cache (tests). */
+  now?: () => number;
   /** Environment source for the cap / kill-switch; defaults to process.env. */
   env?: Record<string, string | undefined>;
 }
@@ -214,6 +230,10 @@ export function createBetterWrightRuntime(
       (options?.excludeSiteStorage ? maxProfileBytes : maxProfileDiskBytes) + 1,
       options,
     ));
+  const scanCache = createMeasurementCache({ ttlMs: deps.profileScanTtlMs ?? PROFILE_SCAN_TTL_MS, now: deps.now });
+  /** TTL-cached scan used on the per-call hot path; acquire() measures fresh and seeds it. */
+  const cachedProfileBytes = (options?: { excludeSiteStorage?: boolean }) =>
+    scanCache.measure(options?.excludeSiteStorage ? "profile-state" : "disk", () => measureProfileBytes(options));
 
   const createBrowser = deps.createBrowser ?? ((options) => new BetterWright(options) as unknown as BetterWrightClient);
   const browser = createBrowser({
@@ -283,7 +303,7 @@ export function createBetterWrightRuntime(
     // already bounded by the quota the lane advertised. Measuring the rest here — against
     // a like-for-like acquire baseline — keeps the growth allowance and this ceiling
     // tracking what Chromium itself accumulates.
-    const profileBytes = await measureProfileBytes({ excludeSiteStorage: true });
+    const profileBytes = await cachedProfileBytes({ excludeSiteStorage: true });
     // Growth allowance is per-lease (its own acquire baseline); the ceiling is
     // global and shared. Whichever binds first wins.
     const storageLimit = Math.min(maxProfileBytes, lease.profileBytesAtAcquire + maxProfileGrowthBytes);
@@ -298,7 +318,7 @@ export function createBetterWrightRuntime(
     // Site storage is discounted above, so it needs its own bound: the advertised quota.
     // A page may use every byte it was promised and not one more, and it learns that here
     // rather than by filling the host disk.
-    const diskBytes = await measureProfileBytes();
+    const diskBytes = await cachedProfileBytes();
     if (diskBytes > maxProfileDiskBytes) {
       lease.profileBudgetError = new Error(
         `browser profile storage budget exceeded for run ${lease.runId} (profile=${diskBytes} bytes, past the ${maxProfileDiskBytes}-byte storage quota this lane grants)`,
@@ -542,16 +562,22 @@ const attachFile = async (target, screenshotPath) => {
             profileBytes = await measureProfileBytes();
           }
         }
+        // Pruning moved bytes under any cached value; the hot path must not keep serving it.
+        if (cachePruneReclaimed !== null) scanCache.invalidate();
         if (profileBytes > maxProfileDiskBytes) {
           const pruneDetail = cachePruneReclaimed === null
             ? "cache prune was skipped while another browser lease was active"
             : `cache prune reclaimed ${cachePruneReclaimed} bytes, still over`;
           throw new Error(`browser profile storage budget exceeded for run ${lease.runId} (${pruneDetail}; profile=${profileBytes}, lease growth=0 bytes)`);
         }
+        // Both acquire scans are fresh — its prune decisions need current numbers — so seed
+        // the hot-path cache with them and a fresh lease's first evaluates walk nothing.
+        scanCache.seed("disk", profileBytes);
         // The growth baseline discounts disposable caches so enforceProfileBudget compares
         // like against like; the ceiling/prune checks above deliberately stay cache-inclusive
         // because they guard real on-disk usage.
         active.profileBytesAtAcquire = await measureProfileBytes({ excludeSiteStorage: true });
+        scanCache.seed("profile-state", active.profileBytesAtAcquire);
         // Start the BetterWright worker now so unavailable browser setup fails
         // before the agent begins its turn.
         await runOnLease(active, () => execute(active, "return page.url()"));

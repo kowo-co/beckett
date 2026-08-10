@@ -1,8 +1,14 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isDisposableCacheDir, isSiteStorageDir, measureDirectoryBytes, pruneChromeProfileCaches } from "./profile-cache.ts";
+import {
+  createMeasurementCache,
+  isDisposableCacheDir,
+  isSiteStorageDir,
+  measureDirectoryBytes,
+  pruneChromeProfileCaches,
+} from "./profile-cache.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -123,4 +129,81 @@ test("prunes only disposable caches in every nested Default profile", async () =
       if (file !== "Local Storage" && file !== "IndexedDB" && file !== "Sessions") expect(readFileSync(target, "utf8")).toBe("keep");
     }
   }
+});
+
+describe("createMeasurementCache", () => {
+  test("returns the cached value inside the ttl without re-producing", async () => {
+    let clock = 0;
+    let produced = 0;
+    const cache = createMeasurementCache({ ttlMs: 10_000, now: () => clock });
+    const produce = async () => { produced++; return 7; };
+    expect(await cache.measure("k", produce)).toBe(7);
+    clock = 9_999;
+    expect(await cache.measure("k", produce)).toBe(7);
+    expect(produced).toBe(1);
+  });
+
+  test("re-produces after the ttl expires", async () => {
+    let clock = 0;
+    let produced = 0;
+    const cache = createMeasurementCache({ ttlMs: 10_000, now: () => clock });
+    const produce = async () => { produced++; return produced; };
+    await cache.measure("k", produce);
+    clock = 10_000;
+    expect(await cache.measure("k", produce)).toBe(2);
+    expect(produced).toBe(2);
+  });
+
+  test("ttlMs 0 disables caching", async () => {
+    let produced = 0;
+    const cache = createMeasurementCache({ ttlMs: 0, now: () => 0 });
+    const produce = async () => { produced++; return 1; };
+    await cache.measure("k", produce);
+    await cache.measure("k", produce);
+    await cache.measure("k", produce);
+    expect(produced).toBe(3);
+    // seed() is a no-op with caching off, so the next measure still produces.
+    cache.seed("k", 42);
+    expect(await cache.measure("k", produce)).toBe(1);
+    expect(produced).toBe(4);
+  });
+
+  test("concurrent measures share one in-flight produce", async () => {
+    let produced = 0;
+    let release!: (value: number) => void;
+    const gate = new Promise<number>((resolve) => { release = resolve; });
+    const cache = createMeasurementCache({ ttlMs: 10_000, now: () => 0 });
+    const produce = async () => { produced++; return gate; };
+    const first = cache.measure("k", produce);
+    const second = cache.measure("k", produce);
+    release(5);
+    expect(await first).toBe(5);
+    expect(await second).toBe(5);
+    expect(produced).toBe(1);
+  });
+
+  test("a failed produce is not cached", async () => {
+    let produced = 0;
+    const cache = createMeasurementCache({ ttlMs: 10_000, now: () => 0 });
+    const produce = async () => {
+      produced++;
+      if (produced === 1) throw new Error("scan failed");
+      return 3;
+    };
+    await expect(cache.measure("k", produce)).rejects.toThrow("scan failed");
+    expect(await cache.measure("k", produce)).toBe(3);
+    expect(produced).toBe(2);
+  });
+
+  test("seed primes and invalidate clears", async () => {
+    let produced = 0;
+    const cache = createMeasurementCache({ ttlMs: 10_000, now: () => 0 });
+    const produce = async () => { produced++; return 1; };
+    cache.seed("k", 42);
+    expect(await cache.measure("k", produce)).toBe(42);
+    expect(produced).toBe(0);
+    cache.invalidate();
+    expect(await cache.measure("k", produce)).toBe(1);
+    expect(produced).toBe(1);
+  });
 });
