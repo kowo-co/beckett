@@ -181,6 +181,13 @@ export function buildBrowserHostLaunch(options: BuildBrowserHostLaunchOptions): 
     options.backend === "betterwright" && options.cloakCacheDir
       ? { CLOAKBROWSER_CACHE_DIR: options.cloakCacheDir, CLOAKBROWSER_AUTO_UPDATE: "false" }
       : {};
+  // Since betterwright 1.7.0, headless sessions default to the Obscura resident engine,
+  // installed under ~/.betterwright/obscura/ by `betterwright setup`. This sandbox only
+  // binds the managed CloakBrowser cache in (see the --ro-bind below), so an Obscura
+  // launch would find no binary and fail closed. Pin the pre-1.7 Chromium/Cloak
+  // compatibility backend instead (see docs/obscura.md: either override set to "off").
+  const obscuraEnv: Record<string, string> =
+    options.backend === "betterwright" ? { BETTERWRIGHT_OBSCURA_PATH: "off" } : {};
   // The shim reads the budget from the environment and appends CloakBrowser's
   // --fingerprint-storage-quota, the only switch that moves what
   // navigator.storage.estimate() reports. Inside bubblewrap the shim is bound beside
@@ -213,6 +220,7 @@ export function buildBrowserHostLaunch(options: BuildBrowserHostLaunchOptions): 
     BECKETT_BROWSER_HOST_SETTINGS: encodedSettings,
     BECKETT_BROWSER_BACKEND: options.backend ?? "playwright",
     ...cloakEnv,
+    ...obscuraEnv,
     ...storageEnv(false),
     ...leaseEnv,
     ...(encodedBudgets ? { BECKETT_BROWSER_HOST_BUDGETS: encodedBudgets } : {}),
@@ -272,6 +280,7 @@ export function buildBrowserHostLaunch(options: BuildBrowserHostLaunchOptions): 
     ];
     if (encodedBudgets) args.push("--setenv", "BECKETT_BROWSER_HOST_BUDGETS", encodedBudgets);
     for (const [name, value] of Object.entries(cloakEnv)) args.push("--setenv", name, value);
+    for (const [name, value] of Object.entries(obscuraEnv)) args.push("--setenv", name, value);
     for (const [name, value] of Object.entries(storageEnv(true))) args.push("--setenv", name, value);
     for (const [name, value] of Object.entries(leaseEnv)) args.push("--setenv", name, value);
     args.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp");
