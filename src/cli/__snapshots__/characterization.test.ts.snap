@@ -2064,6 +2064,7 @@ session_scope = "channel"
 max_concurrent_turns = 3
 max_live_sessions = 6
 idle_recycle_minutes = 30
+directed_settle_ms = 0
 
 [quick]
 enabled = true

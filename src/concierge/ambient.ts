@@ -88,7 +88,9 @@ export interface AmbientCoordinator {
   stop(): void;
 }
 
-const realClock: AmbientClock = {
+/** The production clock. Exported so other timer-shaped concierge state (the directed settle
+ *  window) runs on the SAME injected-clock seam tests already drive here. */
+export const realClock: AmbientClock = {
   now: () => Date.now(),
   setTimeout: (cb, ms) => setTimeout(cb, ms),
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
