@@ -6,14 +6,16 @@
  */
 
 import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { validateConfig } from "../../src/config.ts";
 import { browserHostSettings, createBrowserRuntime } from "../../src/browser/runtime.ts";
-import { LANE_STORAGE_BYTES, MIN_LANE_STORAGE_BYTES, resolveLaneStorageBytes } from "../../src/browser/storage-quota.ts";
+import { obscuraLaunch } from "../../src/browser/isolated.ts";
+import { laneStorageQuotaViolation, resolveLaneStorageBytes } from "../../src/browser/storage-quota.ts";
 import { serveBus } from "../../src/shell/control-bus.ts";
 import type { BrowserEvalResult } from "../../src/browser/runtime.ts";
+import type { BrowserLaneBackend } from "../../src/browser/storage-quota.ts";
 import type { Logger } from "../../src/types.ts";
 
 // Diagnostics go to stderr, not /dev/null: the isolated browser host surfaces its stderr only
@@ -131,6 +133,46 @@ function startMcp(run: string): McpClient {
   };
 }
 
+/**
+ * BetterWright 1.7.1's own words for "Obscura served this call", emitted in the result
+ * envelope's `warnings` at the exact point the worker sets `browserBackend = "obscura"`
+ * (betterwright src/worker.ts: the Obscura launch arm ends with this note whenever
+ * `chromiumArgs` were supplied, because the resident engine ignores them). The
+ * compatibility arm only ever warns about individual *rejected* switches, so this exact
+ * string is unambiguous — and it comes from the session that actually ran, rather than
+ * from the quota number this smoke is trying to judge.
+ */
+const OBSCURA_ENVELOPE_WARNING =
+  "chromiumArgs apply only to the on-demand pixel renderer; Obscura ignored them for resident execution.";
+
+/**
+ * The backend Beckett *intended*: betterwright picks Obscura only for headless sessions,
+ * and inside the sandbox it can only find the engine when isolated.ts mounts it and sets
+ * BETTERWRIGHT_OBSCURA_ROOT (obscuraLaunch, mirrored here on the same inputs). Detection
+ * cross-checks the envelope against this so a silent fallback — engine mounted but not
+ * used — fails the gate instead of quietly relaxing the assertion to Obscura's.
+ */
+function gatedBackend(headless: boolean): BrowserLaneBackend {
+  const root = process.env.BETTERWRIGHT_OBSCURA_ROOT?.trim() || join(homedir(), ".betterwright", "obscura");
+  return headless && obscuraLaunch({ obscuraRoot: root }).mountRoot !== null ? "obscura" : "compatibility";
+}
+
+/** Which engine served this envelope, or a thrown error when the two signals disagree. */
+function detectBackend(result: BrowserEvalResult, headless: boolean, chromiumArgs: readonly string[] | undefined): BrowserLaneBackend {
+  // The signal is "Obscura discarded your switches", so it only exists when there were
+  // switches to discard. The lane always sets some (config default --disable-gpu), and a
+  // lane that stopped would make the absence of the warning meaningless, not reassuring.
+  if (!chromiumArgs || chromiumArgs.length === 0) {
+    throw new Error("browser smoke cannot identify the backend: the lane passed no chromiumArgs for BetterWright to report on");
+  }
+  const observed: BrowserLaneBackend = (result.warnings ?? []).includes(OBSCURA_ENVELOPE_WARNING) ? "obscura" : "compatibility";
+  const intended = gatedBackend(headless);
+  if (observed !== intended) {
+    throw new Error(`browser backend mismatch: Beckett gated ${intended} but BetterWright served ${observed}`);
+  }
+  return observed;
+}
+
 function mcpResult(response: Record<string, any>): BrowserEvalResult {
   if (response.error) throw new Error(`MCP error: ${response.error.message}`);
   const result = response.result as { isError?: boolean; content?: Array<{ type?: string; text?: string; data?: string }> };
@@ -174,9 +216,11 @@ try {
   }));
   if (result.value !== "saved:browser-ready") throw new Error(`unexpected BetterWright result: ${String(result.value)}`);
 
-  // The storage quota a page actually reads. CloakBrowser fabricates this figure from the
-  // profile's fingerprint seed unless the lane overrides it, and only a real browser on a
-  // real origin can tell which number won — unit tests reach the switch, not the page.
+  // The storage quota a page actually reads. What counts as correct depends on which
+  // engine served the session: CloakBrowser fabricates this figure from the profile's
+  // fingerprint seed unless the lane's `--fingerprint-storage-quota` override wins, while
+  // Obscura takes no such switch and reports its own fixed constant. Only a real browser
+  // on a real origin can tell which number won — unit tests reach the switch, not the page.
   const estimate = mcpResult(await mcp.call("tools/call", {
     name: "betterwright_browser",
     arguments: {
@@ -187,21 +231,21 @@ try {
       `,
     },
   }));
+  const settings = browserHostSettings(config);
   const quota = Number(estimate.value);
-  const expected = resolveLaneStorageBytes({ profileDir: browserHostSettings(config).profileDir });
+  const expected = resolveLaneStorageBytes({ profileDir: settings.profileDir });
   if (!Number.isFinite(quota) || quota <= 0) throw new Error(`browser reported no storage quota: ${String(estimate.value)}`);
-  // Whole mebibytes is the signature of the lane's own switch: CloakBrowser's fabricated
-  // figure is a seed-derived byte count (593.46 MiB on the profile that motivated this).
-  if (quota % (1024 * 1024) !== 0) throw new Error(`storage quota ${quota} is not the lane's whole-MiB budget`);
-  if (quota < MIN_LANE_STORAGE_BYTES || quota > LANE_STORAGE_BYTES) {
-    throw new Error(`storage quota ${quota} is outside the lane's policy band`);
-  }
-  // The smoke's profile sits on a filesystem whose free space moves while it runs, so the
-  // budget is compared with a tolerance rather than for equality — the point is that the
-  // page sees THIS lane's measured budget, not a number invented from a fingerprint.
-  if (Math.abs(quota - expected) > 1024 * 1024 * 1024) {
-    throw new Error(`storage quota ${quota} does not track the lane budget ${expected}`);
-  }
+  const backend = detectBackend(estimate, settings.headless, settings.chromiumArgs);
+  // One line so a future deploy log explains itself: the two backends assert different
+  // numbers, and "which engine ran" is the first thing anyone reading a failure needs.
+  process.stdout.write(`browser smoke exercised the ${backend} backend; page storage quota ${quota} bytes (lane budget ${expected})\n`);
+  // Both arms are gated here; only one runs per session because betterwright picks the
+  // backend per launch and the two are documented as unsafe to share a profile
+  // (betterwright docs/getting-started.md), so a second in-script pass would trade a real
+  // check for a profile reset. laneStorageQuotaViolation is pure and unit-tested against
+  // both backends' fixtures instead.
+  const violation = laneStorageQuotaViolation({ backend, quota, expectedBytes: expected });
+  if (violation) throw new Error(violation);
 
   const captured = await mcp.call("tools/call", {
     name: "betterwright_browser",
@@ -227,7 +271,18 @@ try {
     `,
     token,
   );
-  if (persisted.value !== "browser_smoke=browser-ready|browser-ready") {
+  // What survives a session restart is also backend-specific, and for the same reason as
+  // the quota: BetterWright's Obscura profile persistence covers cookies and only cookies
+  // (CHANGELOG 1.7.0, "Persistent Obscura profiles now restore and durably save bounded
+  // cookies"; worker.ts has read/writeObscuraCookies and no localStorage counterpart),
+  // while the compatibility backend hands Chromium a real persistent profile that keeps
+  // both. So the cookie half is asserted on both backends and the localStorage half is
+  // pinned to what each one actually guarantees — including Obscura's `null`, so the day
+  // it gains durable DOM storage this fires instead of silently widening.
+  const expectedPersisted = backend === "obscura"
+    ? "browser_smoke=browser-ready|null"
+    : "browser_smoke=browser-ready|browser-ready";
+  if (persisted.value !== expectedPersisted) {
     throw new Error(`persistent BetterWright state failed: ${String(persisted.value)}`);
   }
   await runtime.release("betterwright-smoke-restart", false);
