@@ -153,3 +153,6 @@ output_token_budget = 150000
 model = ""
 spike_output_token_budget = 60000
 spike_repo = ""
+
+[progress]
+cards_as_code = false

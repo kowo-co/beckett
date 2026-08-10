@@ -24,6 +24,8 @@ export interface DispatchEvent {
   ticketRef: string;
   /** Git branch ref, when known. Never omitted so trace consumers have a stable shape. */
   branchRef: string;
+  /** Discord channel that filed the ticket, when known (Ticket.originChannel) — card routing only. */
+  channel?: string;
   stage: string;
   outcome: DispatchOutcome;
   /** Time since the first observed event for this ticket, in milliseconds. */
@@ -36,6 +38,7 @@ export interface DispatchEventInput {
   ticketId: string;
   ticketRef: string;
   branchRef?: string;
+  channel?: string;
   stage: string;
   outcome: DispatchOutcome;
   message?: string;
@@ -73,6 +76,7 @@ export class DispatchEventBus {
       ticketId: input.ticketId,
       ticketRef: input.ticketRef,
       branchRef: input.branchRef ?? "",
+      ...(input.channel ? { channel: input.channel } : {}),
       stage: input.stage,
       outcome: input.outcome,
       elapsedMs: Math.max(0, now - started),

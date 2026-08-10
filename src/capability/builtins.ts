@@ -594,6 +594,16 @@ export const configFragments = {
     })
     .strict()
     .default({}),
+  // Zero-token progress cards (docs/token-efficiency.md fix #1, v0 increment): the daemon posts
+  // and edits ONE Discord status message per active ticket in the ticket's origin channel,
+  // driven directly by dispatch events — no model turn involved. OFF by default: flag off is
+  // byte-identical current behavior (no card writer constructed, no channel stamped on events).
+  progress: z
+    .object({
+      cards_as_code: z.boolean().default(false),
+    })
+    .strict()
+    .default({}),
 } satisfies { [K in keyof Config]: z.ZodType<Config[K], z.ZodTypeDef, unknown> };
 
 // =======================================================================================
@@ -624,6 +634,7 @@ const BUILTIN_CAPABILITY_INFO: {
   announce: { id: "announce", summary: "Restart changelog announcements." },
   federation: { id: "federation", summary: "Peer-Beckett federation over Discord." },
   dream: { id: "dream", summary: "Nightly dream pass: token ceiling + model for the self-lane day replay." },
+  progress: { id: "progress", summary: "Zero-token per-ticket progress cards: code-edited Discord status messages." },
 };
 
 /**
