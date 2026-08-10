@@ -342,6 +342,11 @@ export const configFragments = {
       // work instead of the whole session. Best-effort and side-effect-free beyond the worktree
       // (never touches the tracker / the advance- or publish-outbox). 0 disables periodic checkpointing.
       worker_checkpoint_s: nonNegInt.default(120),
+      // Runtime-awareness threshold (seconds) for the per-worker PostToolUse hook
+      // (src/hooks/runtime-awareness.ts): a tool call that runs at least this long gets a
+      // one-line additionalContext notice injected so the model can route around slow
+      // operations (faster alternative / background it). 0 disables the hook entirely.
+      worker_slow_tool_s: nonNegInt.default(30),
       // Staffing watchdog grace (issue #9): a ticket that is in a staffable/running state
       // (in_progress / in_review / design) but has NO live worker, mid-spawn reservation, queued
       // spawn, or scheduled retry for this many seconds is silently wedged — the reconciliation

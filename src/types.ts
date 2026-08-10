@@ -806,6 +806,10 @@ export interface Config {
      *  crash loses at most one window of on-disk WIP, not the whole session. 0 disables. Default
      *  120 (OPS-125). */
     worker_checkpoint_s: number;
+    /** Runtime-awareness threshold (s): a worker tool call running at least this long gets a
+     *  PostToolUse additionalContext notice so the model can route around slow operations.
+     *  0 disables the hook. Default 30. */
+    worker_slow_tool_s: number;
     /** Staffing-watchdog grace (s): a ticket in a staffable state with no live worker, mid-spawn
      *  reservation, queued spawn, or scheduled retry for this long is re-staffed once (logged),
      *  then parked in todo with a comment if that also fails. 0 disables. Default 120 (issue #9). */
