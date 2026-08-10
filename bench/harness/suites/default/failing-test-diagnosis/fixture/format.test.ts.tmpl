@@ -1,0 +1,10 @@
+import { expect, test } from "bun:test";
+import { titleCase } from "./format.ts";
+
+test("title-cases a simple sentence", () => {
+  expect(titleCase("hello world")).toBe("Hello World");
+});
+
+test("title-cases a word with a leading apostrophe", () => {
+  expect(titleCase("'tis the season")).toBe("Tis The Season");
+});

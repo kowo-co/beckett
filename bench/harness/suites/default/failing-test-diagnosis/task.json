@@ -1,0 +1,7 @@
+{
+  "id": "failing-test-diagnosis",
+  "prompt": "The test suite in this repo is failing. Run `bun test`, diagnose the root cause, and fix the underlying bug so `bun test` passes. Do not modify format.test.ts — read the failure carefully, the bug is not in the function the assertion names.",
+  "model": "",
+  "effort": "low",
+  "timeout_s": 600
+}

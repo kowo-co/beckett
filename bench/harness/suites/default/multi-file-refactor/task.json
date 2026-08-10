@@ -1,0 +1,7 @@
+{
+  "id": "multi-file-refactor",
+  "prompt": "Rename the exported function `checkAge` in lib/validate.ts to `checkEligibility` and give it a second required parameter `minAge: number` (eligible when `age >= minAge`). Update every call site across the repo — lib/user.ts, lib/order.ts, and index.ts — to use the new name and pass `18` as `minAge`, preserving current behavior everywhere. `bun test` must still pass.",
+  "model": "",
+  "effort": "low",
+  "timeout_s": 600
+}
