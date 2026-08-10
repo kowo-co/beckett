@@ -176,6 +176,11 @@ export const SPINE: SpineEntry[] = [
     cliHelp: "dream ls|show <date> | dream propose|proposals ls|show|accept|reject | dream spikes ls|show",
     verbs: [{ name: "dream", load: async () => (await import("./dream-cli.ts")).runDream }],
   },
+  {
+    id: "free-time",
+    cliHelp: "free-time run [--dry] | free-time ls|show <id>",
+    verbs: [{ name: "free-time", load: async () => (await import("../freetime/cli.ts")).runFreeTimeCli }],
+  },
 
   { id: "spend", verbs: [{ name: "spend", load: core((m) => m.runSpend) }] },
   { id: "journal", verbs: [{ name: "journal", load: core((m) => m.runJournal) }] },

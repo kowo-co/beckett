@@ -24,6 +24,7 @@
 import { isAbsolute, resolve } from "node:path";
 import { z } from "zod";
 import type { Config } from "../types.ts";
+import { HHMM, WEEKDAYS } from "../routine/types.ts";
 import { ActionClass, CapabilityRegistry, type Capability } from "./index.ts";
 
 // =======================================================================================
@@ -626,6 +627,34 @@ export const configFragments = {
     })
     .strict()
     .default({}),
+  // Free time (docs/freetime.md): one weekly, budgeted, unprompted session inside a scratch
+  // directory, with structured memory writeback seeding the next one. Every value here is a WALL
+  // the session runs INSIDE — the session's process has no write path back to this file, so it
+  // can neither widen its own budget nor re-arm its own trigger.
+  free_time: z
+    .object({
+      enabled: z.boolean().default(true),
+      // Seed values for the builtin routine's schedule. The routine store owns the timing once
+      // seeded (`beckett routine inspect weekly-free-time`), so editing these later retimes a
+      // FRESH install, not a running one — that is what `beckett routine` is for.
+      weekday: z
+        .string()
+        .refine((w) => (WEEKDAYS as readonly string[]).includes(w), `weekday must be one of: ${WEEKDAYS.join(", ")}`)
+        .default("sunday"),
+      window_start: HHMM.default("02:00"),
+      window_end: HHMM.default("05:00"),
+      tz: z.string().min(1).default("America/Los_Angeles"),
+      model: z.string().default("claude-sonnet-5"),
+      max_turns: posInt.default(60),
+      hard_timeout_s: posInt.default(1_800),
+      output_token_budget: posInt.default(80_000),
+      memories_per_session_max: posInt.default(5),
+      // Empty = no message. A session that wants to say something with no channel configured
+      // says it in its journal entry instead; nothing is queued for later.
+      channel_id: z.string().default(""),
+    })
+    .strict()
+    .default({}),
 } satisfies { [K in keyof Config]: z.ZodType<Config[K], z.ZodTypeDef, unknown> };
 
 // =======================================================================================
@@ -657,6 +686,7 @@ const BUILTIN_CAPABILITY_INFO: {
   federation: { id: "federation", summary: "Peer-Beckett federation over Discord." },
   dream: { id: "dream", summary: "Nightly dream pass: token ceiling + model for the self-lane day replay." },
   progress: { id: "progress", summary: "Zero-token per-ticket progress cards: code-edited Discord status messages." },
+  free_time: { id: "free-time", summary: "Weekly self-directed session: trigger, walls, token ceiling, share channel." },
 };
 
 /**

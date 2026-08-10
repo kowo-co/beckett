@@ -160,3 +160,16 @@ spike_repo = ""
 
 [progress]
 cards_as_code = false
+
+[free_time]
+enabled = true
+weekday = "sunday"
+window_start = "02:00"
+window_end = "05:00"
+tz = "America/Los_Angeles"
+model = "claude-sonnet-5"
+max_turns = 60
+hard_timeout_s = 1800
+output_token_budget = 80000
+memories_per_session_max = 5
+channel_id = ""

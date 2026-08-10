@@ -5,7 +5,7 @@ exports[`cli: bare invocation prints the unknown-command help 1`] = `
   "exit": 1,
   "stderr": 
 "error: unknown command: beckett  
-commands: status [--pretty] | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|show|list | ticket create|comment|state|list|show|trace | preset ls|show | plan | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | dream ls|show <date> | dream propose|proposals ls|show|accept|reject | dream spikes ls|show
+commands: status [--pretty] | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|show|list | ticket create|comment|state|list|show|trace | preset ls|show | plan | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | dream ls|show <date> | dream propose|proposals ls|show|accept|reject | dream spikes ls|show | free-time run [--dry] | free-time ls|show <id>
 "
 ,
   "stdout": "",
@@ -17,7 +17,7 @@ exports[`cli: unknown group prints the unknown-command help 1`] = `
   "exit": 1,
   "stderr": 
 "error: unknown command: beckett wat 
-commands: status [--pretty] | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|show|list | ticket create|comment|state|list|show|trace | preset ls|show | plan | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | dream ls|show <date> | dream propose|proposals ls|show|accept|reject | dream spikes ls|show
+commands: status [--pretty] | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|show|list | ticket create|comment|state|list|show|trace | preset ls|show | plan | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | dream ls|show <date> | dream propose|proposals ls|show|accept|reject | dream spikes ls|show | free-time run [--dry] | free-time ls|show <id>
 "
 ,
   "stdout": "",
@@ -29,7 +29,7 @@ exports[`cli: bare discord group falls through to the help 1`] = `
   "exit": 1,
   "stderr": 
 "error: unknown command: beckett discord 
-commands: status [--pretty] | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|show|list | ticket create|comment|state|list|show|trace | preset ls|show | plan | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | dream ls|show <date> | dream propose|proposals ls|show|accept|reject | dream spikes ls|show
+commands: status [--pretty] | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|show|list | ticket create|comment|state|list|show|trace | preset ls|show | plan | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | dream ls|show <date> | dream propose|proposals ls|show|accept|reject | dream spikes ls|show | free-time run [--dry] | free-time ls|show <id>
 "
 ,
   "stdout": "",
@@ -256,6 +256,72 @@ exports[`cli: dream: unknown sub prints usage 1`] = `
   "exit": 1,
   "stderr": 
 "error: usage: beckett dream ls [--json] | dream show <YYYY-MM-DD> | dream run [--force] [--routine <id>] [--requester <id>] | dream propose --kind doctrine-change|persona-change|ticket|memory-correction --claim <one line> --why <rationale> --from <src,src> [--channel <id>] | dream proposals ls [--all|--json] | proposals show <id> | proposals accept <id> [--board <name>] | proposals reject <id> --why <reason> [--about <slug>] | proposals expire | dream spikes ls [--json] | spikes show <id>
+"
+,
+  "stdout": "",
+}
+`;
+
+exports[`cli: free-time: bare lists an empty journal 1`] = `
+{
+  "exit": 0,
+  "stderr": "",
+  "stdout": 
+"(no free time yet)
+"
+,
+}
+`;
+
+exports[`cli: free-time: ls lists an empty journal 1`] = `
+{
+  "exit": 0,
+  "stderr": "",
+  "stdout": 
+"(no free time yet)
+"
+,
+}
+`;
+
+exports[`cli: free-time: show without an id prints usage 1`] = `
+{
+  "exit": 1,
+  "stderr": 
+"error: usage: beckett free-time show <id>
+"
+,
+  "stdout": "",
+}
+`;
+
+exports[`cli: free-time: show rejects a traversal id 1`] = `
+{
+  "exit": 1,
+  "stderr": 
+"error: free-time: invalid session id '../persona'
+"
+,
+  "stdout": "",
+}
+`;
+
+exports[`cli: free-time: show of an unlived session fails 1`] = `
+{
+  "exit": 1,
+  "stderr": 
+"error: no free-time entry for 2026-01-01-abcdef12
+"
+,
+  "stdout": "",
+}
+`;
+
+exports[`cli: free-time: unknown sub prints usage 1`] = `
+{
+  "exit": 1,
+  "stderr": 
+"error: usage: beckett free-time run [--dry] [--routine <id>] [--requester <id>] | free-time ls [--json] | free-time show <id>
 "
 ,
   "stdout": "",
@@ -2038,6 +2104,19 @@ spike_repo = ""
 
 [progress]
 cards_as_code = false
+
+[free_time]
+enabled = true
+weekday = "sunday"
+window_start = "02:00"
+window_end = "05:00"
+tz = "America/Los_Angeles"
+model = "claude-sonnet-5"
+max_turns = 60
+hard_timeout_s = 1800
+output_token_budget = 80000
+memories_per_session_max = 5
+channel_id = ""
 "
 ,
 }

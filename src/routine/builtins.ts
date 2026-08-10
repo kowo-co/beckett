@@ -2,7 +2,7 @@
  * Beckett — Built-in routines (`src/routine/builtins.ts`)
  * =======================================================================================
  * Engine-seeded routines that exist on a fresh install. The store seeds these on load unless
- * the user explicitly removed them (tracked in `removedBuiltins`). Four live here:
+ * the user explicitly removed them (tracked in `removedBuiltins`). Among them:
  *
  *   - `daily-x-shitpost` (issue #62) — once a day at a random minute in 12:00–13:00 PT, post a
  *     dumb in-voice shitpost to X @beckposting. The acceptance vehicle for humanized timing.
@@ -18,6 +18,9 @@
  *     lane spawns the contained dream pass (`beckett dream run`): a budgeted, read-mostly replay
  *     of the day whose outputs are inferences (journal entry + `dream`-namespace memories), never
  *     facts, never doctrine.
+ *   - `weekly-free-time` (docs/freetime.md) — once a week in the small hours, one unprompted
+ *     session inside a scratch directory on a hard token budget, whose only durable outputs are a
+ *     journal entry and create-only `free-time`-namespace memories that seed the next session.
  *
  * As of issue #55/#72 the shitpost routine drives that post THROUGH the `social-media` agent rather than
  * an ad-hoc composer: its action invokes the agent (which WRITES the post — taste lives in the
@@ -31,7 +34,7 @@
  * (`BECKETT_ROUTINE_CHANNEL_ID` / `DISCORD_OWNER_ID`) so no id is baked into source.
  */
 
-import type { Routine } from "./types.ts";
+import type { Cadence, FuzzWindow, Routine, Weekday } from "./types.ts";
 import { SOCIAL_MEDIA_AGENT_ID } from "../agent/builtins.ts";
 import { MODEL_NEWS_FEED_URL } from "./model-news.ts";
 
@@ -83,10 +86,39 @@ export const PROACTIVE_SWEEP_ID = "proactive-sweep";
 export const WEEKLY_SPEND_REPORT_ID = "weekly-spend-report";
 
 /**
+ * Id of the weekly free-time routine (docs/freetime.md): once a week, deep night PT, Beckett
+ * runs one unprompted session inside a scratch directory on a hard token budget. It is a plain
+ * builtin routine and not a new timer on purpose — free time gets no scheduling machinery of its
+ * own, so disabling it is the same `beckett routine disable` every other routine answers to.
+ */
+export const FREE_TIME_ID = "weekly-free-time";
+
+/**
+ * Seed-time overrides for the built-in definitions. Only free time takes one: its schedule ships
+ * in `[free_time]` config so a fresh install can be retimed without editing source, while every
+ * other builtin's window is a code constant. After the seed the routine store owns the timing —
+ * this is a SEED value, not a live binding, and `beckett routine` is how a seeded routine moves.
+ */
+export interface BuiltinRoutineOverrides {
+  freeTime?: { weekday: Weekday; window: FuzzWindow };
+}
+
+/** The free-time schedule shipped when nothing overrides it — mirrors the `[free_time]` defaults. */
+const FREE_TIME_DEFAULT_SCHEDULE: { cadence: Cadence; window: FuzzWindow } = {
+  cadence: { kind: "weekly", weekday: "sunday" },
+  window: { start: "02:00", end: "05:00", tz: "America/Los_Angeles" },
+};
+
+/**
  * The definitions (sans timestamps/state — the store stamps those on seed). Kept as a factory
  * so the seeder gets fresh objects and can't accidentally share mutable state.
  */
-export function builtinRoutineDefs(): Array<Omit<Routine, "createdAt" | "updatedAt" | "state">> {
+export function builtinRoutineDefs(
+  overrides: BuiltinRoutineOverrides = {},
+): Array<Omit<Routine, "createdAt" | "updatedAt" | "state">> {
+  const freeTime = overrides.freeTime
+    ? { cadence: { kind: "weekly" as const, weekday: overrides.freeTime.weekday }, window: overrides.freeTime.window }
+    : FREE_TIME_DEFAULT_SCHEDULE;
   return [
     {
       id: "daily-x-shitpost",
@@ -181,6 +213,20 @@ export function builtinRoutineDefs(): Array<Omit<Routine, "createdAt" | "updated
         cadence: { kind: "weekly", weekday: "sunday" },
         window: { start: "09:00", end: "10:00", tz: "America/Los_Angeles" },
       },
+    },
+    {
+      id: FREE_TIME_ID,
+      name: "weekly free time",
+      builtin: true,
+      enabled: true,
+      // No prompt, no creds, no channel baked in — for the same reason `dream` has none: the
+      // session's shape (its walls, its budget, its writeback contract) lives in code under
+      // `src/freetime/`, so editing the routine can never widen what free time is allowed to do.
+      action: { kind: "free-time" },
+      // Deep night on a weekly cadence, from `[free_time]` config at seed time. The weekly period
+      // key doubles as the once-per-week guard; the idle gate defers a busy night's fire WITHOUT
+      // claiming the period, so a fleet that works through the window costs the week, not the fire.
+      schedule: freeTime,
     },
   ];
 }

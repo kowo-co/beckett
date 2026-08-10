@@ -90,6 +90,14 @@ export interface RoutineDispatchPlan {
    * turn — same pre-browser fork, same no-agent/no-browser/no-creds shape as a plain self wake.
    */
   dream: boolean;
+  /**
+   * self lane, free-time variant (docs/freetime.md): true when this fire is the weekly
+   * self-directed session. The dispatcher spawns the contained `beckett free-time run` body —
+   * same pre-browser fork and same no-agent/no-browser/no-creds shape as `dream`, plus the one
+   * thing no other plan has: it may be DEFERRED before the period is claimed (see
+   * {@link ./scheduler.ts}) when the fleet is busy, so free time never competes with real work.
+   */
+  freeTime: boolean;
   /** Human-readable summary shown in a dry-run + logs. */
   preview: string;
   /** jingle keychain entry passed to the browser lane via --creds (a NAME, never a secret). */
@@ -115,6 +123,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       proactiveSweep: null,
       selfPrompt: null,
       dream: false,
+      freeTime: false,
       preview: `invoke agent ${action.agentId}: ${action.input}`,
       credsEntry: action.credsEntry ?? null,
       channelId: action.channelId ?? null,
@@ -139,6 +148,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       proactiveSweep: null,
       selfPrompt: null,
       dream: false,
+      freeTime: false,
       preview:
         `update in-range dependencies in an isolated clone, run typecheck + tests, ` +
         `open a PR against ${action.base}${action.repo ? ` on ${action.repo}` : ""}`,
@@ -165,6 +175,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       proactiveSweep: { repos },
       selfPrompt: null,
       dream: false,
+      freeTime: false,
       preview:
         repos.length === 0
           ? "sweep for rot — but no repos are opted in, so nothing is swept (add repos to the routine's list)"
@@ -190,6 +201,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       proactiveSweep: null,
       selfPrompt: null,
       dream: false,
+      freeTime: false,
       preview:
         `poll ${action.feedUrl} every ${action.pollIntervalMinutes}m; on a genuinely new, ` +
         `unseen, rate-limit-clear model release, dispatch agent ${action.agentId} with the item ` +
@@ -215,6 +227,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       proactiveSweep: null,
       selfPrompt: action.prompt,
       dream: false,
+      freeTime: false,
       preview: `wake the concierge on its own ledger: ${action.prompt}`,
       credsEntry: null,
       channelId: action.channelId ?? null,
@@ -237,9 +250,35 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       proactiveSweep: null,
       selfPrompt: null,
       dream: true,
+      freeTime: false,
       preview:
         "replay the day on the self lane (dream pass): read-only assembly, budgeted reflection, " +
         "one dated journal entry under ~/.beckett/dreams, inference-only memories",
+      credsEntry: null,
+      channelId: action.channelId ?? null,
+      requesterId: action.requesterId ?? null,
+    };
+  }
+
+  if (action.kind === "free-time") {
+    // Free time (docs/freetime.md) rides the SELF lane beside the dream, for the same reason: it
+    // shares the lane's "never the browser, never an agent, never a credential" structure but runs
+    // as the contained `beckett free-time run` subprocess, so the scratch-directory scope guard,
+    // the deny list, and the token ceiling stay enforced in code rather than in a prompt.
+    return {
+      routineId: routine.id,
+      lane: "self",
+      agentId: null,
+      agentInput: null,
+      browserTask: null,
+      depsUpdate: null,
+      proactiveSweep: null,
+      selfPrompt: null,
+      dream: false,
+      freeTime: true,
+      preview:
+        "one self-directed session on the self lane (free time): a scratch directory it may not " +
+        "write outside of, a hard output-token ceiling, and a writeback that seeds the next one",
       credsEntry: null,
       channelId: action.channelId ?? null,
       requesterId: action.requesterId ?? null,
@@ -261,6 +300,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       proactiveSweep: null,
       selfPrompt: null,
       dream: false,
+      freeTime: false,
       preview: `post the per-task spend bill for the last ${action.since} to the channel`,
       credsEntry: null,
       channelId: action.channelId ?? null,
@@ -281,6 +321,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       proactiveSweep: null,
       selfPrompt: null,
       dream: false,
+      freeTime: false,
       preview: `invoke agent ${SOCIAL_MEDIA_AGENT_ID}: ${LEGACY_SHITPOST_INPUT}`,
       credsEntry: action.credsEntry ?? null,
       channelId: action.channelId ?? null,
@@ -299,6 +340,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
     proactiveSweep: null,
     selfPrompt: null,
     dream: false,
+    freeTime: false,
     preview: action.task,
     credsEntry: action.credsEntry ?? null,
     channelId: action.channelId ?? null,

@@ -1086,6 +1086,36 @@ export interface Config {
   progress: {
     cards_as_code: boolean;
   };
+  /**
+   * Free time (docs/freetime.md): one weekly, budgeted, unprompted session in a scratch
+   * directory, with structured memory writeback seeding the next one. Every number here is a
+   * WALL, not a dial the session can reach: the session runs as its own process and has no
+   * write path to this file.
+   */
+  free_time: {
+    /** The human off-switch. False = the routine's fire is refused before anything spawns. */
+    enabled: boolean;
+    /** Weekday the builtin routine is SEEDED on (one of `WEEKDAYS`, `src/routine/types.ts`);
+     *  after the seed, the routine store owns the timing and `beckett routine` edits it. */
+    weekday: string;
+    /** Fuzz window the seeded routine's fire time is rolled inside (24h HH:MM, local to `tz`). */
+    window_start: string;
+    window_end: string;
+    /** IANA tz for that window. Matches the other weekly builtins' home timezone. */
+    tz: string;
+    /** Model the session runs on. A session is Beckett with time, not a specialist. */
+    model: string;
+    /** Turn cap on the one harness call. */
+    max_turns: number;
+    /** Wall-clock cap on the one harness call, in seconds. A wedged child is killed, not waited on. */
+    hard_timeout_s: number;
+    /** Hard ceiling on model OUTPUT tokens per session. A session that cannot fit does not launch. */
+    output_token_budget: number;
+    /** Most durable memories one session may write. Over-cap entries are dropped and counted. */
+    memories_per_session_max: number;
+    /** Channel the optional one-line share posts to. Empty = the session says nothing to anyone. */
+    channel_id: string;
+  };
 }
 
 // =======================================================================================

@@ -2968,6 +2968,15 @@ export class Concierge {
   }
 
   /** Wire the dispatcher levers (v4-main, after the dispatcher exists). See {@link dispatcherOps}. */
+  /**
+   * Turns queued or in flight across the session pool. The free-time idle gate
+   * (docs/freetime.md) reads it to decide whether an unprompted session may start; nothing here
+   * changes state, and a pool with no sessions is 0.
+   */
+  queueDepth(): number {
+    return this.pool.queueDepth();
+  }
+
   setDispatcherOps(ops: NonNullable<Concierge["dispatcherOps"]>): void {
     this.dispatcherOps = ops;
   }

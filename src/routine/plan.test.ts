@@ -163,6 +163,53 @@ test("every non-dream action plans with dream=false — only the dream kind take
   for (const action of kinds) expect(buildDispatchPlan(routine(action)).dream).toBe(false);
 });
 
+test("free-time action → the SELF lane with freeTime set: no agent, no browser, no creds", () => {
+  const plan = buildDispatchPlan(routine({ kind: "free-time" }));
+  expect(plan.lane).toBe("self");
+  expect(plan.freeTime).toBe(true);
+  expect(plan.dream).toBe(false);
+  expect(plan.selfPrompt).toBeNull();
+  expect(plan.agentId).toBeNull();
+  expect(plan.browserTask).toBeNull();
+  expect(plan.credsEntry).toBeNull();
+  expect(plan.preview).toContain("free time");
+});
+
+test("every non-free-time action plans with freeTime=false — only the free-time kind takes the fork", () => {
+  const kinds: RoutineAction[] = [
+    { kind: "agent", agentId: "social-media", input: "x" },
+    { kind: "browser", task: "t" },
+    { kind: "deps-update", base: "main" },
+    { kind: "self", prompt: "sweep" },
+    { kind: "dream" },
+    { kind: "spend-report", since: "7d" },
+    { kind: "x-shitpost", account: "@a", credsEntry: "x.com" },
+  ];
+  for (const action of kinds) expect(buildDispatchPlan(routine(action)).freeTime).toBe(false);
+});
+
+test("the builtin weekly-free-time ships the [free_time] defaults, and takes a seed-time override", async () => {
+  const { builtinRoutineDefs } = await import("./builtins.ts");
+  const shipped = builtinRoutineDefs().find((r) => r.id === "weekly-free-time")!;
+  expect(shipped.action.kind).toBe("free-time");
+  expect(shipped.schedule).toEqual({
+    cadence: { kind: "weekly", weekday: "sunday" },
+    window: { start: "02:00", end: "05:00", tz: "America/Los_Angeles" },
+  });
+
+  // Config retimes the SEED (the store passes it through); every other builtin is untouched.
+  const overridden = builtinRoutineDefs({
+    freeTime: { weekday: "wednesday", window: { start: "01:00", end: "03:00", tz: "Europe/Berlin" } },
+  });
+  expect(overridden.find((r) => r.id === "weekly-free-time")!.schedule).toEqual({
+    cadence: { kind: "weekly", weekday: "wednesday" },
+    window: { start: "01:00", end: "03:00", tz: "Europe/Berlin" },
+  });
+  expect(overridden.find((r) => r.id === "nightly-dream")!.schedule).toEqual(
+    shipped && builtinRoutineDefs().find((r) => r.id === "nightly-dream")!.schedule,
+  );
+});
+
 test("the builtin nightly-dream fires daily in a fuzzed 03:00–05:00 America/Los_Angeles window (issue #36)", async () => {
   const { builtinRoutineDefs } = await import("./builtins.ts");
   const dream = builtinRoutineDefs().find((r) => r.id === "nightly-dream")!;

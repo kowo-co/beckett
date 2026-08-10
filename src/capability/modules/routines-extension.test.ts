@@ -21,7 +21,7 @@ import { RoutineStore } from "../../routine/store.ts";
 import type { RoutineScheduler, RoutineSchedulerDeps } from "../../routine/scheduler.ts";
 import { validateConfig } from "../../config.ts";
 import { buildPaths } from "../../paths.ts";
-import type { Logger } from "../../types.ts";
+import type { Config, Logger } from "../../types.ts";
 
 const dirs: string[] = [];
 const built: RoutinesExtension[] = [];
@@ -31,8 +31,9 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-function ctx(): ExtensionContext {
+function ctx(configure?: (config: Config) => void): ExtensionContext {
   const config = validateConfig({});
+  configure?.(config);
   const quiet = { info() {}, warn() {}, debug() {}, error() {}, child() { return quiet; } } as unknown as Logger;
   return { config, paths: buildPaths(config, {}), logger: quiet };
 }
@@ -58,6 +59,7 @@ function fakeScheduler(log: string[]): RoutineScheduler {
         agentId: null,
         agentInput: null,
         dream: false,
+        freeTime: false,
         browserTask: "check the thing",
         depsUpdate: null,
         proactiveSweep: null,
@@ -74,13 +76,16 @@ function fakeScheduler(log: string[]): RoutineScheduler {
   };
 }
 
-function build(overrides: RoutinesExtensionDeps = {}): {
+function build(
+  overrides: RoutinesExtensionDeps = {},
+  configure?: (config: Config) => void,
+): {
   ext: RoutinesExtension;
   deps: ExtensionContext;
   schedulerLog: string[];
   schedulerBuilds: RoutineSchedulerDeps[];
 } {
-  const deps = ctx();
+  const deps = ctx(configure);
   const schedulerLog: string[] = [];
   const schedulerBuilds: RoutineSchedulerDeps[] = [];
   const ext = createRoutinesExtension({
@@ -362,21 +367,23 @@ test("unknown capabilities and pre-init calls refuse with results", async () => 
 // ── the deps-update lane forks BEFORE the browser (issue #85) ─────────────────────────────
 
 /** A plan shaped like the scheduler builds one, minus the fields the lane under test ignores. */
-function planFor(kind: "deps-update" | "browser" | "self" | "dream" | "spend-report") {
+function planFor(kind: "deps-update" | "browser" | "self" | "dream" | "spend-report" | "free-time") {
   return {
     routineId:
       kind === "self" ? "morning-sweep"
       : kind === "dream" ? "nightly-dream"
+      : kind === "free-time" ? "weekly-free-time"
       : kind === "spend-report" ? "weekly-spend-report"
       : "weekly-deps-update",
-    // The dream variant (issue #36) rides the self LANE; only its `dream` flag differs.
-    lane: kind === "dream" ? "self" : kind,
+    // The dream and free-time variants ride the self LANE; only their flag differs.
+    lane: kind === "dream" || kind === "free-time" ? "self" : kind,
     agentId: null,
     agentInput: null,
     browserTask: kind === "browser" ? "go do the thing" : null,
     depsUpdate: kind === "deps-update" ? { repo: null, base: "main", sourceRepo: null } : null,
     selfPrompt: kind === "self" ? "look over the board and nudge anything stalled" : null,
     dream: kind === "dream",
+    freeTime: kind === "free-time",
     preview: "p",
     credsEntry: null,
     channelId: null,
@@ -388,11 +395,14 @@ function planFor(kind: "deps-update" | "browser" | "self" | "dream" | "spend-rep
  * Grab the dispatch closure the extension hands its scheduler. `createScheduler` receives the same
  * `RoutineSchedulerDeps` the real loop would, so this exercises the PRODUCTION dispatcher.
  */
-async function dispatcherOf(overrides: RoutinesExtensionDeps) {
-  const { ext, deps, schedulerBuilds } = build({
-    defaultOrigin: () => ({ channelId: "chan", requesterId: "owner-1" }),
-    ...overrides,
-  });
+async function dispatcherOf(overrides: RoutinesExtensionDeps, configure?: (config: Config) => void) {
+  const { ext, deps, schedulerBuilds } = build(
+    {
+      defaultOrigin: () => ({ channelId: "chan", requesterId: "owner-1" }),
+      ...overrides,
+    },
+    configure,
+  );
   const registry = new ExtensionRegistry();
   registry.register(ext);
   await registry.initAll(deps);
@@ -507,6 +517,67 @@ test("a dream fire spawns its contained process on the self lane — never the b
   expect(launched[0]![routineFlag + 1]).toBe("nightly-dream");
   // Nothing secret-shaped or creds-shaped rides the argv.
   expect(launched[0]!.join(" ")).not.toContain("--creds");
+});
+
+test("a free-time fire spawns its contained process on the self lane — never the browser, never a concierge wake", async () => {
+  const launched: string[][] = [];
+  const dispatcher = await dispatcherOf({
+    // Same proof as the dream's: reaching the browser agent/registry/runner throws, so this
+    // passing means free time forks on the self lane BEFORE the browser-deps requirement check.
+    ...exploding(),
+    wakeSelf: () => {
+      throw new Error("a free-time fire framed a concierge turn — the session must not hold the concierge's shell");
+    },
+    spawnDream: () => {
+      throw new Error("a free-time fire took the dream fork");
+    },
+    spawnFreeTime: (argv) => void launched.push(argv),
+  });
+
+  await dispatcher.dispatch(planFor("free-time") as never, {} as never);
+
+  expect(launched.length).toBe(1);
+  expect(launched[0]!.slice(0, 2)).toEqual(["free-time", "run"]);
+  const routineFlag = launched[0]!.indexOf("--routine");
+  expect(routineFlag).toBeGreaterThan(-1);
+  expect(launched[0]![routineFlag + 1]).toBe("weekly-free-time");
+  expect(launched[0]!.join(" ")).not.toContain("--creds");
+});
+
+test("[free_time] enabled=false refuses the fire before anything spawns (the human off-switch)", async () => {
+  const dispatcher = await dispatcherOf(
+    {
+      ...exploding(),
+      spawnFreeTime: () => {
+        throw new Error("a disabled free-time routine still launched a session");
+      },
+    },
+    (config) => {
+      config.free_time.enabled = false;
+    },
+  );
+  // Refused, not thrown: the period stays claimed and the week closes quietly.
+  await dispatcher.dispatch(planFor("free-time") as never, {} as never);
+});
+
+test("the idle gate defers a free-time fire on a busy machine and only that fire", async () => {
+  let fleetIdle = false;
+  const { ext, deps, schedulerBuilds } = build({
+    defaultOrigin: () => ({ channelId: "chan", requesterId: "owner-1" }),
+    isFleetIdle: () => fleetIdle,
+    conciergeQuiet: () => true,
+  });
+  const registry = new ExtensionRegistry();
+  registry.register(ext);
+  await registry.initAll(deps);
+  await registry.startAll(deps, "late");
+  const dispatcher = schedulerBuilds[0]!.dispatcher;
+
+  expect(dispatcher.deferReason?.(planFor("free-time") as never, {} as never)).toContain("worker fleet is busy");
+  // Nothing else is ever deferred — the veto is free time's alone.
+  expect(dispatcher.deferReason?.(planFor("dream") as never, {} as never)).toBeNull();
+  fleetIdle = true;
+  expect(dispatcher.deferReason?.(planFor("free-time") as never, {} as never)).toBeNull();
 });
 
 test("a dream fire still resolves an origin like every routine (attribution only)", async () => {
