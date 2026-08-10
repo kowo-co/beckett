@@ -46,3 +46,22 @@ test("a fourth key is rejected even when decision/voice_check/message are all va
     }),
   ).toBeNull();
 });
+
+test("the pool boundary keeps accepting the already-parsed two-field shape (a real session's return)", async () => {
+  const { coerceDiscordTurnOutput } = await import("./output.ts");
+  // Real ConciergeSession.onResult returns parseDiscordTurnOutput's shape — no voice_check.
+  // Coercing it back through the raw three-field parse would silently mute every answer.
+  expect(coerceDiscordTurnOutput({ decision: "send", message: "the answer" })).toEqual({
+    decision: "send",
+    message: "the answer",
+  });
+  expect(coerceDiscordTurnOutput({ decision: "pass", message: null })).toEqual({ decision: "pass", message: null });
+  // The raw three-field envelope still coerces too.
+  expect(coerceDiscordTurnOutput({ decision: "send", voice_check: "dry, short", message: "hi" })).toEqual({
+    decision: "send",
+    message: "hi",
+  });
+  // Garbage still fails closed to a silent pass.
+  expect(coerceDiscordTurnOutput({ decision: "send", message: "" })).toEqual({ decision: "pass", message: null });
+  expect(coerceDiscordTurnOutput({ decision: "wat", message: "x" })).toEqual({ decision: "pass", message: null });
+});
