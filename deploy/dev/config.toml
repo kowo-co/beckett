@@ -25,6 +25,10 @@ staffing_watchdog_s = 0
 [concierge]
 max_concurrent_turns = 1
 
+# Off (the schema default too — pinned explicit): DEV must never call a friend's homelab API.
+[concierge.chilltext]
+enabled = false
+
 [quick]
 max_concurrent = 1
 
