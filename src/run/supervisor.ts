@@ -78,7 +78,7 @@ import { DispatchEventBus, type DispatchEventBusOptions, type DispatchOutcome } 
 import {
   PublishOutbox,
   PUBLISH_RETRY_DELAYS_MS,
-  classifyPublishError,
+  planPublishRetry,
   type PublishOperation,
 } from "../dispatch/publish-outbox.ts";
 import { appendSpendRecord, readSpendLedger, spendForTicket, type SpendOutcome } from "../spend.ts";
@@ -998,6 +998,10 @@ export class RunSupervisor {
     const outcome = await this.publishOnce(publishing, summary);
     if (outcome.status === "failed") {
       if (this.publishOutbox) {
+        // Attempt 1 is decided by the SAME ladder every later retry uses (planPublishRetry) — a
+        // permanent classification or an exhausted ladder park identically on attempt 1 as on
+        // attempt 4 (#227: no more special-cased "first attempt" logic).
+        const plan = planPublishRetry(1, outcome.error);
         const op: PublishOperation = {
           id: randomUUID(),
           item: runAsWorkItem(publishing),
@@ -1007,23 +1011,22 @@ export class RunSupervisor {
           summary,
           purpose: "done",
           attempt: 1,
-          nextAttemptAt:
-            classifyPublishError(outcome.error) === "permanent"
-              ? Number.MAX_SAFE_INTEGER
-              : Date.now() + PUBLISH_RETRY_DELAYS_MS[0],
+          nextAttemptAt: plan.nextAttemptAt,
           createdAt: new Date().toISOString(),
         };
-        this.publishOutbox.append(op);
-        this.trace(publishing, "publish", "held", `publish failed (${outcome.error}) — durable retry queued`);
+        this.publishOutbox.append(op, plan);
+        this.trace(publishing, "publish", "held", plan.message, plan.error);
         return;
       }
       await this.park(publishing, `the work is complete but could not be published (${outcome.error}).`);
       return;
     }
+    const prUrl = outcome.status === "published" ? outcome.prUrl ?? outcome.url ?? null : null;
     await this.patchRun(run.id, {
       state: "done",
-      prUrl: outcome.status === "published" ? outcome.prUrl ?? outcome.url : null,
+      prUrl,
       error: null,
+      published: { via: "outbox", prUrl },
     });
     // The deploy receipt's closing line: the shipped PR/push URL when there is one, the review
     // summary otherwise (a local-only completion with no publishRepo wired).
@@ -1085,16 +1088,27 @@ export class RunSupervisor {
       if (!run || RUN_TERMINAL.has(run.state)) return { action: "remove" };
       const pub = await this.publishOnce(run, op.summary);
       if (pub.status === "failed") {
-        const delay = PUBLISH_RETRY_DELAYS_MS[Math.min(op.attempt, PUBLISH_RETRY_DELAYS_MS.length - 1)]!;
+        const attempt = op.attempt + 1;
+        const plan = planPublishRetry(attempt, pub.error);
+        // Every retry logs VERBATIM, same as attempt 1 (#227 — this path previously logged
+        // nothing at all on a failed retry; only a crash inside `apply` itself ever reached a log
+        // line, and that line carried no error either).
+        this.logger.warn(plan.message, {
+          id: op.id, item: op.item.identifier, attempt, nextAttemptAt: plan.nextAttemptAt,
+          reason: plan.reason, error: plan.error,
+        });
+        this.trace(run, "publish-retry", "held", plan.message, plan.error);
         return {
           action: "keep",
-          operation: { ...op, attempt: op.attempt + 1, nextAttemptAt: Date.now() + delay },
+          operation: { ...op, attempt, nextAttemptAt: plan.nextAttemptAt },
         };
       }
+      const prUrl = pub.status === "published" ? pub.prUrl ?? pub.url ?? null : null;
       await this.patchRun(run.id, {
         state: "done",
-        prUrl: pub.status === "published" ? pub.prUrl ?? pub.url : null,
+        prUrl,
         error: null,
+        published: { via: "outbox", prUrl },
       });
       const shipped = pub.status === "published" ? pub.prUrl ?? pub.url : "";
       this.trace(run, "done", "passed", shipped || "durable publish retry succeeded");
@@ -1209,6 +1223,75 @@ export class RunSupervisor {
     await this.patchRun(runId, { state: "cancelled", error: reason });
     this.pump();
     return "cancelled";
+  }
+
+  /**
+   * A human took publishing over by hand (git push / PR opened themselves) after the durable
+   * outbox row for this run stopped being the thing driving it. Its OWN terminal shape — never
+   * {@link cancel}'s bookkeeping (#228: reusing `cancel()` here is exactly why a run that shipped
+   * — 14/14 done, review PASS, landed on main as a real PR — used to end
+   * `state: "cancelled", error: "cancelled", prUrl: null`, throwing its own outcome away).
+   *
+   * Ends the run `done` with `published: {via: "courier", prUrl: null}` and NO error — the daemon
+   * never drove this publish, so there is no PR URL to record synchronously; a human/future caller
+   * backfills it with `RunStore.backfillCourierPrUrl` once one is known. `error` stays `null`
+   * because nothing failed: this is a successful publish, just not one the outbox did itself.
+   *
+   * Eligible only from `publishing` (the outbox still nominally owns it) or `parked` (it already
+   * gave up and asked for a human) — a run still mid-implement/review has nothing for a courier to
+   * have published, so `beckett task courier` on one of those is a caller mistake, not a state
+   * transition.
+   */
+  async courier(runId: string): Promise<"done" | "unknown" | "already-terminal" | "not-eligible"> {
+    const run = this.store.get(runId);
+    if (!run) {
+      this.logger.warn("run.courier for an unknown run", { runId });
+      return "unknown";
+    }
+    if (run.state === "done" || run.state === "failed" || run.state === "cancelled") return "already-terminal";
+    if (run.state !== "publishing" && run.state !== "parked") return "not-eligible";
+
+    // The row's exclusive publish ownership ends here — a human owns it now, and a stale retry
+    // must never race their hand-push. Reuses the exact bookkeeping `cancel()` already relies on
+    // for the identical reason (`PublishOutbox.cancel`'s own doc comment: "never race them with a
+    // stale retry").
+    this.publishOutbox?.cancel(runId);
+    this.staffing.delete(runId);
+    this.dropPending(runId);
+    this.unstaffedSince.delete(runId);
+    this.watchdogRestaffed.delete(runId);
+    this.budgetBlocked.delete(runId);
+    this.restartInterrupted.delete(runId);
+    this.resumables.delete(runId);
+    let persist = this.pendingSteers.delete(runId);
+    persist = this.liveLedger.delete(runId) || persist;
+    if (persist) this.persistRuntimeState();
+    this.forgetActivity(runId);
+
+    const updated = await this.patchRun(runId, {
+      state: "done",
+      error: null,
+      published: { via: "courier", prUrl: null },
+    });
+    this.trace(updated ?? run, "done:courier", "passed", "shipped by human courier");
+    this.logger.info("run handed to a human courier — marked done, not cancelled", { run: runId });
+    this.pump();
+    return "done";
+  }
+
+  /**
+   * The backfill half of {@link courier}: a courier-handed-off run ships `prUrl: null` because the
+   * daemon never drove that publish, and there is deliberately no PR-watching machinery to learn
+   * one on its own (#228). This is the plain, explicit seam for a human/future caller who DOES know
+   * the URL to record it — `RunStore.backfillCourierPrUrl` does the actual (idempotent, narrowly
+   * scoped) write; re-tracing here just lets a still-open progress card pick the URL up.
+   */
+  async backfillCourierPrUrl(runId: string, prUrl: string): Promise<Run | null> {
+    const run = await this.store.backfillCourierPrUrl(runId, prUrl);
+    if (run.published?.via === "courier" && run.published.prUrl === prUrl) {
+      this.trace(run, "done:courier", "passed", prUrl);
+    }
+    return run;
   }
 
   /** Drop a run's queued (over-cap) spawn, if it has one. */

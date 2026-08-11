@@ -211,4 +211,65 @@ describe("durability", () => {
     const store = new RunStore(path);
     expect(store.list()).toEqual([]);
   });
+
+  // #228 migration safety: a run minted before `published` existed on the Run contract must still
+  // load — the field is additive, not a breaking schema change.
+  test("an OLD row with no `published` field loads with published: null, not corrupt", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "beckett-runs-"));
+    dirs.push(dir);
+    const path = join(dir, "runs.json");
+    const store = new RunStore(path, { now: CLOCK });
+    const run = await store.create({ title: "Pre-existing", prompt: "…" });
+
+    // Simulate the buggy old shape this ticket is fixing: state: cancelled, error: "cancelled",
+    // no `published` at all — exactly the shape #228's evidence run had on disk.
+    const onDisk = JSON.parse(readFileSync(path, "utf8"));
+    delete onDisk.runs[0].published;
+    onDisk.runs[0].state = "cancelled";
+    onDisk.runs[0].error = "cancelled";
+    writeFileSync(path, JSON.stringify(onDisk), "utf8");
+
+    const reopened = new RunStore(path);
+    const reloaded = reopened.get(run.id);
+    expect(reloaded).not.toBeNull();
+    expect(reloaded!.published).toBeNull();
+    expect(reloaded!.state).toBe("cancelled");
+  });
+});
+
+describe("backfillCourierPrUrl", () => {
+  test("fills prUrl on a courier-published run whose prUrl is still null", async () => {
+    const { store } = makeStore(CLOCK);
+    const run = await store.create({ title: "Couriered", prompt: "…" });
+    await store.update(run.id, { state: "done", published: { via: "courier", prUrl: null } });
+
+    const backfilled = await store.backfillCourierPrUrl(run.id, "https://github.com/o/r/pull/9");
+    expect(backfilled.published).toEqual({ via: "courier", prUrl: "https://github.com/o/r/pull/9" });
+    expect(backfilled.prUrl).toBe("https://github.com/o/r/pull/9");
+    expect(store.get(run.id)!.published).toEqual({ via: "courier", prUrl: "https://github.com/o/r/pull/9" });
+  });
+
+  test("is a no-op on a run published via the outbox (never overwrites the normal path)", async () => {
+    const { store } = makeStore(CLOCK);
+    const run = await store.create({ title: "Outbox-shipped", prompt: "…" });
+    await store.update(run.id, {
+      state: "done",
+      published: { via: "outbox", prUrl: "https://github.com/o/r/pull/1" },
+    });
+
+    const result = await store.backfillCourierPrUrl(run.id, "https://github.com/o/r/pull/999");
+    expect(result.published).toEqual({ via: "outbox", prUrl: "https://github.com/o/r/pull/1" });
+  });
+
+  test("is a no-op once a courier prUrl is already known (never clobbers existing evidence)", async () => {
+    const { store } = makeStore(CLOCK);
+    const run = await store.create({ title: "Already known", prompt: "…" });
+    await store.update(run.id, {
+      state: "done",
+      published: { via: "courier", prUrl: "https://github.com/o/r/pull/2" },
+    });
+
+    const result = await store.backfillCourierPrUrl(run.id, "https://github.com/o/r/pull/OTHER");
+    expect(result.published).toEqual({ via: "courier", prUrl: "https://github.com/o/r/pull/2" });
+  });
 });
