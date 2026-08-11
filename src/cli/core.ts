@@ -45,6 +45,7 @@ import { AGENT_HARNESSES, AGENT_EFFORTS, type AgentDefinition } from "../agent/t
 import { startTaskBranch } from "./task-start.ts";
 import { runTaskDeploy } from "./task-deploy.ts";
 import { RunStore } from "../run/store.ts";
+import { parseSpecChecklist } from "../run/spec-file.ts";
 import { formatDispatchTrace, readDispatchEvents } from "../dispatch/events.ts";
 import {
   commitVersion,
@@ -232,9 +233,10 @@ function runStore(): RunStore {
 }
 
 /**
- * Read `<workspace>/spec.md`'s checklist progress for `task show` on a Run. Deliberately tiny and
- * local rather than a shared `src/run/spec-file.ts` codec — no such module is this lane's to
- * define; this only needs to COUNT boxes, not parse/render the scaffold.
+ * Read `<workspace>/spec.md`'s checklist progress for `task show` on a Run, through the SAME
+ * `../run/spec-file.ts` codec the spec-gate Stop hook and the run cards read with — so what the
+ * CLI reports and what the gate enforces can never disagree (the codec scopes to the `## Checklist`
+ * section, where a hand-rolled box count would also pick up checkboxes a worker left in `## Notes`).
  */
 function readRunChecklist(workspace: string | null): { total: number; done: number; hasPlaceholder: boolean } | null {
   if (!workspace) return null;
@@ -246,10 +248,8 @@ function readRunChecklist(workspace: string | null): { total: number; done: numb
   } catch {
     return null;
   }
-  const items = [...text.matchAll(/^- \[([ xX])\] (.+)$/gm)];
-  const done = items.filter((m) => m[1]!.toLowerCase() === "x").length;
-  const hasPlaceholder = items.some((m) => m[2]!.trim().startsWith("(worker fills"));
-  return { total: items.length, done, hasPlaceholder };
+  const { total, done, hasPlaceholder } = parseSpecChecklist(text);
+  return { total, done, hasPlaceholder };
 }
 
 // ── spend (in-process: the local spend ledger) ─────────────────────────────────────────
