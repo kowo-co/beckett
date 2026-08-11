@@ -1013,7 +1013,8 @@ export interface Config {
     /**
      * chilltext (v7 architecture doc): restyles every human-facing Concierge message through a
      * friend's homelab rewrite API before it posts, fail-open on any error/timeout. OFF by
-     * default — a fork's config must opt in (prod flips it true).
+     * default — a fork's config must opt in (prod flips it true). W3A's own gate reads this;
+     * other chill-pass callers (e.g. `[social].chill`) reuse it rather than each carrying a copy.
      */
     chilltext: {
       enabled: boolean;
@@ -1156,6 +1157,12 @@ export interface Config {
     memories_per_session_max: number;
     /** Channel the optional one-line share posts to. Empty = the session says nothing to anyone. */
     channel_id: string;
+  };
+  /** The social-media agent's chilltext chill pass (W4A tune): reuses `concierge.chilltext`. */
+  social: {
+    /** Route composed X posts through chilltext before they reach the browser lane. Default
+     *  true; chilltext already fails open, so false is purely a taste toggle. */
+    chill: boolean;
   };
 }
 

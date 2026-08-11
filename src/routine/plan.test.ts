@@ -21,17 +21,17 @@ function routine(action: RoutineAction): Routine {
 
 test("agent action → agent lane carrying the invocation, not composed text", () => {
   const plan = buildDispatchPlan(
-    routine({ kind: "agent", agentId: "social-media", input: "compose today's shitpost", credsEntry: "x.com" }),
+    routine({ kind: "agent", agentId: "social-media", input: "compose today's shitpost", credsEntry: "x-account" }),
   );
   expect(plan.lane).toBe("agent");
   expect(plan.agentId).toBe("social-media");
   expect(plan.agentInput).toBe("compose today's shitpost");
   expect(plan.browserTask).toBeNull(); // authored live by the agent, not knowable at plan time
-  expect(plan.credsEntry).toBe("x.com");
+  expect(plan.credsEntry).toBe("x-account");
 });
 
 test("browser action → browser lane with the static task known at plan time", () => {
-  const plan = buildDispatchPlan(routine({ kind: "browser", task: "go do the thing", credsEntry: "x.com" }));
+  const plan = buildDispatchPlan(routine({ kind: "browser", task: "go do the thing", credsEntry: "x-account" }));
   expect(plan.lane).toBe("browser");
   expect(plan.browserTask).toBe("go do the thing");
   expect(plan.agentId).toBeNull();
@@ -40,13 +40,13 @@ test("browser action → browser lane with the static task known at plan time", 
 
 test("legacy x-shitpost action folds onto the social-media agent lane — one runtime path", () => {
   const plan = buildDispatchPlan(
-    routine({ kind: "x-shitpost", account: "@beckposting", credsEntry: "x.com" }),
+    routine({ kind: "x-shitpost", account: "@beckposting", credsEntry: "x-account" }),
   );
   expect(plan.lane).toBe("agent");
   expect(plan.agentId).toBe(SOCIAL_MEDIA_AGENT_ID);
   expect(plan.agentInput).toBe(LEGACY_SHITPOST_INPUT);
   expect(plan.browserTask).toBeNull();
-  expect(plan.credsEntry).toBe("x.com");
+  expect(plan.credsEntry).toBe("x-account");
 });
 
 test("deps-update action → its OWN lane, with nothing a browser dispatcher could act on", () => {
@@ -131,9 +131,9 @@ test("self action carries the routine's channelId/requesterId when named, still 
 
 test("a plan never carries a secret value — only the jingle entry NAME", () => {
   const plan = buildDispatchPlan(
-    routine({ kind: "agent", agentId: "social-media", input: "x", credsEntry: "x.com" }),
+    routine({ kind: "agent", agentId: "social-media", input: "x", credsEntry: "x-account" }),
   );
-  expect(plan.credsEntry).toBe("x.com");
+  expect(plan.credsEntry).toBe("x-account");
   expect(JSON.stringify(plan).toLowerCase()).not.toContain("password");
 });
 
@@ -158,7 +158,7 @@ test("every non-dream action plans with dream=false — only the dream kind take
     { kind: "browser", task: "t" },
     { kind: "deps-update", base: "main" },
     { kind: "self", prompt: "sweep" },
-    { kind: "x-shitpost", account: "@a", credsEntry: "x.com" },
+    { kind: "x-shitpost", account: "@a", credsEntry: "x-account" },
   ];
   for (const action of kinds) expect(buildDispatchPlan(routine(action)).dream).toBe(false);
 });
@@ -183,7 +183,7 @@ test("every non-free-time action plans with freeTime=false — only the free-tim
     { kind: "self", prompt: "sweep" },
     { kind: "dream" },
     { kind: "spend-report", since: "7d" },
-    { kind: "x-shitpost", account: "@a", credsEntry: "x.com" },
+    { kind: "x-shitpost", account: "@a", credsEntry: "x-account" },
   ];
   for (const action of kinds) expect(buildDispatchPlan(routine(action)).freeTime).toBe(false);
 });

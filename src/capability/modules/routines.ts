@@ -66,6 +66,14 @@ import { defaultRepoRoot } from "../../version/index.ts";
 import { loadIdentity } from "../../agency/index.ts";
 import { resolveSelfProjectOwner } from "../../github/owner.ts";
 import type { AgentDefinition, AgentRunner } from "../../agent/index.ts";
+import { extractPostText, composeXPostBrowserTask } from "../../agent/invoke.ts";
+import { X_SOCIAL_ACCOUNT } from "../../agent/builtins.ts";
+import {
+  chillTransform,
+  type ChilltextConfig,
+  type ChillTransformInput,
+  type ChillTransformResult,
+} from "../../chilltext.ts";
 import type { BrowserAgent } from "../../browser/agent.ts";
 import { callBus } from "../../shell/control-bus.ts";
 import { fail, out, parse } from "../../cli/io.ts";
@@ -85,6 +93,14 @@ export interface RoutinesExtensionDeps {
   agentRegistry?: () => { get(id: string): AgentDefinition | null };
   /** The generic invoke-lane runner that runs the resolved agent (issue #55/#72). */
   agentRunner?: () => Pick<AgentRunner, "run">;
+  /**
+   * The chilltext tone-rewrite call the agent lane's `POST:` contract routes through (W4A tune,
+   * `dispatchAgentLane`). Injected so a test can exercise the REAL production wiring — the
+   * `POST:` extraction, `composeXPostBrowserTask`, and the fail-open/280-char enforcement around
+   * this call — without a live network hit. Default binds the real client (`src/chilltext.ts`)
+   * to the real global `fetch`, exactly as prod runs it.
+   */
+  chillTransform?: (cfg: ChilltextConfig, req: ChillTransformInput) => Promise<ChillTransformResult | null>;
   /**
    * Fire-time fallback origin for a routine that names no channel/requester. The daemon binds
    * this to env (BECKETT_ROUTINE_CHANNEL_ID / DISCORD_OWNER_ID) so no id is baked into a
@@ -518,11 +534,25 @@ export const createRoutinesExtension =
       if (outcome.state !== "done" || !outcome.output.trim()) {
         throw new Error(`agent ${agentId} did not author a post: ${outcome.error ?? outcome.state}`);
       }
+      // The social-media agent's OUTPUT CONTRACT (src/agent/builtins.ts) is `POST: <text>` —
+      // it authors ONLY the post text; CODE builds the actual browser task from it below, routed
+      // through chilltext's tone pass first (W4A tune). An agent that hasn't adopted the
+      // contract (no `POST:` line) falls back to the legacy shape: its whole output IS the task.
+      const postText = extractPostText(outcome.output);
+      const doChillTransform = deps.chillTransform ?? chillTransform;
+      const browserTask = postText
+        ? await composeXPostBrowserTask(postText, X_SOCIAL_ACCOUNT, ctx.config.social.chill, {
+            // The social lane reuses the SAME `[concierge.chilltext]` endpoint config the
+            // concierge gate uses (url/timeout/system); whether the pass runs at all is
+            // `[social].chill`, checked by composeXPostBrowserTask, not `chilltext.enabled`.
+            chillTransform: (req) => doChillTransform(ctx.config.concierge.chilltext, req),
+          })
+        : outcome.output.trim();
       // Credential injection (from the jingle entry NAMED by credsEntry), the X verification
       // pause/resume, and the confirmation back to the origin channel are all the browser agent's
       // job (issue #50) — including the one-line "posted, here's the URL" report a qualifying
       // watch fire promises: it rides the SAME onOutcome relay every other browser-lane post does.
-      await deps.browserAgent().run(outcome.output.trim(), {
+      await deps.browserAgent().run(browserTask, {
         channelId: origin.channelId,
         requesterId: origin.requesterId,
         credsEntry: origin.credsEntry ?? null,

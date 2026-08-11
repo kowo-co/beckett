@@ -56,7 +56,7 @@ test("fires exactly once per period (idempotent) and delegates dispatch off-proc
     "proactive-sweep",
   ]);
   const shitpost = calls.find((c) => c.routineId === "daily-x-shitpost")!;
-  expect(shitpost.credsEntry).toBe("x.com");
+  expect(shitpost.credsEntry).toBe("x-account");
   const dream = calls.find((c) => c.routineId === "nightly-dream")!;
   expect(dream.lane).toBe("self");
   expect(dream.dream).toBe(true);
@@ -180,7 +180,7 @@ test("fireNow dry-run returns the plan WITHOUT dispatching (no live post)", asyn
   expect(plan.lane).toBe("agent");
   expect(plan.agentId).toBe("social-media");
   expect(plan.browserTask).toBeNull();
-  expect(plan.credsEntry).toBe("x.com");
+  expect(plan.credsEntry).toBe("x-account");
   expect(calls.length).toBe(0); // dry-run never dispatches
 });
 

@@ -12,16 +12,28 @@
  * restores the chosen fire time verbatim (no re-roll, no double-fire).
  *
  * Built-ins are seeded on load unless the user removed them (`removedBuiltins`).
+ *
+ * Boot-time healing: a routine written to disk before the jingle vault entry was renamed may
+ * still carry the DEAD `credsEntry: "x.com"` (ctx-social.md — the vault has no such entry, only
+ * `x-account`). `migrateCredsEntry` rewrites any occurrence in place on the next load, once,
+ * logged, so prod's `routines.json` heals itself with no manual surgery. Idempotent: a routine
+ * already on `x-account` (or any other entry) is untouched, so a repeat boot is a no-op.
  */
 
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
-import { builtinRoutineDefs, type BuiltinRoutineOverrides } from "./builtins.ts";
+import { builtinRoutineDefs, X_CREDS_ENTRY, type BuiltinRoutineOverrides } from "./builtins.ts";
 import { RoutineRegistrySchema, type Routine, type RoutineRegistry } from "./types.ts";
+import { log } from "../log.ts";
+import type { Logger } from "../types.ts";
 
 const LOCK_STALE_MS = 30_000;
 const LOCK_ATTEMPTS = 200;
+
+/** The jingle entry a routine's `credsEntry` was WRONGLY seeded with before the fix — the vault
+ *  has never had an entry by this name. Anything still carrying it is healed on the next load. */
+const DEAD_X_CREDS_ENTRY = "x.com";
 
 export interface RoutineStoreOptions {
   now?: () => Date;
@@ -36,6 +48,8 @@ export interface RoutineStoreOptions {
    * truth once a routine exists.
    */
   builtins?: BuiltinRoutineOverrides;
+  /** Injectable for tests; defaults to `log.child("routine.store")`. */
+  logger?: Logger;
 }
 
 const EMPTY: RoutineRegistry = { version: 1, routines: [], removedBuiltins: [] };
@@ -48,6 +62,7 @@ export class RoutineStore {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly seedBuiltins: boolean;
   private readonly builtinOverrides: BuiltinRoutineOverrides;
+  private readonly logger: Logger;
 
   constructor(path: string, opts: RoutineStoreOptions = {}) {
     this.path = path;
@@ -57,6 +72,7 @@ export class RoutineStore {
     this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.seedBuiltins = opts.seedBuiltins ?? true;
     this.builtinOverrides = opts.builtins ?? {};
+    this.logger = opts.logger ?? log.child("routine.store");
   }
 
   /** All routines (seeding built-ins if needed), sorted by id for stable output. */
@@ -168,6 +184,29 @@ export class RoutineStore {
     }
   }
 
+  /**
+   * Heal any routine still carrying the dead `credsEntry: "x.com"` (see the class doc). Runs on
+   * every load, before seeding, so it fixes routines that predate the fix regardless of whether
+   * they're built-in or user-added. Returns true if anything changed (the write-back trigger).
+   */
+  private migrateCredsEntry(reg: RoutineRegistry): boolean {
+    let changed = false;
+    for (const routine of reg.routines) {
+      const action = routine.action;
+      if ("credsEntry" in action && action.credsEntry === DEAD_X_CREDS_ENTRY) {
+        action.credsEntry = X_CREDS_ENTRY;
+        routine.updatedAt = this.now().toISOString();
+        changed = true;
+        this.logger.info("healed dead routine credsEntry", {
+          routineId: routine.id,
+          from: DEAD_X_CREDS_ENTRY,
+          to: X_CREDS_ENTRY,
+        });
+      }
+    }
+    return changed;
+  }
+
   /** Seed any built-in not present and not in the removed list. Returns true if it changed. */
   private seed(reg: RoutineRegistry): boolean {
     if (!this.seedBuiltins) return false;
@@ -191,10 +230,11 @@ export class RoutineStore {
     await this.acquireLock();
     try {
       const reg = this.read();
+      const migrated = this.migrateCredsEntry(reg);
       const seeded = this.seed(reg);
       const before = JSON.stringify(reg);
       const result = change(reg);
-      if (seeded || JSON.stringify(reg) !== before) this.write(reg);
+      if (migrated || seeded || JSON.stringify(reg) !== before) this.write(reg);
       return result;
     } finally {
       rmSync(this.lockPath, { recursive: true, force: true });

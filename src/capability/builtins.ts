@@ -568,9 +568,11 @@ export const configFragments = {
         .min(0)
         .default(0)
         .transform((ms) => Math.min(ms, DIRECTED_SETTLE_MAX_MS)),
-      // chilltext (v7 architecture doc): restyles every human-facing reply through a friend's
-      // homelab rewrite API, fail-open on any error/timeout. OFF by default — a fork opts in;
-      // prod's config.toml flips this true.
+      // chilltext (v7 architecture doc): restyles every human-facing Concierge message through a
+      // friend's homelab rewrite API before it posts, fail-open on any error/timeout. OFF by
+      // default — a fork's config must opt in (prod flips it true). W3A owns this fragment; other
+      // callers (the social-media chill pass — [social] below) reuse this url/timeout rather than
+      // each carrying their own copy.
       chilltext: z
         .object({
           enabled: z.boolean().default(false),
@@ -713,6 +715,17 @@ export const configFragments = {
     })
     .strict()
     .default({}),
+  // The social-media agent's chill pass (W4A tune): route its composed X posts through
+  // chilltext's tone rewrite before they reach the browser lane. Reuses
+  // `concierge.chilltext`'s url/timeout rather than duplicating them.
+  social: z
+    .object({
+      // false uses the agent's draft as-is. chilltext already fails open on any error/timeout,
+      // so this is purely a taste toggle, not a reliability one.
+      chill: z.boolean().default(true),
+    })
+    .strict()
+    .default({}),
 } satisfies { [K in keyof Config]: z.ZodType<Config[K], z.ZodTypeDef, unknown> };
 
 // =======================================================================================
@@ -746,6 +759,7 @@ const BUILTIN_CAPABILITY_INFO: {
   dream: { id: "dream", summary: "Nightly dream pass: token ceiling + model for the self-lane day replay." },
   progress: { id: "progress", summary: "Zero-token per-ticket progress cards: code-edited Discord status messages." },
   free_time: { id: "free-time", summary: "Weekly self-directed session: trigger, walls, token ceiling, share channel." },
+  social: { id: "social", summary: "Social-media agent's chilltext chill-pass toggle." },
 };
 
 /**
