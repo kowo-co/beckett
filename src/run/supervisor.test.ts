@@ -1113,6 +1113,21 @@ describe("the live activity blurb", () => {
     expect(blurbs().map((e) => e.message)).toEqual(["editing a.ts", "editing d.ts"]);
   });
 
+  test("a line that derives NOTHING does not spend the first-refresh allowance", async () => {
+    // Every real worker opens with `session_started`, whose `▸ … worker started` line the rules
+    // have nothing to say about. If that consumed the run's one never-waits refresh, the FIRST
+    // real tool call of every run would sit behind the 15s floor — the exact moment the feature
+    // exists for.
+    let now = 1_000_000;
+    const { onProgress, blurbs } = await liveWorker({ now: () => now });
+    const ctx = { stage: "implement", workerId: "wk_1" };
+    onProgress({ kind: "session_started", model: "claude" } as never, ctx);
+    now += 2_000;
+    onProgress(toolCall("Edit", { file_path: "/ws/web/public/index.html" }), ctx);
+    await tick();
+    expect(blurbs().map((e) => e.message)).toEqual(["editing index.html"]);
+  });
+
   test("an unchanged phrase is not republished every cycle", async () => {
     let now = 1_000_000;
     const { onProgress, blurbs } = await liveWorker({ now: () => now });
@@ -1198,6 +1213,29 @@ describe("the live activity blurb", () => {
     bad.onProgress(toolCall("Bash", { command: "bun test" }), { stage: "implement", workerId: "wk_1" });
     await settle();
     expect(bad.blurbs().map((e) => e.message)).toEqual(["running tests"]);
+  });
+
+  test("a polish that lands after its worker is gone never decorates the next stage's card", async () => {
+    const config = cfg({
+      runs: { max_live: 3, review_cycles_max: 2, budget_usd_per_run: 0, activity: { provider: "cerebras" } },
+    });
+    let release!: (phrase: string | null) => void;
+    const inFlight = new Promise<string | null>((resolve) => {
+      release = resolve;
+    });
+    const { onProgress, blurbs } = await liveWorker({ config, summarizeActivity: () => inFlight });
+    onProgress(toolCall("Edit", { file_path: "/ws/index.html" }), { stage: "implement", workerId: "wk_1" });
+    await tick();
+    expect(blurbs().map((e) => e.message)).toEqual(["editing index.html"]);
+
+    // The implement worker finishes while the model is still thinking. Its phrase describes a
+    // stage that is over by the time it arrives, so it must be dropped rather than stamped onto
+    // the card the run has moved on to.
+    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    await settle();
+    release("polishing the hero styles");
+    await settle();
+    expect(blurbs().map((e) => e.message)).toEqual(["editing index.html"]);
   });
 
   test("a tool call the journal drops produces no blurb, and neither does a non-worker stage", async () => {

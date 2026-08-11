@@ -186,6 +186,23 @@ describe("deriveActivity — the Bash rules", () => {
     expect(deriveActivity([bash('git commit -m "screenshot pass"')])).toBe("git commit");
   });
 
+  test.each([
+    ["git commit -m 'fix flaky npm test on ci'", "git commit"],
+    ['git commit -am "make bun test pass"', "git commit"],
+    ["git commit -m 'stop running tsc twice'", "git commit"],
+    ["git commit -m 'pin the bun install lockfile'", "git commit"],
+    ["git log --oneline --grep='pytest'", "git log"],
+  ])("what a command IS beats what it MENTIONS: %s → %s", (command, expected) => {
+    expect(deriveActivity([bash(command)])).toBe(expected);
+  });
+
+  test("a quoted mention of a build tool never speaks for a command that isn't one", () => {
+    // The whole-command rules read the command with its quoted spans blanked, so a message, a
+    // pattern or a here-doc delimiter cannot masquerade as the verb.
+    expect(deriveActivity([bash("echo 'bun test' >> notes.txt")])).toBe("running echo");
+    expect(deriveActivity([bash('rg "npm install" docs/setup.md')])).toBe("searching setup.md");
+  });
+
   test("a truncated `cd` prefix says nothing rather than 'running cd'", () => {
     const buried = `cd /home/beckett/Projects/beckett/.beckett/worktrees/${"run-".repeat(20)} && bun test`;
     const lines = [toolLine("Edit", { file_path: "/repo/src/log.ts" }), bash(buried)];

@@ -123,8 +123,8 @@ function phraseForToolCall(rest: string): string | null {
 //
 // Workers spend most of their tool calls in Bash, so "running bash" would make the blurb useless
 // on exactly the runs it exists for. Each rule below names a recognizable ACTIVITY; the order is
-// deliberate (a `git commit -m "screenshot"` is a commit, not a screenshot) and the fallback is
-// the command's own name.
+// deliberate — what the command IS is matched (against its head) before what it MENTIONS, so a
+// `git commit -m "screenshot the hero"` is a commit — and the fallback is the command's own name.
 
 /** `bun x tsc --noEmit`, `npx tsc`, bare `tsc` — but never a mere mention of `.tsc.log`. */
 const TSC_RE = /(?:^|[\s;&|(])(?:bun\s+x\s+|bunx\s+|npx\s+)?tsc(?=\s|$)/;
@@ -148,12 +148,17 @@ function phraseForBash(hint: string): string | null {
   // hint. "running cd" is a lie about what is happening; say nothing and let the previous line's
   // phrase stand.
   if (/^cd(?=\s|$)/.test(head)) return null;
-  if (TSC_RE.test(cmd)) return "typechecking";
-  if (TEST_RE.test(cmd)) return "running tests";
-  if (INSTALL_RE.test(cmd)) return "installing deps";
+  // What the command IS beats what it MENTIONS: `git commit -m 'fix flaky npm test'` is a commit.
+  // The head-match runs before every whole-command rule, and the whole-command rules read the
+  // command with its quoted spans blanked so a message, a pattern or a here-doc delimiter can
+  // never be mistaken for the verb.
   const git = /^git\s+([a-z][\w-]*)/.exec(head);
   if (git) return `git ${git[1]}`;
-  if (SCREENSHOT_RE.test(cmd)) return "taking screenshots";
+  const bare = unquoted(cmd);
+  if (TSC_RE.test(bare)) return "typechecking";
+  if (TEST_RE.test(bare)) return "running tests";
+  if (INSTALL_RE.test(bare)) return "installing deps";
+  if (SCREENSHOT_RE.test(bare)) return "taking screenshots";
   if (/^(?:grep|rg|ag)(?=\s|$)/.test(head)) return `searching ${grepTarget(head)}`;
   if (INLINE_SCRIPT_RE.test(head)) {
     const target = SCRIPT_TARGET_RE.exec(cmd)?.[1] ?? FILENAME_RE.exec(cmd)?.[0];
@@ -191,6 +196,17 @@ function grepTarget(cmd: string): string {
     if (name && name !== ".") return name;
   }
   return "files";
+}
+
+/**
+ * The command with every BALANCED quoted span blanked out, so the whole-command rules see only
+ * shell words the shell would execute. `git commit -m 'make bun test pass'` is a commit, not a
+ * test run. Unterminated quotes (the journal truncates hints mid-string) are left alone — there is
+ * no way to know where they would have closed — which is the other reason the `git` head-match
+ * runs first.
+ */
+function unquoted(cmd: string): string {
+  return cmd.replace(/'[^']*'|"[^"]*"/g, " ");
 }
 
 /** Shell-ish word split that keeps a quoted argument (a grep pattern, a sed script) in one piece. */

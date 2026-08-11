@@ -1619,10 +1619,14 @@ export class RunSupervisor {
       this.activityThrottles.set(runId, throttle);
       const throttleMs = clampThrottleSecs(activity?.throttle_secs) * 1000;
       if (!shouldRefreshActivity(throttle, this.now(), throttleMs)) return;
-      throttle.lastRefreshAt = this.now();
 
       const phrase = deriveActivity(lines);
-      if (phrase) this.publishActivity(runId, phrase);
+      // A line the rules have nothing to say about (every run opens with `▸ … worker started`)
+      // must not SPEND the refresh — least of all the first-refresh-never-waits allowance, which
+      // exists precisely so the run's first real tool call reaches the card immediately.
+      if (!phrase) return;
+      throttle.lastRefreshAt = this.now();
+      this.publishActivity(runId, phrase);
       // The polish only ever RE-writes a phrase that is already on the card, so a slow or broken
       // model costs the run nothing but a phrase that is merely accurate instead of pretty.
       const provider = activity?.provider ?? "off";
@@ -1647,7 +1651,11 @@ export class RunSupervisor {
           provider,
           logger: this.logger.child("run.activity"),
         });
-        if (phrase) this.publishActivity(runId, phrase);
+        // Seconds passed while the model thought, and the worker whose lines these are may have
+        // finished in them — `forgetActivity` drops the window on every worker exit, so a throttle
+        // that is no longer the run's CURRENT one means this phrase describes a stage that is over.
+        // Publishing it then would stamp an implement-era blurb onto a post-implement card.
+        if (phrase && this.activityThrottles.get(runId) === throttle) this.publishActivity(runId, phrase);
       } catch (err) {
         this.logger.debug("activity blurb polish failed", { run: runId, error: String(err) });
       } finally {
