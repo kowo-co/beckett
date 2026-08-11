@@ -1137,7 +1137,7 @@ export async function runTask(argv: string[]): Promise<void> {
     out(formatDispatchTrace(readDispatchEvents(tracePath, id), id));
   }
 
-  fail("usage: beckett task create|branch|start|deploy|ask|steer|show|list|trace <...>");
+  fail("usage: beckett task create|branch|start|deploy|ask|steer|cancel|show|list|trace <...>");
 }
 
 // ── preset (in-process: inspect the user-defined cast presets in ~/.beckett/presets.json) ──
