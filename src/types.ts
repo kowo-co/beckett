@@ -910,6 +910,18 @@ export interface Config {
      * dispatch event bus. Default ON.
      */
     cards: boolean;
+    /**
+     * The live activity blurb on a run card (`src/run/activity.ts`): what the worker is doing
+     * right now, refreshed off its journal while the run is live.
+     */
+    activity: {
+      /** Off entirely → cards render exactly as they did before blurbs existed. Default ON. */
+      enabled: boolean;
+      /** OPTIONAL micro-model polish; `off` (the default) keeps the derived phrase, free. */
+      provider: "cerebras" | "claude" | "off";
+      /** Floor between blurb refreshes for one run, seconds (clamped to ≥5). Default 15. */
+      throttle_secs: number;
+    };
   };
   /** OPS-124 — GitHub PR poller. The credential lives in env; active only when one is set. */
   github: {

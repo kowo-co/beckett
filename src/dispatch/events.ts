@@ -84,10 +84,36 @@ export class DispatchEventBus {
   }
 
   emit(input: DispatchEventInput): DispatchEvent {
+    const event = this.build(input);
+    // This is intentionally before the live sink. If this throws, callers see a real durability
+    // failure rather than falsely claiming an observable transition happened.
+    if (this.options.path) {
+      mkdirSync(dirname(this.options.path), { recursive: true, mode: 0o700 });
+      appendFileSync(this.options.path, `${JSON.stringify(event)}\n`, { mode: 0o600 });
+    }
+    this.notify(event);
+    return event;
+  }
+
+  /**
+   * A live-ONLY row: notify the sink, append nothing. For repaints of a live surface that carry no
+   * transition — the run engine's activity blurb (`../run/activity.ts`) repaints a progress card
+   * every ~20s, and a forensic ledger whose whole point is that nothing rewrites it must not fill
+   * up with a hundred "still editing index.html" rows per run.
+   *
+   * Everything a person or a tool reconstructs a run from still goes through {@link emit}.
+   */
+  emitEphemeral(input: DispatchEventInput): DispatchEvent {
+    const event = this.build(input);
+    this.notify(event);
+    return event;
+  }
+
+  private build(input: DispatchEventInput): DispatchEvent {
     const now = this.now();
     const started = this.startedAt.get(input.runId) ?? now;
     this.startedAt.set(input.runId, started);
-    const event: DispatchEvent = {
+    return {
       ts: new Date(now).toISOString(),
       runId: input.runId,
       runRef: input.runRef,
@@ -99,19 +125,14 @@ export class DispatchEventBus {
       ...(input.message ? { message: input.message } : {}),
       ...(input.error ? { error: input.error } : {}),
     };
-    // This is intentionally before the live sink. If this throws, callers see a real durability
-    // failure rather than falsely claiming an observable transition happened.
-    if (this.options.path) {
-      mkdirSync(dirname(this.options.path), { recursive: true, mode: 0o700 });
-      appendFileSync(this.options.path, `${JSON.stringify(event)}\n`, { mode: 0o600 });
-    }
-    if (this.options.liveSink) {
-      queueMicrotask(() => {
-        // Start with a resolved promise so a synchronously throwing sink is also contained.
-        Promise.resolve().then(() => this.options.liveSink!(event)).catch((error) => this.options.onSinkError?.(error));
-      });
-    }
-    return event;
+  }
+
+  private notify(event: DispatchEvent): void {
+    if (!this.options.liveSink) return;
+    queueMicrotask(() => {
+      // Start with a resolved promise so a synchronously throwing sink is also contained.
+      Promise.resolve().then(() => this.options.liveSink!(event)).catch((error) => this.options.onSinkError?.(error));
+    });
   }
 
   private loadStarts(): void {

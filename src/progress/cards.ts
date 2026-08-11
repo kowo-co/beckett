@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname } from "node:path";
 import { DiscordUnknownMessageError, type DiscordGateway } from "../discord/gateway.ts";
 import type { DispatchEvent } from "../dispatch/events.ts";
+import { ACTIVITY_STAGE } from "../run/activity.ts";
 import { log as rootLog } from "../log.ts";
 import type { Logger } from "../types.ts";
 
@@ -28,7 +29,26 @@ export interface ProgressCardState {
   alert: boolean;
   terminal: boolean;
   startedAt: number;
+  /**
+   * The live activity blurb (`../run/activity.ts`): what the worker is doing RIGHT NOW, folded in
+   * from the supervisor's ephemeral `activity` events. It REPLACES the phase word while it is
+   * fresh. Absent on every card that never got one — which renders byte-for-byte the card that
+   * shipped before blurbs existed.
+   */
+  activity?: string;
+  /** Epoch ms the blurb was stamped. Past {@link ACTIVITY_FRESH_MS} the card stops showing it. */
+  activityAt?: number;
 }
+
+/**
+ * How long a blurb stays believable. A worker that goes quiet (a long build, a wedged tool) must
+ * not leave "editing index.html" on the card for the rest of the run — past this the card renders
+ * exactly as it would with no blurb at all, phase word and all.
+ */
+export const ACTIVITY_FRESH_MS = 120_000;
+
+/** Hard cap on a rendered blurb, matching `../run/activity.ts`'s own sanitizer. */
+const MAX_ACTIVITY_CHARS = 48;
 
 const STAGE_GERUND: Record<string, string> = {
   implement: "implementing",
@@ -58,12 +78,32 @@ export function reduceProgressCard(
   event: DispatchEvent,
   nowMs: number,
 ): ProgressCardState | null {
+  const parsed = Date.parse(event.ts);
+  const stampedAt = Number.isFinite(parsed) ? parsed : nowMs;
+
+  // A blurb DECORATES a card; it never creates one, never resurrects a terminal one, and never
+  // moves the phase. No prior card means the run hasn't had a real transition yet — there is
+  // nothing to decorate, and posting "editing index.html" on its own would be nonsense.
+  if (event.stage === ACTIVITY_STAGE) {
+    if (!prev || prev.terminal) return null;
+    const phrase = clip(event.message, MAX_ACTIVITY_CHARS);
+    if (!phrase) return null;
+    return { ...prev, activity: phrase, activityAt: stampedAt };
+  }
+
   const verdict = verdictFor(event);
   if (!verdict) return null;
-  const parsed = Date.parse(event.ts);
+  // Carry the blurb across events that don't change the phase (a checklist tick, a retry note) so
+  // the card doesn't flicker; a phase CHANGE invalidates it — "editing index.html" is a lie once
+  // the run has moved from implementing to review.
+  const carried =
+    prev?.activity !== undefined && !verdict.terminal && verdict.phase === prev.phase
+      ? { activity: prev.activity, activityAt: prev.activityAt }
+      : {};
   return {
     ref: event.runRef || prev?.ref || event.runId,
-    startedAt: prev?.startedAt ?? (Number.isFinite(parsed) ? parsed : nowMs),
+    startedAt: prev?.startedAt ?? stampedAt,
+    ...carried,
     ...verdict,
   };
 }
@@ -177,7 +217,11 @@ export interface CardChecklist {
  */
 export function renderProgressCard(state: ProgressCardState, nowMs: number, checklist?: CardChecklist | null): string {
   const marker = markerFor(state);
-  let text = `${marker} **${state.ref}** · ${state.phase} · ${elapsedWord(nowMs - state.startedAt)}`;
+  // The blurb REPLACES the phase word rather than riding beside it: "implementing" is a phase, not
+  // news, and a card only has one glanceable slot. When there is no fresh blurb the phase word is
+  // back, unchanged, so a run with no activity signal reads exactly as it always has.
+  const phase = activityBlurb(state, nowMs) || state.phase;
+  let text = `${marker} **${state.ref}** · ${phase} · ${elapsedWord(nowMs - state.startedAt)}`;
   if (checklist) {
     text += ` — ${checklist.done}/${checklist.total} checked`;
     if (state.detail) text += ` · ${state.detail}`;
@@ -185,6 +229,23 @@ export function renderProgressCard(state: ProgressCardState, nowMs: number, chec
     text += `\n— ${state.detail}`;
   }
   return text.length > MAX_CARD_CHARS ? `${text.slice(0, MAX_CARD_CHARS - 1)}…` : text;
+}
+
+/**
+ * The blurb to render, or "" for none — in which case the phase word stands. Three cards never
+ * show one: a TERMINAL card ("shipped — editing index.html" is a lie about a finished run), an
+ * ALERTING card (a stall or a failure is the headline, and the blurb would bury it), and a STALE
+ * one (dropped rather than left to rot, so the card degrades back to today's render instead of
+ * freezing mid-thought).
+ */
+function activityBlurb(state: ProgressCardState, nowMs: number): string {
+  if (state.terminal || state.alert) return "";
+  const phrase = state.activity?.trim();
+  if (!phrase) return "";
+  const at = state.activityAt;
+  if (typeof at !== "number" || !Number.isFinite(at)) return "";
+  if (nowMs - at > ACTIVITY_FRESH_MS) return "";
+  return phrase;
 }
 
 function markerFor(state: ProgressCardState): string {

@@ -258,6 +258,109 @@ describe("renderProgressCard", () => {
   });
 });
 
+describe("the live activity blurb (src/run/activity.ts)", () => {
+  const base: ProgressCardState = {
+    ref: "run-1",
+    phase: "implementing",
+    detail: "",
+    alert: false,
+    terminal: false,
+    startedAt: STARTED,
+  };
+
+  test("a fresh blurb REPLACES the phase word", () => {
+    // 17 minutes into the run, with a blurb stamped 5 seconds ago.
+    const now = STARTED + 1_020_000;
+    const state = { ...base, activity: "editing index.html", activityAt: now - 5_000 };
+    expect(renderProgressCard(state, now, { done: 2, total: 6 })).toBe(
+      "\u25b8 **run-1** \u00b7 editing index.html \u00b7 17m \u2014 2/6 checked",
+    );
+    expect(renderProgressCard(state, now, { done: 2, total: 6 })).not.toContain("implementing");
+  });
+
+  test("an absent blurb renders byte-for-byte the card that shipped without this feature", () => {
+    expect(renderProgressCard(base, STARTED + 300_000)).toBe("\u25b8 **run-1** \u00b7 implementing \u00b7 5m");
+  });
+
+  test("a stale blurb (>120s) renders exactly as no blurb at all", () => {
+    const stale = { ...base, activity: "editing index.html", activityAt: STARTED };
+    expect(renderProgressCard(stale, STARTED + 120_001)).toBe(renderProgressCard(base, STARTED + 120_001));
+    // The boundary itself is still fresh.
+    expect(renderProgressCard(stale, STARTED + 120_000)).toContain("\u00b7 editing index.html \u00b7");
+  });
+
+  test("a blurb with no timestamp is not trusted", () => {
+    expect(renderProgressCard({ ...base, activity: "editing index.html" }, STARTED)).toBe(
+      renderProgressCard(base, STARTED),
+    );
+  });
+
+  test.each([
+    ["shipped", { phase: "shipped", detail: "https://github.com/o/r/pull/7", terminal: true }],
+    ["done", { phase: "done", detail: "", terminal: true }],
+    ["cancelled", { phase: "cancelled", detail: "", terminal: true }],
+    ["parked", { phase: "parked for a human", detail: "budget", alert: true, terminal: true }],
+    ["stalled", { phase: "stalled", detail: "no output for 20m", alert: true, terminal: false }],
+  ])("a terminal or alerting card (%s) NEVER shows a blurb", (_name, patch) => {
+    const plain = { ...base, ...patch };
+    const withBlurb = { ...plain, activity: "editing index.html", activityAt: STARTED };
+    expect(renderProgressCard(withBlurb, STARTED + 1_000)).toBe(renderProgressCard(plain, STARTED + 1_000));
+  });
+
+  test("an activity event decorates the card without moving the phase", () => {
+    const prev = reduceProgressCard(null, ev("implement", "started", "worker wk_1 on claude"), 0)!;
+    const next = reduceProgressCard(prev, ev("activity", "info", "editing the hero styles"), 0)!;
+    expect(next.phase).toBe("implementing");
+    expect(next.detail).toBe(prev.detail);
+    expect(next.terminal).toBe(false);
+    expect(next.activity).toBe("editing the hero styles");
+    expect(next.activityAt).toBe(STARTED);
+  });
+
+  test("an activity event with no card to decorate is ignored", () => {
+    expect(reduceProgressCard(null, ev("activity", "info", "editing the hero styles"), 0)).toBeNull();
+  });
+
+  test("an activity event never resurrects a terminal card", () => {
+    const shipped = reduceProgressCard(null, ev("done", "passed", "https://github.com/o/r/pull/7"), 0)!;
+    expect(reduceProgressCard(shipped, ev("activity", "info", "editing index.html"), 0)).toBeNull();
+  });
+
+  test("an empty or over-long phrase changes nothing", () => {
+    const prev = reduceProgressCard(null, ev("implement", "started"), 0)!;
+    expect(reduceProgressCard(prev, ev("activity", "info", ""), 0)).toBeNull();
+    const long = reduceProgressCard(prev, ev("activity", "info", "x".repeat(200)), 0)!;
+    expect(long.activity!.length).toBeLessThanOrEqual(48);
+  });
+
+  test("the blurb survives same-phase events and dies on a phase change", () => {
+    const started = reduceProgressCard(null, ev("implement", "started", "worker wk_1 on claude"), 0)!;
+    const blurbed = reduceProgressCard(started, ev("activity", "info", "running tests"), 0)!;
+    const samePhase = reduceProgressCard(blurbed, ev("implement", "started", "worker wk_2 on claude"), 0)!;
+    expect(samePhase.activity).toBe("running tests");
+    const moved = reduceProgressCard(blurbed, ev("review", "started", "worker wk_2 on claude"), 0)!;
+    expect(moved.activity).toBeUndefined();
+    expect(moved.phase).toBe("in review");
+    expect(renderProgressCard(moved, STARTED)).toContain("in review");
+  });
+
+  test("the service edits the card in place for an activity refresh", async () => {
+    const h = harness();
+    try {
+      await h.service.observe(ev("implement", "started", "worker wk_1 on claude"));
+      h.advance(30_000);
+      await h.service.observe(ev("activity", "info", "editing the hero styles"));
+      expect(h.g.posts).toHaveLength(1);
+      expect(h.g.posts[0]!.content).toContain("implementing");
+      expect(h.g.edits).toHaveLength(1);
+      expect(h.g.edits[0]!.content).toContain("\u00b7 editing the hero styles \u00b7");
+      expect(h.g.edits[0]!.content).not.toContain("implementing");
+    } finally {
+      h.cleanup();
+    }
+  });
+});
+
 describe("ProgressCardService", () => {
   test("posts once, then throttles later edits into one trailing update", async () => {
     const h = harness();

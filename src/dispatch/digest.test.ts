@@ -51,6 +51,12 @@ describe("describeDispatchEvent", () => {
     }
   });
 
+  test("the run card's activity blurb is card decoration, not digest news", () => {
+    // It repaints every few seconds while a worker runs; relaying it would post a Discord
+    // sentence per tool burst.
+    expect(describeDispatchEvent(ev("activity", "info", { message: "editing index.html" }))).toBeNull();
+  });
+
   test("a worker killed by a restart reads as a restart, with no error text or alarm", () => {
     // The real 04:56Z sample: a killed worker whose "error" was its own opening narration.
     const note = describeDispatchEvent(

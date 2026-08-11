@@ -42,6 +42,18 @@ import type { Config, Harness, Logger, WorkerEvent } from "../types.ts";
 import type { HarnessSpec } from "./cast.ts";
 import type { WorkItem } from "./work-item.ts";
 import type { ProgressSink } from "../progress/journal.ts";
+import { formatEvent } from "../progress/journal.ts";
+import {
+  ACTIVITY_CONTEXT_LINES,
+  ACTIVITY_STAGE,
+  clampThrottleSecs,
+  deriveActivity,
+  newActivityThrottle,
+  shouldRefreshActivity,
+  summarizeActivity as summarizeActivityDefault,
+  type ActivityThrottleState,
+  type SummarizeActivityOptions,
+} from "./activity.ts";
 import { log } from "../log.ts";
 import { projectSlug } from "./cast.ts";
 import { sweepLedgeredWorker } from "../drivers/proc.ts";
@@ -148,6 +160,15 @@ export interface RunSupervisorDeps {
   onPublished?: (info: { url: string; kind: "pushed" | "pr"; prUrl?: string; run: Run }) => unknown;
   /** Test seam for the orphan sweep; default ps-verifies + kills. */
   sweepOrphan?: (pid: number, expectedBin: string) => boolean;
+  /**
+   * The OPTIONAL model polish for the activity blurb (`./activity.ts`'s
+   * {@link summarizeActivity}). Injected so tests never spawn a CLI or touch the network;
+   * production leaves it unset, and `[runs.activity] provider = "off"` (the default) means it is
+   * never called at all.
+   */
+  summarizeActivity?: (journalLines: string[], opts: SummarizeActivityOptions) => Promise<string | null>;
+  /** Clock seam for the blurb throttle (tests). Defaults to `Date.now`. */
+  now?: () => number;
   logger?: Logger;
 }
 
@@ -273,6 +294,20 @@ export class RunSupervisor {
   private readonly unstaffedSince = new Map<string, number>();
   private readonly watchdogRestaffed = new Set<string>();
   private readonly budgetBlocked = new Set<string>();
+  /**
+   * The live activity blurb's whole state, per run: the tail of journal lines the worker produced,
+   * its refresh throttle, and the phrase last put on the card. EPHEMERAL on purpose — a blurb is
+   * decoration on a durable timeline, so none of this is written to runs.json or survives a
+   * restart, and a restarted daemon simply derives a fresh phrase from the next tool call.
+   */
+  private readonly activityLines = new Map<string, string[]>();
+  private readonly activityThrottles = new Map<string, ActivityThrottleState>();
+  private readonly activityPublished = new Map<string, { phrase: string; at: number }>();
+  private readonly summarizeActivity: (
+    journalLines: string[],
+    opts: SummarizeActivityOptions,
+  ) => Promise<string | null>;
+  private readonly now: () => number;
   private recoveredWorkers: Record<string, LedgeredRunWorker> | null = null;
 
   private watchdogTimer?: ReturnType<typeof setInterval>;
@@ -310,6 +345,8 @@ export class RunSupervisor {
     this.bus = deps.bus;
     this.sweepOrphan =
       deps.sweepOrphan ?? ((pid, expectedBin) => sweepLedgeredWorker(pid, expectedBin, this.logger));
+    this.summarizeActivity = deps.summarizeActivity ?? summarizeActivityDefault;
+    this.now = deps.now ?? Date.now;
     this.events =
       deps.dispatchEvents ??
       new DispatchEventBus({
@@ -689,8 +726,10 @@ export class RunSupervisor {
         // The spec gate is an IMPLEMENT-stage contract: a reviewer authors no checklist and must
         // never be blocked by the implementer's.
         ...(stage === "implement" ? { extraHooks: [specGateSpec(specGatePath, workspace)] } : {}),
-        onProgress: (ev: WorkerEvent, ctx: { stage: string; workerId: string }) =>
-          this.progress?.event(current.id, ev, ctx),
+        onProgress: (ev: WorkerEvent, ctx: { stage: string; workerId: string }) => {
+          this.progress?.event(current.id, ev, ctx);
+          this.noteActivity(current.id, ev, ctx);
+        },
         logger: this.logger,
       });
     } catch (err) {
@@ -828,6 +867,8 @@ export class RunSupervisor {
     this.finishing.add(runId);
     if (this.workers.get(runId) === handle) this.workers.delete(runId);
     if (this.liveLedger.delete(runId)) this.persistRuntimeState();
+    // The blurb described THIS worker's tool calls; the next stage starts from a clean slate.
+    this.forgetActivity(runId);
 
     // Steering the driver buffered but never applied — carry it into the next stage's brief.
     for (const note of handle.result?.unappliedNudges ?? []) this.bufferSteer(runId, note);
@@ -1145,6 +1186,7 @@ export class RunSupervisor {
     let persist = this.pendingSteers.delete(runId);
     persist = this.liveLedger.delete(runId) || persist;
     if (persist) this.persistRuntimeState();
+    this.forgetActivity(runId);
 
     const handle = this.workers.get(runId);
     if (handle) {
@@ -1532,6 +1574,126 @@ export class RunSupervisor {
     } catch (err) {
       this.logger.warn("spend ledger append failed", { run: run.id, stage, error: String(err) });
     }
+  }
+
+  // ── the live activity blurb (./activity.ts) ───────────────────────────────────────────
+  //
+  // "▸ **run-…** · editing index.html · 17m". The supervisor is the only place that sees a
+  // worker's event firehose AND owns the card's event bus, so this lane lives here. Three
+  // properties are load-bearing, in order:
+  //
+  //   1. It cannot disturb the run. The whole deterministic path is synchronous and pure —
+  //      a regex over a dozen strings — and every entry point is try/catch-wrapped.
+  //   2. It cannot cost anything. No model, no fs, no network on this path; the OPTIONAL polish
+  //      is off by default, capped at one in-flight call per run, and never awaited.
+  //   3. It cannot pollute anything durable. Journal lines are mirrored into a bounded in-memory
+  //      ring (never re-read off disk), and the refresh is published with `emitEphemeral`, which
+  //      notifies the card sink without appending to `dispatch.jsonl`.
+
+  /** Republish an UNCHANGED phrase no more often than this — enough to keep the card fresh. */
+  private static readonly ACTIVITY_REPUBLISH_MS = 60_000;
+
+  /**
+   * Mirror one worker event into the run's blurb window, then maybe refresh. Called alongside the
+   * journal sink with the SAME event and the SAME formatter, so what the blurb is derived from is
+   * exactly what `beckett journal <run>` shows — no second format to drift.
+   */
+  private noteActivity(runId: string, ev: WorkerEvent, ctx: { stage: string; workerId: string }): void {
+    try {
+      const activity = this.config.runs?.activity;
+      if (activity?.enabled === false) return;
+      // Only a live worker stage has a "doing right now" to report.
+      if (ctx.stage !== "implement" && ctx.stage !== "review") return;
+      const run = this.store.get(runId);
+      if (!run || RUN_TERMINAL.has(run.state)) return;
+
+      const line = formatEvent(ev, ctx);
+      if (line === null) return; // noise the journal drops too
+      const lines = this.activityLines.get(runId) ?? [];
+      lines.push(`${new Date(this.now()).toISOString()} ${line}`);
+      // Bounded: only the tail is ever read, and nothing else reads this at all.
+      if (lines.length > ACTIVITY_CONTEXT_LINES) lines.splice(0, lines.length - ACTIVITY_CONTEXT_LINES);
+      this.activityLines.set(runId, lines);
+
+      const throttle = this.activityThrottles.get(runId) ?? newActivityThrottle();
+      this.activityThrottles.set(runId, throttle);
+      const throttleMs = clampThrottleSecs(activity?.throttle_secs) * 1000;
+      if (!shouldRefreshActivity(throttle, this.now(), throttleMs)) return;
+
+      const phrase = deriveActivity(lines);
+      // A line the rules have nothing to say about (every run opens with `▸ … worker started`)
+      // must not SPEND the refresh — least of all the first-refresh-never-waits allowance, which
+      // exists precisely so the run's first real tool call reaches the card immediately.
+      if (!phrase) return;
+      throttle.lastRefreshAt = this.now();
+      this.publishActivity(runId, phrase);
+      // The polish only ever RE-writes a phrase that is already on the card, so a slow or broken
+      // model costs the run nothing but a phrase that is merely accurate instead of pretty.
+      const provider = activity?.provider ?? "off";
+      if (provider !== "off" && !throttle.polishInFlight) this.polishActivity(runId, throttle, [...lines], provider);
+    } catch (err) {
+      // A status decoration may never reach the worker's event handler.
+      this.logger.debug("activity blurb bookkeeping failed", { run: runId, error: String(err) });
+    }
+  }
+
+  /** Fire-and-forget the flag-gated model polish (`[runs.activity] provider`). Never rejects. */
+  private polishActivity(
+    runId: string,
+    throttle: ActivityThrottleState,
+    lines: string[],
+    provider: "cerebras" | "claude",
+  ): void {
+    throttle.polishInFlight = true;
+    void (async () => {
+      try {
+        const phrase = await this.summarizeActivity(lines, {
+          provider,
+          logger: this.logger.child("run.activity"),
+        });
+        // Seconds passed while the model thought, and the worker whose lines these are may have
+        // finished in them — `forgetActivity` drops the window on every worker exit, so a throttle
+        // that is no longer the run's CURRENT one means this phrase describes a stage that is over.
+        // Publishing it then would stamp an implement-era blurb onto a post-implement card.
+        if (phrase && this.activityThrottles.get(runId) === throttle) this.publishActivity(runId, phrase);
+      } catch (err) {
+        this.logger.debug("activity blurb polish failed", { run: runId, error: String(err) });
+      } finally {
+        throttle.polishInFlight = false;
+      }
+    })();
+  }
+
+  /**
+   * Stamp the phrase onto the run's card. Goes out as an EPHEMERAL dispatch row — the same event
+   * shape the card renderer already folds in, so nothing new had to be wired into the sink — but
+   * unappended, so the forensic ledger stays a record of transitions rather than of repaints.
+   * An unchanged phrase is republished only often enough to stay inside the card's freshness
+   * window; a worker that spends ten minutes in one file does not buy forty identical edits.
+   */
+  private publishActivity(runId: string, phrase: string): void {
+    const run = this.store.get(runId);
+    if (!run || RUN_TERMINAL.has(run.state)) return; // finished mid-refresh
+    const last = this.activityPublished.get(runId);
+    const now = this.now();
+    if (last && last.phrase === phrase && now - last.at < RunSupervisor.ACTIVITY_REPUBLISH_MS) return;
+    this.activityPublished.set(runId, { phrase, at: now });
+    this.events.emitEphemeral({
+      runId: run.id,
+      runRef: run.id,
+      branchRef: run.branch,
+      ...(run.channelId ? { channel: run.channelId } : {}),
+      stage: ACTIVITY_STAGE,
+      outcome: "info",
+      message: phrase,
+    });
+  }
+
+  /** Drop a run's blurb window — its worker is gone, so its tool calls describe nothing live. */
+  private forgetActivity(runId: string): void {
+    this.activityLines.delete(runId);
+    this.activityThrottles.delete(runId);
+    this.activityPublished.delete(runId);
   }
 
   /**
