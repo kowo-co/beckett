@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DiscordUnknownMessageError, type DiscordGateway } from "../discord/gateway.ts";
 import type { DispatchEvent, DispatchOutcome } from "../dispatch/events.ts";
-import { createProgressCardService, reduceProgressCard, renderProgressCard, type ProgressCardState } from "./cards.ts";
+import {
+  createProgressCardService,
+  reduceProgressCard,
+  renderProgressCard,
+  shouldObserveRunCard,
+  type ProgressCardState,
+} from "./cards.ts";
 
 const TS = "2026-08-04T21:34:00.000Z";
 const STARTED = Date.parse(TS);
@@ -12,8 +18,8 @@ const STARTED = Date.parse(TS);
 function ev(stage: string, outcome: DispatchOutcome, message?: string, error?: string): DispatchEvent {
   return {
     ts: TS,
-    ticketId: "ticket-1",
-    ticketRef: "#2.1",
+    runId: "ticket-1",
+    runRef: "#2.1",
     branchRef: "beckett/task-2-1",
     stage,
     outcome,
@@ -71,7 +77,13 @@ function manualScheduler() {
   };
 }
 
-function harness(overrides: { channel?: string | null; channelThrows?: Error } = {}) {
+function harness(
+  overrides: {
+    channel?: string | null;
+    channelThrows?: Error;
+    specReader?: (runId: string) => { done: number; total: number } | null;
+  } = {},
+) {
   const dir = mkdtempSync(join(tmpdir(), "beckett-cards-"));
   const statePath = join(dir, "progress-cards.json");
   const g = fakeGateway();
@@ -85,6 +97,7 @@ function harness(overrides: { channel?: string | null; channelThrows?: Error } =
         if (overrides.channelThrows) throw overrides.channelThrows;
         return overrides.channel === undefined ? "chan-1" : overrides.channel;
       },
+      ...(overrides.specReader ? { specReader: overrides.specReader } : {}),
       logger: quiet,
       now: () => clock,
       schedule: timers.schedule,
@@ -166,6 +179,27 @@ describe("reduceProgressCard", () => {
     expect(second.startedAt).toBe(first.startedAt);
     expect(second.startedAt).toBe(STARTED);
   });
+
+  test("a run.deploy admission reads as queued — the deploy receipt's first card", () => {
+    const state = reduceProgressCard(null, ev("run:deploy", "started", "queued"), 0)!;
+    expect(state.phase).toBe("queued");
+    expect(state.terminal).toBe(false);
+    expect(state.alert).toBe(false);
+  });
+
+  test("a run reaching bare `done` (run/supervisor.ts's own vocabulary) reads as shipped", () => {
+    const state = reduceProgressCard(null, ev("done", "passed", "https://github.com/o/r/pull/7"), 0)!;
+    expect(state.phase).toBe("shipped");
+    expect(state.terminal).toBe(true);
+    expect(state.alert).toBe(false);
+    expect(state.detail).toBe("https://github.com/o/r/pull/7");
+  });
+
+  test("a bare `done` event with no message still ships, with no detail", () => {
+    const state = reduceProgressCard(null, ev("done", "passed"), 0)!;
+    expect(state.phase).toBe("shipped");
+    expect(state.detail).toBe("");
+  });
 });
 
 describe("renderProgressCard", () => {
@@ -195,6 +229,32 @@ describe("renderProgressCard", () => {
     const text = renderProgressCard(state, STARTED);
     expect(text.length).toBeLessThanOrEqual(1900);
     expect(text).toContain("…");
+  });
+
+  test("a run card with a checklist folds progress and detail onto one line", () => {
+    const withDetail = { ...base, phase: "implementing", detail: "worker wk_1 on claude" };
+    expect(renderProgressCard(withDetail, STARTED + 720_000, { done: 3, total: 7 })).toBe(
+      "▸ **#2.1** · implementing · 12m — 3/7 checked · worker wk_1 on claude",
+    );
+  });
+
+  test("a run card with a checklist but no detail stops after the count", () => {
+    expect(renderProgressCard(base, STARTED + 720_000, { done: 3, total: 7 })).toBe(
+      "▸ **#2.1** · implementing · 12m — 3/7 checked",
+    );
+  });
+
+  test("no specReader hit (null/undefined checklist) renders exactly as before run cards existed", () => {
+    const withDetail = { ...base, phase: "stalled", detail: "worker silent", alert: true };
+    expect(renderProgressCard(withDetail, STARTED, null)).toBe(renderProgressCard(withDetail, STARTED));
+  });
+
+  test("a shipped run card reads as a checkmark with the PR/push URL as its detail", () => {
+    const state = reduceProgressCard(null, ev("done", "passed", "https://github.com/o/r/pull/7"), 0)!;
+    const text = renderProgressCard(state, STARTED);
+    expect(text).toContain("✓");
+    expect(text).toContain("shipped");
+    expect(text).toContain("\n— https://github.com/o/r/pull/7");
   });
 });
 
@@ -334,4 +394,103 @@ describe("ProgressCardService", () => {
       h.cleanup();
     }
   });
+
+  // ── v7 run cards: the deploy receipt ────────────────────────────────────────────────────
+  function runEv(stage: string, outcome: DispatchOutcome, message?: string): DispatchEvent {
+    return {
+      ts: TS,
+      runId: "run-20260810-oauth",
+      runRef: "run-20260810-oauth",
+      branchRef: "beckett/run-oauth",
+      stage,
+      outcome,
+      elapsedMs: 0,
+      ...(message ? { message } : {}),
+    };
+  }
+
+  test("run.deploy admission posts the deploy receipt immediately — no floor, no anchor yet", async () => {
+    const h = harness();
+    try {
+      await h.service.observe(runEv("run:deploy", "started", "queued"));
+      expect(h.g.posts).toHaveLength(1);
+      expect(h.g.posts[0]!.content).toContain("queued");
+      expect(h.g.posts[0]!.content).toContain("run-20260810-oauth");
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  test("the deploy-instant card reads 0/0 even with no specReader wired and no spec.md yet", async () => {
+    // Before a worktree (and so a spec.md) exists, specReader has nothing to read — the deploy
+    // receipt still promises "queued · 0/0" per the architecture doc, so this one event
+    // synthesizes the placeholder rather than dropping the checklist segment.
+    const h = harness();
+    try {
+      await h.service.observe(runEv("run:deploy", "started", "queued"));
+      expect(h.g.posts[0]!.content).toContain("0/0 checked");
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  test("once a real specReader is wired, its result wins over the deploy-instant placeholder", async () => {
+    const h = harness({ specReader: (id) => (id === "run-20260810-oauth" ? { done: 1, total: 4 } : null) });
+    try {
+      await h.service.observe(runEv("run:deploy", "started", "queued"));
+      expect(h.g.posts[0]!.content).toContain("1/4 checked");
+      expect(h.g.posts[0]!.content).not.toContain("0/0");
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  test("a wired specReader folds the run's live checklist progress into the card", async () => {
+    const h = harness({ specReader: (id) => (id === "run-20260810-oauth" ? { done: 3, total: 7 } : null) });
+    try {
+      await h.service.observe(runEv("implement", "started", "worker wk_1 on claude"));
+      expect(h.g.posts[0]!.content).toContain("3/7 checked");
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  test("no specReader wired (the pre-run-cards default) renders with no checklist segment", async () => {
+    const h = harness();
+    try {
+      await h.service.observe(runEv("implement", "started", "worker wk_1 on claude"));
+      expect(h.g.posts[0]!.content).not.toContain("checked");
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  test("a run reaching done renders terminal — shipped, checkmark, and the shipped URL", async () => {
+    const h = harness();
+    try {
+      await h.service.observe(runEv("implement", "started"));
+      h.advance(1_000);
+      await h.service.observe(runEv("done", "passed", "https://github.com/o/gateway/pull/7"));
+      expect(h.g.edits).toHaveLength(1);
+      expect(h.g.edits[0]!.content).toContain("✓");
+      expect(h.g.edits[0]!.content).toContain("shipped");
+      expect(h.g.edits[0]!.content).toContain("https://github.com/o/gateway/pull/7");
+      expect(h.readState().cards).toEqual({}); // terminal — the anchor is dropped like any other
+    } finally {
+      h.cleanup();
+    }
+  });
+});
+
+describe("boot sink gating (src/shell/main.ts's dispatchLiveSink wiring)", () => {
+  // The sink must check the flag before forwarding, independent of whether the service itself
+  // exists. A regression that drops the flag check (reverting to a bare service-truthy
+  // null-check) fails here.
+  test("shouldObserveRunCard requires both the service and runs.cards — flag off skips observe()", () => {
+    expect(shouldObserveRunCard({}, true)).toBe(true);
+    expect(shouldObserveRunCard({}, false)).toBe(false); // runs.cards=false: the spec's "flag off" case
+    expect(shouldObserveRunCard(null, true)).toBe(false);
+    expect(shouldObserveRunCard(null, false)).toBe(false);
+  });
+
 });

@@ -45,7 +45,7 @@ interface Post {
  * A Concierge whose fake session, mid-turn, calls `beckett discord ack` (the bus path) before
  * returning its terminal turn text — the exact shape of a slow question that acks then answers.
  */
-function harness(opts: { ackText?: string; turnText: string }) {
+function harness(opts: { ackText?: string; turnText: string; config?: Config }) {
   const dir = mkdtempSync(join(tmpdir(), "beckett-early-ack-"));
   tmpDirs.push(dir);
   process.env.BECKETT_DIR = dir;
@@ -80,8 +80,28 @@ function harness(opts: { ackText?: string; turnText: string }) {
     },
   } as unknown as ConciergeSession;
 
-  concierge = new Concierge({ config, session, gateway });
+  concierge = new Concierge({ config: opts.config ?? config, session, gateway });
   return { concierge, posts };
+}
+
+/** A `config.concierge.chilltext` slice, `enabled` set per test (issue W3A — chilltext gate). */
+function chillConfig(enabled: boolean): Config {
+  return {
+    concierge: {
+      model: "m",
+      rotate_at_tokens: 190_000,
+      chilltext: {
+        enabled,
+        url: "https://chilltext.example",
+        timeout_ms: 8_000,
+        max_bubbles: 3,
+        bubble_delay_ms: 0,
+        system: "",
+        skip_code_blocks: true,
+      },
+    },
+    paths: {},
+  } as unknown as Config;
 }
 
 function mention(): IncomingMessage {
@@ -114,6 +134,44 @@ test("a cross-channel / off-turn ack posts plainly (no native reply-bar)", async
   expect(res.ok).toBe(true);
   expect(posts).toHaveLength(1);
   expect(posts[0]).toEqual({ channelId: CHAN, text: "quick heads up", replyTo: undefined, singleMessage: true });
+});
+
+test("chilltext enabled: an early ack is rewritten through the API before it posts, still one message", async () => {
+  const realFetch = globalThis.fetch;
+  let fetchCalled = false;
+  globalThis.fetch = (async () => {
+    fetchCalled = true;
+    return new Response(JSON.stringify({ messages: ["digging in now"] }), { status: 200 });
+  }) as unknown as typeof fetch;
+  try {
+    const { concierge, posts } = harness({ turnText: "", config: chillConfig(true) });
+    const res = await concierge.onBusRequest({
+      cmd: "discord.ack",
+      args: { channelId: CHAN, text: "on it — digging through the repo now" },
+    });
+    expect(res.ok).toBe(true);
+    expect(fetchCalled).toBe(true);
+    expect(posts).toEqual([{ channelId: CHAN, text: "digging in now", replyTo: undefined, singleMessage: true }]);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("chilltext explicitly disabled: an early ack posts the original text untouched, no fetch", async () => {
+  const realFetch = globalThis.fetch;
+  let fetchCalled = false;
+  globalThis.fetch = (async () => {
+    fetchCalled = true;
+    return new Response("{}", { status: 200 });
+  }) as unknown as typeof fetch;
+  try {
+    const { concierge, posts } = harness({ turnText: "", config: chillConfig(false) });
+    await concierge.onBusRequest({ cmd: "discord.ack", args: { channelId: CHAN, text: "quick heads up" } });
+    expect(fetchCalled).toBe(false);
+    expect(posts).toEqual([{ channelId: CHAN, text: "quick heads up", replyTo: undefined, singleMessage: true }]);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 test("an over-long ack is truncated to one short line — never a second answer channel", async () => {

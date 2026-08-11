@@ -19,6 +19,10 @@ path — the one declared tick in the design is the trigger evaluator's, and it 
 initiative. A Job's id (`j7`, `j7.1`) *is* the git branch, the worktree, the session name, the
 Discord card, and the ref a human types.
 
+> **v7 (2026-08):** the running system is no longer the v0 described below — the ticket tracker,
+> poller and dispatcher have been removed in favour of runs. This set remains the design target;
+> read it against the repo README for what actually ships today.
+
 ## Read in this order
 
 | Doc | What it settles |
@@ -47,6 +51,7 @@ these docs are written from. Where a doc and [`orchestration.md`](orchestration.
 
 ## Status
 
-Design, not yet built. The running system is still v0 (see the repo README); `migration.md`
+Design, not yet built. The running system is v7 — ticketless runs, no tracker, no poller (see the
+repo README); `migration.md`
 defines the order in which this set becomes the live one. Preview-feature bets are labeled
 in-place in every doc, each with its GA fallback.

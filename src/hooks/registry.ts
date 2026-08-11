@@ -12,7 +12,7 @@
 
 /** A single hook entry: one event, one optional tool matcher, one shell command. */
 export interface HookSpec {
-  event: "PreToolUse" | "PostToolUse" | "UserPromptSubmit";
+  event: "PreToolUse" | "PostToolUse" | "UserPromptSubmit" | "Stop";
   /** Tool name pattern (passed as `matcher` to claude). Omit to match all tools. */
   matcher?: string;
   command: string;
@@ -21,14 +21,25 @@ export interface HookSpec {
 /** The claude settings shape written to `<workspace>/.claude/settings.json`. */
 export interface ClaudeHookSettings {
   hooks: Record<string, { matcher?: string; hooks: { type: "command"; command: string }[] }[]>;
+  /** Top-level keys merged in from `extraSettings` (e.g. `crossSessionInbound`). */
+  [key: string]: unknown;
 }
 
 /**
  * Render a list of {@link HookSpec}s into the claude settings object. Specs sharing the
  * same event + matcher are collapsed into one entry (claude de-dupes by matcher, but being
  * explicit avoids surprises). Order within an event is preserved.
+ *
+ * `extraSettings` (optional) is merged in at the TOP LEVEL alongside `hooks` — e.g.
+ * `{"crossSessionInbound": "accept"}` so an unattended `-p` worker/session can take cross-session
+ * messages (Claude Code ≥2.1.224) instead of holding or dropping them. It must not carry a
+ * `hooks` key of its own — the rendered hook table always wins, so a `hooks` key in
+ * `extraSettings` is dropped rather than silently clobbering the real one.
  */
-export function renderClaudeSettings(specs: HookSpec[]): ClaudeHookSettings {
+export function renderClaudeSettings(
+  specs: HookSpec[],
+  extraSettings?: Record<string, unknown>,
+): ClaudeHookSettings {
   const byEvent = new Map<string, { matcher?: string; hooks: { type: "command"; command: string }[] }[]>();
 
   for (const spec of specs) {
@@ -48,5 +59,21 @@ export function renderClaudeSettings(specs: HookSpec[]): ClaudeHookSettings {
     }
   }
 
-  return { hooks: Object.fromEntries(byEvent) };
+  // extraSettings first so the real `hooks` key (added last) always wins over a same-named key.
+  const { hooks: _ignoredHooksKey, ...safeExtra } = extraSettings ?? {};
+  return { ...safeExtra, hooks: Object.fromEntries(byEvent) };
+}
+
+/**
+ * Return the {@link HookSpec} that registers the spec.md Stop-gate (`../hooks/spec-gate.ts`,
+ * v7 run architecture) for a worker. Bakes the workspace root into the command args so the hook
+ * is self-contained (no env dependency), mirroring `scopeGuardSpec` in scope-guard.ts. No
+ * `matcher` — Stop hooks are not tool-scoped.
+ *
+ * NOT wired into any spawn path yet — implement-stage workers don't get this hook until it is
+ * added to the settings a worker is spawned with.
+ */
+export function specGateSpec(specGateScriptPath: string, workspace: string): HookSpec {
+  const command = `bun ${JSON.stringify(specGateScriptPath)} --root ${JSON.stringify(workspace)}`;
+  return { event: "Stop", command };
 }

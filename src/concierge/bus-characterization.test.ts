@@ -98,18 +98,10 @@ test("bus: task.created rejects a missing/invalid taskNumber", async () => {
   expect(await run("task.created", { taskRef: "#abc" })).toMatchSnapshot();
 });
 
-test("bus: ticket.filed needs identifier and channelId; tracks when both given", async () => {
-  expect(await run("ticket.filed", {})).toMatchSnapshot();
-  expect(await run("ticket.filed", { identifier: "OPS-1" })).toMatchSnapshot();
-  expect(await run("ticket.filed", { identifier: "OPS-1", channelId: "123" })).toMatchSnapshot();
-});
-
-test("bus: ticket.restaff without a wired dispatcher is refused", async () => {
-  expect(await run("ticket.restaff", { id: "OPS-1" })).toMatchSnapshot();
-});
-
-test("bus: ticket.courier without a wired dispatcher is refused", async () => {
-  expect(await run("ticket.courier", { id: "OPS-1" })).toMatchSnapshot();
+test("bus: the retired ticket verbs are gone, not silently accepted", async () => {
+  for (const verb of ["ticket.filed", "ticket.restaff", "ticket.courier"]) {
+    expect(await run(verb, { id: "OPS-1" })).toMatchSnapshot();
+  }
 });
 
 test("bus: pr.watch validates repo/number/url and no-ops without a wired poller (#31)", async () => {

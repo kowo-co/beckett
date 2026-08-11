@@ -18,6 +18,10 @@ initiative. The whole repo is ~12.2k lines, down
 from ~125k (≈75k code + 50k test). The full mechanics live in
 [orchestration.md](orchestration.md); this doc is the shape and the map.
 
+> **v7 (2026-08) status:** the running system no longer has tickets. `bored`, the poller and the
+> dispatcher are gone; work is a **Run** (`beckett task deploy`) executed by the RunSupervisor.
+> Where this doc maps "ticket" into a Job, read that as history, not as something still live.
+
 ## The eight concepts
 
 Everything durable is built from exactly these. Nothing else has a name; when a source or an old

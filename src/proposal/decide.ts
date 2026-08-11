@@ -15,7 +15,7 @@
  *     its reason — rejection is signal, not deletion, the same logic as the open-loop ledger
  *     keeping what it dropped.
  *
- * {@link ACCEPT_ROUTE} is the containment in one table: every kind maps to `"ticket"` or
+ * {@link ACCEPT_ROUTE} is the containment in one table: every kind maps to `"run"` or
  * `"task"`, and there is no third destination to map to. Both destinations are injected as
  * function seams the caller supplies (the CLI supplies the real tracker client and task store),
  * so this module holds no filesystem handle other than the proposal record it stamps. It
@@ -37,22 +37,24 @@ import {
  * error until it is given a destination here, and the only destinations that exist are the two
  * normal front doors. Nothing maps to "apply".
  */
-export const ACCEPT_ROUTE: Record<ProposalKind, "ticket" | "task"> = {
-  "doctrine-change": "ticket",
-  "persona-change": "ticket",
+export const ACCEPT_ROUTE: Record<ProposalKind, "run" | "task"> = {
+  "doctrine-change": "run",
+  "persona-change": "run",
   "memory-correction": "task",
+  // The kind name is frozen history: proposals raised before the ticket rip-out are on disk with
+  // `kind: "ticket"`, and renaming it would strand them. It routes to a task branch either way.
   ticket: "task",
 };
 
 /** The sentinel room for a signal that came from the dream lane rather than a Discord channel. */
 export const DREAM_CALIBRATION_CHANNEL = "dream";
 
-/** File a normal tracker ticket — the `beckett ticket create` road. */
-export type TicketFiler = (input: {
+/** Deploy a run — the `beckett task deploy` road. */
+export type RunDeployer = (input: {
   title: string;
   body: string;
   criteria: string[];
-}) => Promise<{ identifier: string; id?: string | null; url?: string | null }>;
+}) => Promise<{ runId: string; url?: string | null }>;
 
 /** Allocate a real task branch — the `beckett task create` road. */
 export type TaskBrancher = (input: {
@@ -74,7 +76,7 @@ export interface DecideDeps {
 }
 
 export interface AcceptDeps extends DecideDeps {
-  fileTicket: TicketFiler;
+  deployRun: RunDeployer;
   createTaskBranch: TaskBrancher;
 }
 
@@ -85,8 +87,8 @@ export interface RejectDeps extends DecideDeps {
 export interface AcceptResult {
   proposal: Proposal;
   /** Which front door it went through. */
-  route: "ticket" | "task";
-  /** What it became, in the same string stamped onto the record (`ticket:OPS-42`, `task:#12.1`). */
+  route: "run" | "task";
+  /** What it became, stamped onto the record (`run:run-20260810-x`, `task:#12.1`). */
   became: string;
   url: string | null;
 }
@@ -104,17 +106,17 @@ export async function acceptProposal(deps: AcceptDeps, id: string): Promise<Acce
 
   let became: string;
   let url: string | null = null;
-  if (route === "ticket") {
-    // A doctrine/persona change becomes a REVIEWABLE ticket. This is the whole design: the
-    // change to my core is written, reviewed, and merged by the pipeline, never by this call.
-    const ticket = await deps.fileTicket({
+  if (route === "run") {
+    // A doctrine/persona change becomes a REVIEWABLE run. This is the whole design: the change to
+    // my core is written, reviewed, and merged by the pipeline, never by this call.
+    const run = await deps.deployRun({
       title: `${proposal.kind}: ${proposal.claim}`,
       body,
       criteria: [proposal.claim],
     });
-    if (!ticket?.identifier?.trim()) throw new Error(`proposal: filing a ticket for '${id}' returned no identifier`);
-    became = `ticket:${ticket.identifier.trim()}`;
-    url = ticket.url?.trim() || null;
+    if (!run?.runId?.trim()) throw new Error(`proposal: deploying a run for '${id}' returned no run id`);
+    became = `run:${run.runId.trim()}`;
+    url = run.url?.trim() || null;
   } else {
     const branch = await deps.createTaskBranch({ title: proposal.claim, body });
     if (!branch?.branchRef?.trim()) throw new Error(`proposal: starting a task branch for '${id}' returned no ref`);

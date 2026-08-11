@@ -54,6 +54,8 @@ function harness(opts: {
   cliText?: string;
   dir?: string;
   ownerId?: string;
+  /** Override the shared module-level config (issue W3A — chilltext gate on/off coverage). */
+  config?: Config;
   currentMeta?: {
     channelId: string;
     messageId: string;
@@ -140,7 +142,7 @@ function harness(opts: {
     },
   } as unknown as ConciergeSession;
 
-  concierge = new Concierge({ config, session, gateway });
+  concierge = new Concierge({ config: opts.config ?? config, session, gateway });
   return { concierge, posts, asks, deletedMessages, dir, postAttempts: () => postAttempts };
 }
 
@@ -183,6 +185,58 @@ test("answers via CLI → exactly one post, native reply, no auto-post duplicate
 
 test("answers normally (no CLI) → the turn text is auto-posted once as a native reply", async () => {
   const { concierge, posts } = harness({ replyViaCli: false, turnText: "just the turn text" });
+  await concierge.onMessage(mention());
+  expect(posts).toHaveLength(1);
+  expect(posts[0]).toEqual({ channelId: CHAN, text: "just the turn text", replyTo: MSG, files: undefined });
+});
+
+/** A `config.concierge.chilltext` slice, `enabled` set per test. */
+function chillConfig(overrides: Partial<{ enabled: boolean; bubble_delay_ms: number }> = {}): Config {
+  return {
+    concierge: {
+      model: "m",
+      rotate_at_tokens: 190_000,
+      chilltext: {
+        enabled: false,
+        url: "https://chilltext.example",
+        timeout_ms: 8_000,
+        max_bubbles: 3,
+        bubble_delay_ms: 0,
+        system: "",
+        skip_code_blocks: true,
+        ...overrides,
+      },
+    },
+    paths: {},
+  } as unknown as Config;
+}
+
+test("chilltext enabled: the auto-posted reply is chilled into bubbles — first is the native reply, the rest post plainly, all singleMessage", async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ messages: ["hey", "found it", "check foo.ts"] }), { status: 200 })) as unknown as typeof fetch;
+  try {
+    const { concierge, posts } = harness({
+      replyViaCli: false,
+      turnText: "found it: X lives in foo.ts, wired up exactly the way you described in the mention",
+      config: chillConfig({ enabled: true }),
+    });
+    await concierge.onMessage(mention());
+    expect(posts).toHaveLength(3);
+    expect(posts[0]).toMatchObject({ channelId: CHAN, text: "hey", replyTo: MSG, singleMessage: true });
+    expect(posts[1]).toMatchObject({ channelId: CHAN, text: "found it", replyTo: undefined, singleMessage: true });
+    expect(posts[2]).toMatchObject({ channelId: CHAN, text: "check foo.ts", replyTo: undefined, singleMessage: true });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("chilltext explicitly disabled: the auto-post stays one plain native reply, same as the flag-off default", async () => {
+  const { concierge, posts } = harness({
+    replyViaCli: false,
+    turnText: "just the turn text",
+    config: chillConfig({ enabled: false }),
+  });
   await concierge.onMessage(mention());
   expect(posts).toHaveLength(1);
   expect(posts[0]).toEqual({ channelId: CHAN, text: "just the turn text", replyTo: MSG, files: undefined });

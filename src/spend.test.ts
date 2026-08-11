@@ -146,3 +146,20 @@ test("a free-time row rolls up as its own stage and one honest line on the weekl
   expect(bill).toContain("**free-time** — — · 2 run(s) · 2 run(s) w/o cost data");
   expect(bill).toContain("$2.00"); // the unpriced sessions do not pretend to be $0 in the total
 });
+
+test("a pre-v7 spend.jsonl of tracker-keyed rows still sums, alongside run-keyed rows", () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-spend-legacy-")); dirs.push(dir);
+  const path = join(dir, "spend.jsonl");
+  // Exactly what a live box's ledger looks like across the rip-out: OPS-* rows written by the
+  // ticket dispatcher, then run-* rows written by the supervisor. The reader is id-agnostic, so
+  // both must read back and sum without a migration.
+  appendSpendRecord(path, row({ ticketId: "OPS-1", costUsd: 1.25 }));
+  appendSpendRecord(path, row({ ticketId: "OPS-1", stage: "review", costUsd: 0.75 }));
+  appendSpendRecord(path, row({ ticketId: "run-20260810-oauth", costUsd: 2 }));
+
+  const rows = readSpendLedger(path);
+  expect(rows).toHaveLength(3);
+  expect(spendForTicket(rows, "OPS-1")).toBe(2);
+  expect(spendForTicket(rows, "run-20260810-oauth")).toBe(2);
+  expect(summarizeSpendByTicket(rows).map((t) => t.ticketId).sort()).toEqual(["OPS-1", "run-20260810-oauth"]);
+});

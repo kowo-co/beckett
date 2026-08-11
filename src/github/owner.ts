@@ -41,7 +41,7 @@ export function resolveGitHubOwner(
 }
 
 /** The one project slug that targets Beckett's OWN source repo — kept in sync with `src/cli/core.ts`. */
-function selfProjectSlug(env: GitHubEnv): string {
+export function selfProjectSlug(env: GitHubEnv = process.env): string {
   return (env.BECKETT_SELF_PROJECT?.trim() || "beckett").toLowerCase();
 }
 

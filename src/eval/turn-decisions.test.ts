@@ -106,8 +106,11 @@ describe("parseDecisionOutput", () => {
   test("parses bare, fenced, and prose-wrapped JSON", () => {
     const bare = parseDecisionOutput('{"decision":"pass","action":"pass_silent","message":null}');
     expect(bare?.action).toBe("pass_silent");
-    const fenced = parseDecisionOutput('```json\n{"decision":"send","action":"file_ticket","message":"on it"}\n```');
-    expect(fenced?.action).toBe("file_ticket");
+    const fenced = parseDecisionOutput('```json\n{"decision":"send","action":"deploy_run","message":"on it"}\n```');
+    expect(fenced?.action).toBe("deploy_run");
+    // A recorded run from before the ticket rip-out still parses — the label was renamed, and the
+    // history is worth more than the old spelling.
+    expect(parseDecisionOutput('{"decision":"send","action":"file_ticket","message":"on it"}')?.action).toBe("deploy_run");
     const prose = parseDecisionOutput('Sure — {"decision":"send","action":"answer_inline","message":"8080"} done');
     expect(prose?.decision).toBe("send");
   });

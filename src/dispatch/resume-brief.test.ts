@@ -1,36 +1,32 @@
 /**
  * Resume-brief construction tests (`src/dispatch/resume-brief.ts`, OPS-125).
  * The brief a restart-resumed worker is handed must re-anchor it on the four durable facts:
- * ticket, stage, review-diff base SHA, and where its accumulated context lives (transcript + the
+ * work item, stage, review-diff base SHA, and where its accumulated context lives (transcript + the
  * committed checkpoint trail). Pure function → no mocks.
  */
 import { describe, expect, test } from "bun:test";
-import type { Ticket } from "../tracker/types.ts";
+import type { WorkItem } from "../run/work-item.ts";
 import { buildResumeBrief, steeringBlock } from "./resume-brief.ts";
 
-function ticket(over: Partial<Ticket> = {}): Ticket {
+function item(over: Partial<WorkItem> = {}): WorkItem {
   return {
-    id: "tkt-1",
-    identifier: over.identifier ?? "OPS-125",
+    id: "run-20260810-blip",
+    identifier: over.identifier ?? "run-20260810-blip",
     title: over.title ?? "Blip-proof workers",
     description: "",
     body: "",
-    state: "in_progress",
-    assignees: [],
+    state: "implementing",
     casting: {},
     criteria: [],
-    blockedBy: [],
-    projectId: "proj-1",
-    url: "http://x",
     updatedAt: "now",
-  } as Ticket;
+  };
 }
 
 describe("buildResumeBrief (OPS-125)", () => {
-  test("includes ticket, stage, base SHA, and a context/transcript pointer", () => {
-    const brief = buildResumeBrief(ticket(), "review", "abc1234");
-    // ticket
-    expect(brief).toContain("[OPS-125]");
+  test("includes the work item, stage, base SHA, and a context/transcript pointer", () => {
+    const brief = buildResumeBrief(item(), "review", "abc1234");
+    // work item
+    expect(brief).toContain("[run-20260810-blip]");
     expect(brief).toContain("Blip-proof workers");
     // stage
     expect(brief).toContain("mid-**review**");
@@ -47,7 +43,7 @@ describe("buildResumeBrief (OPS-125)", () => {
   });
 
   test("falls back to `git diff HEAD` and omits the base note when no base SHA was captured", () => {
-    const brief = buildResumeBrief(ticket(), "implement", "HEAD");
+    const brief = buildResumeBrief(item(), "implement", "HEAD");
     expect(brief).toContain("git diff HEAD");
     expect(brief).not.toContain("git diff HEAD..HEAD");
     expect(brief).not.toContain("review/diff base");
@@ -55,7 +51,7 @@ describe("buildResumeBrief (OPS-125)", () => {
   });
 
   test("folds buffered steering into the brief so it reaches the resumed worker", () => {
-    const brief = buildResumeBrief(ticket(), "implement", "abc1234", [
+    const brief = buildResumeBrief(item(), "implement", "abc1234", [
       "prefer the smaller diff",
       "don't touch the outbox",
     ]);
@@ -65,7 +61,7 @@ describe("buildResumeBrief (OPS-125)", () => {
   });
 
   test("no steering → no steering block", () => {
-    expect(buildResumeBrief(ticket(), "implement", "abc1234")).not.toContain("Steering from the user");
+    expect(buildResumeBrief(item(), "implement", "abc1234")).not.toContain("Steering from the user");
     expect(steeringBlock(undefined)).toBe("");
     expect(steeringBlock([])).toBe("");
   });

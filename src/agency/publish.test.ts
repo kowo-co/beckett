@@ -420,35 +420,35 @@ test("case 1 — cloned third-party upstream: fork → push to fork → PR to up
 });
 
 test("case 1a — third-party origin we can push to (collaborator): push to origin, in-repo PR (base main)", async () => {
-  // #12/#13: origin is frgmt0/bored and 0xbeckett is a collaborator there. Publish must derive the
+  // #12/#13: origin is a third-party repo and 0xbeckett is a collaborator there. Publish must derive the
   // head repo + push target from origin (NOT 0xbeckett/<slug>), push the branch to origin, and open
   // a plain in-repo PR — no fork, head is the bare branch, base is origin's default branch.
   const { gh, calls } = cli((j) => {
-    if (j.startsWith("git remote get-url origin")) return ok("https://github.com/frgmt0/bored.git");
-    if (j.startsWith("gh repo view frgmt0/bored --json viewerPermission")) return ok("WRITE\n"); // collaborator
+    if (j.startsWith("git remote get-url origin")) return ok("https://github.com/frgmt0/upstream-tool.git");
+    if (j.startsWith("gh repo view frgmt0/upstream-tool --json viewerPermission")) return ok("WRITE\n"); // collaborator
     if (j.startsWith("git ls-files")) return ok(""); // no scaffolding to strip
     if (j.includes("--json defaultBranchRef")) return ok("main");
-    if (j.startsWith("git push https://github.com/frgmt0/bored.git")) return ok();
+    if (j.startsWith("git push https://github.com/frgmt0/upstream-tool.git")) return ok();
     if (j.startsWith("gh pr list")) return ok("[]");
-    if (j.startsWith("gh pr create")) return ok("https://github.com/frgmt0/bored/pull/3\n");
+    if (j.startsWith("gh pr create")) return ok("https://github.com/frgmt0/upstream-tool/pull/3\n");
     return undefined;
   });
-  const r = await gh.ensurePublished({ slug: "bored", sourceDir: "/src", ticket: "task-7-1" });
+  const r = await gh.ensurePublished({ slug: "upstream-tool", sourceDir: "/src", ticket: "task-7-1" });
   expect(r.kind).toBe("pr");
-  expect(r.nameWithOwner).toBe("frgmt0/bored");
+  expect(r.nameWithOwner).toBe("frgmt0/upstream-tool");
   expect(r.prUrl).toContain("/pull/3");
   // No fork was created — we pushed straight to origin.
   expect(calls.some((c) => c.startsWith("gh repo fork"))).toBe(false);
   const push = calls.find((c) => c.startsWith("git push"))!;
-  expect(push).toContain("frgmt0/bored.git");
+  expect(push).toContain("frgmt0/upstream-tool.git");
   expect(push).toContain("HEAD:refs/heads/beckett/task-7-1");
   // The branch is pushed BEFORE the PR is opened.
   const pushIdx = calls.findIndex((c) => c.startsWith("git push"));
   const prIdx = calls.findIndex((c) => c.startsWith("gh pr create"));
   expect(pushIdx).toBeLessThan(prIdx);
-  // PR is in-repo: --repo frgmt0/bored, --base main, --head is the bare branch (no `owner:` prefix).
+  // PR is in-repo: --repo frgmt0/upstream-tool, --base main, --head is the bare branch (no `owner:` prefix).
   const create = calls.find((c) => c.startsWith("gh pr create"))!;
-  expect(create).toContain("--repo frgmt0/bored");
+  expect(create).toContain("--repo frgmt0/upstream-tool");
   expect(create).toContain("--base main");
   expect(create).toContain("--head beckett/task-7-1");
   expect(create).not.toContain("0xbeckett:");

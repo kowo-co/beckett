@@ -346,10 +346,14 @@ export const createDeployExtension: ExtensionFactory = ({ logger }): Extension =
             "For visual/frontend work, use the BetterWright MCP browser tool to open your local URL and capture a screenshot; never hunt for a Chrome binary or write service units just to inspect it.",
           );
         }
-        // A frontend branch earns a review preview (#76): reviewers open the page, not the diff.
-        if (isFrontend) {
-          parts.push(previewBriefNote(slug, apex));
-        }
+        // NOT composed: the review-preview brief (#76, {@link previewBriefNote}). Its CREATE side
+        // is worker-driven (`beckett deploy <slug>-preview`) but its teardown implementor — the
+        // PreviewManager, wired through the ticket dispatcher — went with the dispatcher in the
+        // v7 rip-out and has no boot wiring on the run engine. Ordering every frontend branch to
+        // stand up a durable public host while promising "Beckett tears it down automatically"
+        // would leak a hostname, a DNS record, a tunnel ingress and an enabled `systemd --user`
+        // unit per run, forever, behind a prompt that says otherwise. Restore this line in the
+        // same change that wires `PreviewManager.teardown` into the supervisor's done/cancel path.
         return parts.join("\n");
       },
     },
@@ -421,10 +425,18 @@ export function ticketMentionsVisualWork(ticket: { title: string; body: string; 
 }
 
 /**
- * The review-preview recipe (#76) baked into a frontend worker's brief: stand the built frontend
- * up at the DETERMINISTIC `<slug>-preview` hostname (not `<slug>`), so reviewers — and Beckett —
- * find it without a round-trip, and Beckett can tear it down on land/cancel. Reuses the durable
- * deploy path above; parameterized by slug + zone apex so it names the worker's real hostname.
+ * The review-preview recipe (#76): stand the built frontend up at the DETERMINISTIC
+ * `<slug>-preview` hostname (not `<slug>`), so reviewers — and Beckett — find it without a
+ * round-trip, and Beckett can tear it down on land/cancel. Reuses the durable deploy path above;
+ * parameterized by slug + zone apex so it names the worker's real hostname.
+ *
+ * ⚠ NOT CURRENTLY IN ANY WORKER BRIEF. The teardown half of the contract this text promises
+ * ("Beckett tears it down automatically…") lived in `PreviewManager` wired through the ticket
+ * dispatcher, and has no wiring on the v7 run engine. The block is deliberately not composed into
+ * the deploy promptBlock above until that teardown is re-wired — create-without-teardown is a
+ * per-run leak of a public hostname, a DNS record, a tunnel ingress and a systemd unit. Kept
+ * (rather than deleted) because the recipe itself is correct and the re-wiring is a known
+ * follow-up; the ONLY thing missing is a caller for `PreviewManager.teardown`.
  */
 export function previewBriefNote(slug: string, apex: string = DEFAULT_APEX_DOMAIN): string {
   return (

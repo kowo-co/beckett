@@ -180,6 +180,20 @@ export class SessionPool {
     entry.session.prewarm?.();
   }
 
+  /**
+   * Mark a scope as active WITHOUT running a turn through it (W2B): a cross-session peer message
+   * (a live worker answering a status question) wakes the child and runs a turn the pool never
+   * admitted, so `lastUsedAt` would otherwise still read "idle since the last human turn" and the
+   * idle sweep could recycle a child mid-relay. Takes the scope KEY (what {@link makeSession}
+   * receives), not a channel id, and no-ops for an unknown/evicted scope — it must never create
+   * an entry, since creation spawns a child and live-cap-recycles other scopes.
+   */
+  notePeerActivity(scopeKey: string): void {
+    const entry = this.entries.get(scopeKey);
+    if (!entry) return;
+    entry.lastUsedAt = Date.now();
+  }
+
   /** Ensure a scope's session is up NOW (boot fail-fast for the dedicated system scope). */
   async warm(channelId: string): Promise<void> {
     const entry = this.entryFor(channelId);

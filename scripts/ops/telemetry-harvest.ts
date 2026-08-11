@@ -18,9 +18,9 @@ while (args.length) {
     case "--claude-dir": options.claudeDir = take(flag); break;
     case "--pi-dir": options.piDir = take(flag); break;
     case "--codex-dir": options.codexDir = take(flag); break;
-    case "--bored-state-dir": options.boredStateDir = take(flag); break;
+    case "--run-events": options.runEventsPath = take(flag); break;
     case "--help":
-      console.log("Usage: bun run telemetry:refresh [--output PATH] [--claude-dir PATH] [--pi-dir PATH] [--codex-dir PATH] [--bored-state-dir PATH] [--rates PATH]");
+      console.log("Usage: bun run telemetry:refresh [--output PATH] [--claude-dir PATH] [--pi-dir PATH] [--codex-dir PATH] [--run-events PATH] [--rates PATH]");
       process.exit(0);
     default: throw new Error(`unknown option: ${flag}`);
   }

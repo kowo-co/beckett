@@ -1,5 +1,5 @@
 [Unit]
-Description=Beckett v4 — multiplayer ticket-queue on bored (channel-scoped shared context; Opus concierge + poller + dispatcher)
+Description=Beckett — multiplayer run engine (channel-scoped shared context; Opus concierge + run supervisor)
 After=network-online.target
 Wants=network-online.target
 # Crash-loop alerting (issue #30): 30 starts inside 10 minutes means something is wrong at boot —

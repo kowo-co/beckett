@@ -40,8 +40,12 @@ export type Harness = "claude" | "codex" | "pi" | (string & {});
 /** Which concrete driver runs a harness process (Spec 02 §2). */
 export type DriverKind = "claude-cli-stream" | "codex-exec-oneshot" | "pi-cli-stream";
 
-/** Reasoning depth; mapped per-harness at spawn (Spec 02 §9.1). */
-export type Effort = "low" | "medium" | "high" | "xhigh";
+/**
+ * Reasoning depth; mapped per-harness at spawn (Spec 02 §9.1). `ultracode` (claude 2.1.203+,
+ * `--effort ultracode`) combines xhigh reasoning with automatic workflow orchestration — only
+ * claude honors it; other drivers treat it like any other configured effort string.
+ */
+export type Effort = "low" | "medium" | "high" | "xhigh" | "ultracode";
 
 /** Worker runtime lifecycle (Spec 02 §2, §10.1). `done` is set by GATE, not the driver. */
 export type WorkerState =
@@ -893,19 +897,19 @@ export interface Config {
     github_user: string;
     gmail_address: string;
   };
-  /**
-   * Ticket-queue (bored) config. bored's loopback URL rides BECKETT_BORED_URL in env, not here.
-   * A legacy `[plane]` section in config.toml is still accepted and folded into this shape at
-   * load time (the Plane backend itself was removed in OPS-191).
-   */
-  tracker: {
-    /** Master switch for the board poller + dispatch. Default true; a board-less instance (#141) sets false. */
-    enabled: boolean;
-    poll_secs: number;
-    /** Known board names (`--board` values). bored serves one managed board per instance. */
-    boards: string[];
-    /** Board name used when a caller omits --board. */
-    default_board: string;
+  /** Runs — the execution unit driven by `src/run/supervisor.ts`. */
+  runs: {
+    /** Concurrent live runs; over-cap admissions queue FIFO. Default 3. */
+    max_live: number;
+    /** Implement↔review round-trips before the supervisor parks the run for a human. Default 2. */
+    review_cycles_max: number;
+    /** Per-run USD ceiling; 0 falls back to `[budget] per_task_usd_cap`. Default 0. */
+    budget_usd_per_run: number;
+    /**
+     * The deploy receipt: one progress card per run (`src/progress/cards.ts`), edited off the
+     * dispatch event bus. Default ON.
+     */
+    cards: boolean;
   };
   /** OPS-124 — GitHub PR poller. The credential lives in env; active only when one is set. */
   github: {
@@ -997,6 +1001,27 @@ export interface Config {
      * today's behavior byte-for-byte. Clamped to 3000 by the schema.
      */
     directed_settle_ms: number;
+    /**
+     * chilltext (v7 architecture doc): restyles every human-facing Concierge message through a
+     * friend's homelab rewrite API before it posts, fail-open on any error/timeout. OFF by
+     * default — a fork's config must opt in (prod flips it true). W3A's own gate reads this;
+     * other chill-pass callers (e.g. `[social].chill`) reuse it rather than each carrying a copy.
+     */
+    chilltext: {
+      enabled: boolean;
+      /** Base URL of the chilltext service; `${url}/chill` is POSTed. */
+      url: string;
+      /** Abort the POST after this long; a timeout is a normal fail-open, not an error log. */
+      timeout_ms: number;
+      /** Upper bound on bubbles the service may split a reply into (1–4 upstream). */
+      max_bubbles: number;
+      /** Delay between posting successive bubbles of one chilled reply (human texting cadence). */
+      bubble_delay_ms: number;
+      /** English personality request forwarded as-is; empty = the service's own default voice. */
+      system: string;
+      /** Reserved for a future per-message override; the client-side ``` bypass is unconditional. */
+      skip_code_blocks: boolean;
+    };
   };
   /**
    * Quick agents — the NO-TICKET lane: short-lived specialist `claude -p` harnesses
@@ -1089,11 +1114,6 @@ export interface Config {
      *  (Beckett's own project checkout — the loops a dream can pair are Beckett's own). */
     spike_repo: string;
   };
-  /** Zero-token progress cards: CODE posts/edits one status message per active ticket in the
-   *  ticket's origin channel, driven by dispatch events — no model turn. Default off. */
-  progress: {
-    cards_as_code: boolean;
-  };
   /**
    * Free time (docs/freetime.md): one weekly, budgeted, unprompted session in a scratch
    * directory, with structured memory writeback seeding the next one. Every number here is a
@@ -1123,6 +1143,12 @@ export interface Config {
     memories_per_session_max: number;
     /** Channel the optional one-line share posts to. Empty = the session says nothing to anyone. */
     channel_id: string;
+  };
+  /** The social-media agent's chilltext chill pass (W4A tune): reuses `concierge.chilltext`. */
+  social: {
+    /** Route composed X posts through chilltext before they reach the browser lane. Default
+     *  true; chilltext already fails open, so false is purely a taste toggle. */
+    chill: boolean;
   };
 }
 
@@ -1204,6 +1230,20 @@ export interface SpawnSpec {
   // worker runs IN the project checkout (no worktree) so we never clobber the project's own
   // .claude/settings.json — claude layers --settings on top rather than replacing it.
   settingsPath?: string;
+  /**
+   * Cross-session address (claude `--name`, ≥2.1.224): lets the concierge and other live sessions
+   * message this worker by name (ListAgents/SendMessage). Unset = the harness's auto-name (cwd
+   * folder). Omitted entirely (never passed as an empty flag) when the installed claude binary
+   * doesn't advertise `--name` support (see {@link ClaudeDriver}'s cached `--help` probe).
+   */
+  sessionName?: string;
+  /**
+   * Extra top-level keys merged into the worker's `--settings` JSON on top of the driver's own
+   * (e.g. `crossSessionInbound: "accept"`) — an escape hatch for callers (ultracode's
+   * `workflowSizeGuideline`, future run-scoped knobs). Must not contain `hooks` (see
+   * {@link renderClaudeSettings}); `writeWorkerMeta`/`renderClaudeSettings` ignore that key if present.
+   */
+  settingsExtra?: Record<string, unknown>;
 }
 
 export interface SpawnResult {

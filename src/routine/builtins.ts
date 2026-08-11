@@ -28,8 +28,10 @@
  * browser lane. One path, not two. The account/voice/how-to-post all live in the agent definition
  * ({@link ../agent/builtins.ts}); this routine only says WHEN, WHICH agent, and WHICH creds entry.
  *
- * The X credentials live in the jingle keychain under `x.com`; only the entry NAME is stored here —
- * the value is resolved by the browser lane, below the transcript. No secret is hardcoded.
+ * The X credentials live in the jingle keychain under `x-account`; only the entry NAME is stored
+ * here — the value is resolved by the browser lane, below the transcript. No secret is hardcoded.
+ * (Previously this named a dead `x.com` entry the vault never had — issue ctx-social.md; a routine
+ * still carrying the old name is healed on load by `RoutineStore`'s boot-time migration.)
  * `channelId` / `requesterId` are intentionally left to env at fire time
  * (`BECKETT_ROUTINE_CHANNEL_ID` / `DISCORD_OWNER_ID`) so no id is baked into source.
  */
@@ -39,7 +41,7 @@ import { SOCIAL_MEDIA_AGENT_ID } from "../agent/builtins.ts";
 import { MODEL_NEWS_FEED_URL } from "./model-news.ts";
 
 /** jingle keychain entry that holds the X login (username/password/TOTP). A NAME, never a secret. */
-export const X_CREDS_ENTRY = "x.com";
+export const X_CREDS_ENTRY = "x-account";
 
 /**
  * Id of the model-news event-watch routine (issue #1): polls the ai-tracker model-news feed and,

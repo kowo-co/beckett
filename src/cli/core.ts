@@ -1,7 +1,7 @@
 /**
  * Beckett — the `beckett` CLI's CORE verb handlers (`src/cli/core.ts`)
  * =======================================================================================
- * Every in-CLI verb body (status, task, ticket, access, plan, …) plus the shared helpers they
+ * Every in-CLI verb body (status, task, access, preset, …) plus the shared helpers they
  * close over (config/paths/SOCK via `./context.ts`, the bus wrappers, cast/criteria parsing).
  * The entry (`src/cli/beckett.ts`) routes the argv FIRST against a static spine (`./spine.ts`)
  * and only then `import()`s this module, so a single `beckett <verb>` pays for this graph and
@@ -16,7 +16,6 @@
 
 import { join, resolve } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
-import { resolveBoardName } from "../config.ts";
 import { callBus, ControlBusTimeoutError, indeterminateBusTimeout } from "../shell/control-bus.ts";
 import { collectFlag, fail, out, parse, quietLogger } from "./io.ts";
 import { config, paths, SOCK } from "./context.ts";
@@ -33,16 +32,21 @@ import {
 import { resolvePingTargets, renderMentions } from "../discord/mentions.ts";
 import { getPerson, upsertPerson } from "../memory/people.ts";
 import { readJournal, DEFAULT_TAIL_LINES } from "../progress/journal.ts";
-import type { Casting, Ticket, TicketState } from "../tracker/types.ts";
-import { projectSlug } from "../tracker/cast.ts";
+import type { Casting } from "../run/cast.ts";
+import { projectSlug } from "../run/cast.ts";
 import { parseSince, readSpendLedger, summarizeSpend } from "../spend.ts";
-import { TaskStore, displayTaskName, normalizeBranchRef, normalizeTaskNumber } from "../task/store.ts";
+import { TaskStore, displayTaskName, normalizeBranchRef, normalizeTaskNumber, type TaskBranch } from "../task/store.ts";
 import { createMemory } from "../memory/index.ts";
 import { linkLoopTask } from "../memory/loops.ts";
 import { AgentStore } from "../agent/store.ts";
 import { createAgentRunner } from "../agent/invoke.ts";
 import { AGENT_HARNESSES, AGENT_EFFORTS, type AgentDefinition } from "../agent/types.ts";
-import { startTaskBranch } from "./task-start.ts";
+import { deployRun, runTaskDeploy } from "./task-deploy.ts";
+import { runTaskAsk } from "./task-ask.ts";
+import { supportsNameFlag } from "../drivers/claude.ts";
+import { RunStore } from "../run/store.ts";
+import { RUN_TERMINAL } from "../run/types.ts";
+import { parseSpecChecklist } from "../run/spec-file.ts";
 import { formatDispatchTrace, readDispatchEvents } from "../dispatch/events.ts";
 import {
   commitVersion,
@@ -72,40 +76,32 @@ function discordReplyAckTimeoutMs(): number {
 }
 
 /**
- * The one code-project slug that targets Beckett's OWN source repo (`kowo-co/beckett`). Filing work
- * here is RESTRICTED: unrelated tickets have been mis-routed onto it (e.g. a "probabilities" model-list
- * ticket read as "improve Beckett" → edited Beckett's own code), polluting the codebase. Overridable
- * for a differently-named self-repo via env.
+ * The one code-project slug that targets Beckett's OWN source repo (`kowo-co/beckett`). Deploying
+ * work here is RESTRICTED: unrelated requests have been mis-routed onto it (e.g. a "probabilities"
+ * model-list request read as "improve Beckett" → edited Beckett's own code), polluting the
+ * codebase. Overridable for a differently-named self-repo via env.
  */
 const RESTRICTED_PROJECT = (process.env.BECKETT_SELF_PROJECT?.trim() || "beckett").toLowerCase();
 
 /**
- * Refuse to file a ticket against the restricted self-repo unless `confirmed` (the `--confirm-beckett`
+ * Refuse to deploy work against the restricted self-repo unless `confirmed` (the `--confirm-beckett`
  * flag). A speed bump against MIS-ROUTING, not a permission tier: the message tells the Concierge to
  * re-file with the flag immediately when the request explicitly targets Beckett itself ("update
  * yourself"), and to confirm with the user only when the routing is genuinely ambiguous (volition
  * doctrine — the request is the confirmation; the review pipeline is the safety).
  */
 export function guardRestrictedProject(project: string | undefined, confirmed: boolean): void {
-  if (!project) return; // no project → per-ticket sandbox, never the self-repo
+  if (!project) return; // no project → Beckett's own default, never a mis-routed self-repo build
   if (projectSlug(project) !== RESTRICTED_PROJECT) return;
   if (confirmed) return;
   fail(
     `"--project ${project}" targets Beckett's OWN source repo (${RESTRICTED_PROJECT}) — a RESTRICTED ` +
       `project. This is a ROUTING check, not a permission ask: most work should build in its own repo, ` +
       `NOT edit Beckett itself. If the request explicitly targets Beckett ("update yourself", "change ` +
-      `your doctrine"), the routing is already answered — re-file the exact same command with ` +
+      `your doctrine"), the routing is already answered — re-run the exact same command with ` +
       `--confirm-beckett now, without asking again. Only if it's genuinely ambiguous whether this ` +
       `belongs in the beckett codebase do you confirm with the user first.`,
   );
-}
-
-function cliBoardName(board: unknown): string {
-  try {
-    return resolveBoardName(config, typeof board === "string" ? board : undefined);
-  } catch (err) {
-    fail((err as Error).message);
-  }
 }
 
 function parseEvalArgs(args: string[]): { model: string; mode: "short" | "full" } {
@@ -176,12 +172,12 @@ async function discordReplyBus(args: Record<string, unknown>, cmd = "discord.rep
 
 /**
  * Fire a NON-fatal notification at the control bus and return regardless of outcome. Unlike
- * {@link bus}, this never exits or fails the command: it exists so task/ticket creation can tell
- * the running Concierge about workspace routing WITHOUT making Discord load-bearing. The same
- * commands run by a human or in tests with no daemon socket; durable local/tracker creation must
- * still succeed and print its result. A short timeout keeps a dead socket from stalling.
+ * {@link bus}, this never exits or fails the command: it exists so task/run creation can tell the
+ * running Concierge about workspace routing WITHOUT making Discord load-bearing. The same commands
+ * run by a human or in tests with no daemon socket; the durable local write must still succeed and
+ * print its result. A short timeout keeps a dead socket from stalling.
  */
-async function notifyBus(cmd: string, args: Record<string, unknown>): Promise<void> {
+export async function notifyBus(cmd: string, args: Record<string, unknown>): Promise<void> {
   try {
     await callBus(SOCK, cmd, args, 5_000);
   } catch {
@@ -189,16 +185,16 @@ async function notifyBus(cmd: string, args: Record<string, unknown>): Promise<vo
   }
 }
 
-/** Read a ticket/task body from a literal flag or piped stdin. */
+/** Read a task body from a literal flag or piped stdin. */
 async function readWorkBody(flags: Record<string, string | boolean>): Promise<string> {
   if (flags["body-stdin"]) return (await Bun.stdin.text()).trim();
   return flags.body ? String(flags.body) : "";
 }
 
-/** Resolve preset + explicit cast flags through the same validation path for tickets and tasks. */
+/** Resolve preset + explicit cast flags through the one shared validation path. */
 async function castingFromFlags(flags: Record<string, string | boolean>): Promise<Casting> {
-  const { parseCastJson, validateCasting } = await import("../tracker/cast.ts");
-  const { loadPresets, requirePreset, resolveCasting } = await import("../tracker/presets.ts");
+  const { parseCastJson, validateCasting } = await import("../run/cast.ts");
+  const { loadPresets, requirePreset, resolveCasting } = await import("../run/presets.ts");
   const explicitCast = flags.cast ? parseCastJson(String(flags.cast)) : {};
   let presetCast: Casting | undefined;
   if (flags.preset) {
@@ -210,7 +206,7 @@ async function castingFromFlags(flags: Record<string, string | boolean>): Promis
   }
   const casting = resolveCasting(presetCast, explicitCast);
   const errors = validateCasting(casting);
-  if (errors.length > 0) fail(`refusing to file a broken cast:\n  - ${errors.join("\n  - ")}`);
+  if (errors.length > 0) fail(`refusing to deploy a broken cast:\n  - ${errors.join("\n  - ")}`);
   return casting;
 }
 
@@ -222,6 +218,31 @@ function criteriaFromFlags(flags: Record<string, string | boolean>): string[] {
 
 function csvFlag(value: string | boolean | undefined): string[] {
   return value ? String(value).split(",").map((part) => part.trim()).filter(Boolean) : [];
+}
+
+/** One `RunStore` per call — CLI invocations are one-shot processes, so there is no state to share. */
+function runStore(): RunStore {
+  return new RunStore(join(paths.beckettDir, "runs.json"));
+}
+
+/**
+ * Read `<workspace>/spec.md`'s checklist progress for `task show` on a Run, through the SAME
+ * `../run/spec-file.ts` codec the spec-gate Stop hook and the run cards read with — so what the
+ * CLI reports and what the gate enforces can never disagree (the codec scopes to the `## Checklist`
+ * section, where a hand-rolled box count would also pick up checkboxes a worker left in `## Notes`).
+ */
+function readRunChecklist(workspace: string | null): { total: number; done: number; hasPlaceholder: boolean } | null {
+  if (!workspace) return null;
+  const specPath = join(workspace, "spec.md");
+  if (!existsSync(specPath)) return null;
+  let text: string;
+  try {
+    text = readFileSync(specPath, "utf8");
+  } catch {
+    return null;
+  }
+  const { total, done, hasPlaceholder } = parseSpecChecklist(text);
+  return { total, done, hasPlaceholder };
 }
 
 // ── spend (in-process: the local spend ledger) ─────────────────────────────────────────
@@ -755,9 +776,10 @@ export async function runChannels(argv: string[]): Promise<void> {
   fail('usage: beckett channels list | search "<terms>" [--channel <id>] [--limit <n>] | recall <#name|id> [--last <n>] | wipe [<channelId>]');
 }
 
-// ── task (local public identity + tracker-backed executable branches) ────────────────────
-// `#N` and `#N.x` are the human-facing organization layer. A started branch is still a normal
-// tracker ticket underneath, so the established poller/dispatcher/review pipeline stays untouched.
+// ── task (the public `#N` / `#N.x` organization layer over runs) ─────────────────────────
+// `#N` and `#N.x` are the human-facing organization layer; a STARTED branch is a run in the run
+// ledger underneath. `task deploy` is the direct road (prompt in, run out) and `task start` is the
+// same road with a task branch attached — one engine, two entry points.
 export async function runTask(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv;
   const store = new TaskStore(join(paths.beckettDir, "tasks.json"));
@@ -851,11 +873,15 @@ export async function runTask(argv: string[]): Promise<void> {
     out({ branch: publicBranch(branch), taskRef: `#${normalizeTaskNumber(taskRef)}` });
   }
 
+  // `task start` is SUGAR over `task deploy`: it resolves the branch, turns the branch title +
+  // body + criteria into one prompt, deploys a run, and links the branch to it. The muscle memory
+  // (`beckett task start '#12.1' --body … --criteria … --cast …`) survives the ticket rip-out
+  // intact; what changed underneath is that there is no ticket, board, or poller in the path.
   if (sub === "start") {
     const requestedRef = _[0] ?? (flags.branch ? String(flags.branch) : "");
     if (!requestedRef) {
       fail(
-        'usage: beckett task start <#N|#N.x> [--board <name>|--intensive] [--body <b>|--body-stdin] [--project <slug>] [--state <state>] [--preset <name>] [--cast <json>] [--criteria "a;b"] [--channel <id>] [--ping <target>]...',
+        'usage: beckett task start <#N|#N.x> [--body <b>|--body-stdin] [--project <slug>] [--preset <name>] [--cast <json>] [--criteria "a;b"] [--channel <id>] [--ultracode] [--ping <target>]...',
       );
     }
     // `--ping` (issue #10, repeatable): a branch-level override of the task's default pings.
@@ -865,17 +891,9 @@ export async function runTask(argv: string[]): Promise<void> {
       : `${normalizeTaskNumber(requestedRef)}.1`;
     const found = store.getBranch(branchRef);
     if (!found) fail(`no such branch: #${branchRef}`);
-    if (flags.intensive && flags.board && String(flags.board).toLowerCase() !== "int") {
-      fail("--intensive selects the INT board; do not combine it with a different --board");
-    }
-    const board = cliBoardName(flags.intensive ? "int" : flags.board);
-    const isIntBoard = board.toLowerCase() === "int";
     const channel = flags.channel
       ? String(flags.channel)
       : found.task.threadId ?? found.task.originChannelId;
-    if (isIntBoard && !channel) {
-      fail("INT task branches require --channel: Review (Design) needs a channel to ask the owner for approval");
-    }
     const project = flags.project
       ? String(flags.project)
       : found.branch.git?.project ?? found.task.project;
@@ -883,59 +901,174 @@ export async function runTask(argv: string[]): Promise<void> {
     // Re-confirm only a start-time override; one user confirmation covers the task's branches.
     if (flags.project) guardRestrictedProject(project, Boolean(flags["confirm-beckett"]));
     const casting = await castingFromFlags(flags);
-    const state = flags.state
-      ? (String(flags.state) as TicketState)
-      : isIntBoard
-        ? "design"
-        : "in_progress";
-    const { createTrackerClient } = await import("../tracker/client.ts");
-    const client = createTrackerClient({ config, board, logger: quietLogger });
-    const started = await startTaskBranch(store, client, {
-      branchRef,
-      board,
-      state,
-      create: {
-        body: await readWorkBody(flags),
-        casting,
-        criteria: criteriaFromFlags(flags),
-        ...(project ? { project } : {}),
-        ...(channel ? { originChannel: channel } : {}),
+    // The prompt a run carries IS the whole brief: the body when one was given (the branch title
+    // otherwise, so a bare `task start` still says what it is), plus whatever criteria the caller
+    // typed. The worker turns this into its own spec.md checklist.
+    const criteria = criteriaFromFlags(flags);
+    const body = (await readWorkBody(flags)).trim();
+    const prompt = [
+      body || found.branch.title,
+      ...(criteria.length ? ["", "Acceptance criteria:", ...criteria.map((c) => `- ${c}`)] : []),
+    ].join("\n");
+    // Bind the branch to the run now executing it, so `task list`, the PR router, and the
+    // concierge's `findByRun` all resolve the way they used to resolve a ticket link. This runs
+    // as `preNotify` — BEFORE the `run.deploy` bus ping — because the ping wakes the supervisor,
+    // whose very first event (the deploy receipt card) resolves its channel through this link. A
+    // link written after the ping loses that race and routes the card to the run's stamped
+    // channel instead of the task's own thread.
+    const linked: { branch?: TaskBranch } = {};
+    const deployed = await deployRun(
+      [
+        "--title", found.branch.title,
+        "--prompt", prompt,
+        "--task", `#${branchRef}`,
+        ...(channel ? ["--channel", channel] : []),
+        ...(project ? ["--repo", project] : []),
+        ...(Object.keys(casting).length > 0 ? ["--cast", JSON.stringify(casting)] : []),
+        ...(flags.ultracode ? ["--ultracode"] : []),
+      ],
+      {
+        store: runStore(),
+        notifyBus,
+        preNotify: async (run) => {
+          let branch = await store.linkRun(branchRef, { runId: run.id }, "queued", project);
+          if (pings.length > 0) branch = await store.setPings(branch.ref, pings);
+          linked.branch = branch;
+        },
       },
-    });
-    if (pings.length > 0) await store.setPings(started.branch.ref, pings);
+    );
+    if (!("runId" in deployed)) fail("beckett task start: deploy returned no run id");
+    const started = linked.branch;
+    if (!started) fail("beckett task start: the branch was not linked to the deployed run");
 
     // `task.created` is intentionally idempotent: repeat it at first start so a task allocated
     // while the daemon was down still gets its Discord workspace once execution begins.
     await notifyBus("task.created", {
-      taskRef: `#${started.task.number}`,
-      taskNumber: started.task.number,
-      branchRef: `#${started.branch.ref}`,
-      title: started.task.title,
+      taskRef: `#${found.task.number}`,
+      taskNumber: found.task.number,
+      branchRef: `#${started.ref}`,
+      title: found.task.title,
       ...(channel ? { channelId: channel } : {}),
     });
-    if (channel) {
-      await notifyBus("ticket.filed", {
-        identifier: started.ticket.identifier,
-        ticketId: started.ticket.id,
-        channelId: channel,
-        title: started.branch.title,
-        taskRef: `#${started.task.number}`,
-        branchRef: `#${started.branch.ref}`,
-      });
-    }
     out({
-      taskRef: `#${started.task.number}`,
-      branchRef: `#${started.branch.ref}`,
-      id: started.ticket.id,
-      identifier: started.ticket.identifier,
-      url: started.ticket.url,
-      state: started.ticket.state,
+      taskRef: `#${found.task.number}`,
+      branchRef: `#${started.ref}`,
+      runId: deployed.runId,
+      sessionName: deployed.sessionName,
+      branch: deployed.branch,
+      state: deployed.state,
     });
+  }
+
+  if (sub === "deploy") {
+    await runTaskDeploy(rest, { store: runStore(), notifyBus });
+  }
+
+  // v7 status relay (W2B): resolve a run to the cross-session address of its LIVE worker, plus the
+  // material to answer from records if that worker doesn't reply. The concierge does the messaging
+  // itself (its own SendMessage tool) — this is the lookup, never a sender.
+  if (sub === "ask") {
+    runTaskAsk(rest, {
+      store: runStore(),
+      readChecklist: readRunChecklist,
+      // The ONE cached `--name` probe the spawner and the concierge session already share, so the
+      // envelope can say whether the live worker is actually reachable (see `addressable`).
+      supportsSessionNames: () => supportsNameFlag(config.harness.claude.bin),
+      readJournalTail: (runId, lines) => {
+        const body = readJournal(paths.journalDir, runId, lines);
+        if (!body) return [];
+        return body
+          .split("\n")
+          .filter((line) => line.trim().length > 0)
+          // `readJournal` prefixes a "… N earlier lines elided" header when it truncates. That is
+          // the READER's framing, not run activity — dropping it keeps journalTail a list of things
+          // the worker actually did, so nothing can be quoted back as one.
+          .filter((line) => !line.startsWith("… ") || !line.includes("elided"));
+      },
+    });
+  }
+
+  // v7 steering: the concierge's ONE way to bind a mid-flight correction to work already running
+  // (`steering-work-in-flight.md`). The daemon owns delivery — `RunSupervisor.steer()` nudges a live
+  // worker and otherwise buffers the note onto the next stage's brief — so this verb only resolves
+  // the ref and hands the bus a runId. It goes through `bus()`, not `notifyBus()`, ON PURPOSE: a
+  // steer that never reached the daemon must EXIT NON-ZERO, because the concierge reports "told it"
+  // to a channel off the back of this call, and a silently-swallowed note is the one failure that
+  // turns into a lie. The receipt (`delivery: "delivered" | "buffered"`) says which happened.
+  if (sub === "steer") {
+    const ref = _[0];
+    // The note is positional so the command reads the way it is spoken. `--note` is the escape
+    // hatch for a note the flag parser would otherwise eat (one starting with `--`).
+    const note = (_.slice(1).join(" ").trim() || (flags.note === true ? "" : String(flags.note ?? ""))).trim();
+    if (!ref || !note) fail('usage: beckett task steer <run-id|slug> "<note>" [--note <text>]');
+    const run = ref.startsWith("run-") ? runStore().get(ref) : runStore().bySlug(ref);
+    if (!run) fail(`no such run: ${ref}`);
+    // Refuse a run nothing will ever staff again. `RUN_TERMINAL` includes `parked` precisely
+    // because parking is where the machinery stops for a human: the supervisor never re-admits
+    // one, so a note here would buffer forever while the CLI reported success. Say so, and name
+    // the real move — a fresh deploy carrying what was learned, on a branch that kept the WIP.
+    if (RUN_TERMINAL.has(run.state)) {
+      fail(
+        `run ${run.id} is ${run.state} — steering only reaches a run that is still going. ` +
+          `Deploy the new direction as fresh work (\`beckett task deploy --prompt "…" --repo ${run.repo ?? "<slug>"}\`); ` +
+          `branch ${run.branch} still holds everything this run committed.`,
+      );
+    }
+    await bus("run.steer", { runId: run.id, note });
+  }
+
+  // v7 cancellation: the ONE lever that stops work already running. Like `steer` it goes through
+  // `bus()` rather than `notifyBus()` on purpose — a cancel the daemon never received must EXIT
+  // NON-ZERO, because the caller (a human, or the concierge answering a Cancel click) tells someone
+  // "stopped it" off the back of this call, and a silently-swallowed cancel means a worker keeps
+  // burning tokens on work the owner explicitly killed. `RunSupervisor.cancel()` aborts + reaps the
+  // live worker and patches the run to `cancelled`; a branch ref also marks its task branch.
+  if (sub === "cancel") {
+    const ref = _[0];
+    if (!ref) fail('usage: beckett task cancel <run-id|slug|#N.x> [--reason <text>]');
+    const reason = typeof flags.reason === "string" && flags.reason.trim() ? flags.reason.trim() : "cancelled";
+    // A branch ref (`#12.1`) resolves through the task registry to the run executing it, so the
+    // public handle a person actually types works here exactly like it does for `task start`.
+    let runId: string;
+    let branchRef: string | null = null;
+    if (/^#?\d+\.\d+/.test(ref)) {
+      const normalized = normalizeBranchRef(ref);
+      const found = store.getBranch(normalized);
+      if (!found) fail(`no such branch: #${normalized}`);
+      if (!found.branch.run) fail(`branch #${normalized} has no run to cancel`);
+      runId = found.branch.run.runId;
+      branchRef = found.branch.ref;
+    } else {
+      const run = ref.startsWith("run-") ? runStore().get(ref) : runStore().bySlug(ref);
+      if (!run) fail(`no such run: ${ref}`);
+      runId = run.id;
+      branchRef = run.taskRef && run.taskRef.includes(".") ? normalizeBranchRef(run.taskRef) : null;
+    }
+    await bus("run.cancel", { runId, reason });
+    // The registry follows the engine: the daemon's own state-change sync does this too, but a
+    // cancel issued while the daemon is mid-restart must still leave the board honest.
+    if (branchRef) {
+      try {
+        await store.setBranchStatus(branchRef, "cancelled");
+      } catch {
+        /* the run is cancelled either way; a stale branch ref must not fail the verb */
+      }
+    }
+    out({ runId, cancelled: true, ...(branchRef ? { branchRef: `#${branchRef}` } : {}) });
   }
 
   if (sub === "show") {
     const ref = _[0];
     if (!ref) fail("usage: beckett task show <#N|#N.x>");
+    // v7: `run-<id>` or a bare slug names a Run instead of a ticket-backed task/branch — try
+    // that lookup FIRST, before `normalizeTaskNumber`/`normalizeBranchRef` (which throw on
+    // anything non-numeric) get anywhere near it. `#N`/`N`/`N.x` keep the existing path below
+    // untouched.
+    if (!/^#?\d+(\.\d+)*$/.test(ref)) {
+      const run = ref.startsWith("run-") ? runStore().get(ref) : runStore().bySlug(ref);
+      if (!run) fail(`no such run: ${ref}`);
+      out({ run, checklist: readRunChecklist(run.workspace) });
+    }
     if (ref.includes(".")) {
       const found = store.getBranch(ref);
       if (!found) fail(`no such branch: #${normalizeBranchRef(ref)}`);
@@ -945,14 +1078,22 @@ export async function runTask(argv: string[]): Promise<void> {
       });
     }
     const task = store.getTask(ref);
-    if (!task) fail(`no such task: #${normalizeTaskNumber(ref)}`);
+    if (!task) {
+      // A run whose title is all-digits (e.g. "2048") slugifies to an all-digits slug, which
+      // matches the numeric-ref guard above and lands here instead of the run-lookup branch.
+      // Still reachable by full `run-*` id; fall back to a slug lookup before giving up so it's
+      // reachable by its short slug too.
+      const run = runStore().bySlug(ref);
+      if (run) out({ run, checklist: readRunChecklist(run.workspace) });
+      fail(`no such task: #${normalizeTaskNumber(ref)}`);
+    }
     out(publicTask(task));
   }
 
   if (sub === "list" || sub === "ls") {
     const wanted = flags.status ? String(flags.status) : undefined;
     const tasks = store.list().filter((task) => !wanted || task.status === wanted);
-    out(tasks.map((task) => ({
+    const taskRows = tasks.map((task) => ({
       ref: `#${task.number}`,
       title: task.title,
       displayName: displayTaskName(task),
@@ -963,146 +1104,40 @@ export async function runTask(argv: string[]): Promise<void> {
         ref: `#${branch.ref}`,
         title: branch.title,
         status: branch.status,
-        ticket: branch.ticket?.identifier ?? null,
+        run: branch.run?.runId ?? null,
       })),
       updatedAt: task.updatedAt,
-    })));
+    }));
+    // Runs deployed straight from a prompt (`task deploy`) have no task row of their own —
+    // append them so `task list` stays the one place to see everything in flight. Tagged `kind`
+    // so a consumer can tell the two row shapes apart; existing task rows are untouched.
+    const runRows = runStore()
+      .list()
+      .filter((run) => !wanted || run.state === wanted)
+      .map((run) => ({
+        kind: "run" as const,
+        ref: run.id,
+        slug: run.slug,
+        title: run.title,
+        displayName: run.title,
+        status: run.state,
+        project: run.repo,
+        threadId: run.channelId,
+        updatedAt: run.updatedAt,
+      }));
+    out([...taskRows, ...runRows]);
   }
 
-  fail("usage: beckett task create|branch|start|show|list <...>");
-}
-
-// ── ticket (in-process: the tracker client — the Concierge's door to the queue) ───────────
-// The Concierge shells these from its Bash tool to file/inspect/steer tickets. Output is
-// JSON on stdout (the Concierge reads it). The bored client speaks HTTP to the loopback
-// tracker (BECKETT_BORED_URL). Imported dynamically so the rest of the CLI stays cheap.
-export async function runTicket(argv: string[]): Promise<void> {
-  const [sub, ...rest] = argv;
-  const { _, flags } = parse(rest);
-  // OPS-167: forensic trace is intentionally a direct local JSONL read, not a daemon/tracker
-  // request — it remains available while the dispatcher is wedged or after a restart.
+  // The forensic trace is intentionally a direct local JSONL read, not a daemon request — it
+  // remains available while the supervisor is wedged or after a restart.
   if (sub === "trace") {
     const id = _[0];
-    if (!id) fail("usage: beckett ticket trace <id>");
-    const path = flags.path ? String(flags.path) : join(paths.eventsDir, "dispatch.jsonl");
-    out(formatDispatchTrace(readDispatchEvents(path, id), id));
+    if (!id) fail("usage: beckett task trace <run-id>");
+    const tracePath = flags.path ? String(flags.path) : join(paths.eventsDir, "dispatch.jsonl");
+    out(formatDispatchTrace(readDispatchEvents(tracePath, id), id));
   }
-  const { createTrackerClient } = await import("../tracker/client.ts");
-  if (flags.intensive && flags.board && String(flags.board).toLowerCase() !== "int") {
-    fail("--intensive selects the INT board; do not combine it with a different --board");
-  }
-  const board = cliBoardName(flags.intensive ? "int" : flags.board);
-  const isIntBoard = board.toLowerCase() === "int";
-  const client = createTrackerClient({ config, board, logger: quietLogger });
 
-  /** A hydrated ticket → the slim row the Concierge needs to reason about progress. */
-  const slim = (t: Ticket) => ({
-    id: t.id,
-    identifier: t.identifier,
-    title: t.title,
-    state: t.state,
-    assignees: t.assignees,
-    url: t.url,
-    updatedAt: t.updatedAt,
-  });
-  /**
-   * Accept a raw ticket id OR a human identifier ("OPS-42") everywhere a ticket id is expected —
-   * the Concierge reasons in identifiers, and forcing uuids produced spurious "no such ticket"
-   * dead ends when it stepped in (issue #21).
-   */
-  const resolveTicketId = async (key: string): Promise<string> => {
-    if (/^[0-9a-f-]{32,}$/i.test(key)) return key;
-    const all = await client.listIssues();
-    const t = all.find((x) => x.identifier.toLowerCase() === key.toLowerCase());
-    if (!t) fail(`no such ticket: ${key}`);
-    return t.id;
-  };
-
-  if (sub === "create") {
-    if (!flags.title) {
-      fail(
-        'usage: beckett ticket create --title <t> [--board <name>|--intensive] [--body <b>|--body-stdin] [--project <slug>] [--state backlog|todo|design|design_review|in_progress|in_review|done|cancelled] [--preset <name>] [--cast <json>] [--criteria "a;b;c"] [--channel <discord-channel-id>]',
-      );
-    }
-    const casting = await castingFromFlags(flags);
-    const criteria = criteriaFromFlags(flags);
-    if (isIntBoard && !flags.channel) {
-      fail("INT tickets require --channel: Review (Design) needs a filing channel to ask the owner for approval");
-    }
-    // Restricted self-repo gate — bounce back to the Concierge to re-confirm with the user before
-    // any ticket can build against kowo-co/beckett (mis-routing polluted the codebase).
-    guardRestrictedProject(flags.project ? String(flags.project) : undefined, !!flags["confirm-beckett"]);
-    const ticket = await client.createIssue({
-      title: String(flags.title),
-      body: await readWorkBody(flags),
-      casting,
-      criteria,
-      // The code project this ticket builds → its own repo at ~/Projects/<slug>, pushed to
-      // <owner>/<slug>. Decoupled from Beckett's own source repo.
-      project: flags.project ? String(flags.project) : undefined,
-      // INT starts in its live Design stage by default; OPS keeps the tracker's ready default.
-      state: flags.state ? (String(flags.state) as TicketState) : isIntBoard ? "design" : undefined,
-      // Stamp the originating Discord channel so updates route back to the conversation (closed loop).
-      originChannel: flags.channel ? String(flags.channel) : undefined,
-    });
-    // Tell the Concierge (if running) so a ticket filed from inside a user workspace thread
-    // grounds that workspace. Gated on --channel: only the Concierge path stamps a channel.
-    if (flags.channel) {
-      await notifyBus("ticket.filed", {
-        identifier: ticket.identifier,
-        channelId: String(flags.channel),
-        title: String(flags.title),
-      });
-    }
-    out({ id: ticket.id, identifier: ticket.identifier, url: ticket.url, state: ticket.state });
-  }
-  if (sub === "comment") {
-    const id = _[0];
-    if (!id) fail("usage: beckett ticket comment <id> <text> | --body <b> | --body-stdin");
-    // Accept the body as positional text (per the v3 §8 shorthand) or via --body/--body-stdin.
-    const positional = _.slice(1).join(" ").trim();
-    const body = positional || (await readWorkBody(flags));
-    if (!body) fail("beckett ticket comment: empty body");
-    out(await client.addComment(await resolveTicketId(id), body));
-  }
-  if (sub === "state") {
-    const id = _[0];
-    const state = _[1];
-    if (!id || !state) {
-      fail("usage: beckett ticket state <id> <backlog|todo|design|design_review|in_progress|in_review|done|cancelled> [--board int]");
-    }
-    await client.setState(await resolveTicketId(id), state as TicketState);
-    out({ id, state });
-  }
-  if (sub === "restaff") {
-    // Operator lever (issue #21): routed over the control bus to the live dispatcher, which
-    // aborts the ticket's worker (committing WIP) and spawns a fresh one — optionally on a
-    // different harness. Only works while the v3 daemon is running (it owns the workers).
-    const id = _[0];
-    if (!id) fail("usage: beckett ticket restaff <id> [--harness claude|codex|pi]");
-    await bus("ticket.restaff", { id, harness: flags.harness ? String(flags.harness) : undefined });
-  }
-  if (sub === "courier") {
-    // Tell the live dispatcher a human is about to publish; it cancels the durable retry first
-    // so the courier and outbox can never race into duplicate PRs.
-    const id = _[0];
-    if (!id) fail("usage: beckett ticket courier <id>");
-    await bus("ticket.courier", { id });
-  }
-  if (sub === "list") {
-    const tickets = await client.listIssues();
-    const wanted = flags.state ? String(flags.state) : undefined;
-    const rows = (wanted ? tickets.filter((t) => t.state === wanted) : tickets).map(slim);
-    out(rows);
-  }
-  if (sub === "show" || sub === "get") {
-    const id = _[0];
-    if (!id) fail(`usage: beckett ticket ${sub} <id>`);
-    const ticket = await client.getIssue(await resolveTicketId(id));
-    if (!ticket) fail(`no such ticket: ${id}`);
-    out(ticket);
-  }
-  fail("usage: beckett ticket create|comment|state|list|show|trace|restaff|courier <...> (use --board int or --intensive for intensive tickets)");
+  fail("usage: beckett task create|branch|start|deploy|ask|steer|cancel|show|list|trace <...>");
 }
 
 // ── preset (in-process: inspect the user-defined cast presets in ~/.beckett/presets.json) ──
@@ -1111,7 +1146,7 @@ export async function runTicket(argv: string[]): Promise<void> {
 // Both read the file FRESH and validate it, so a malformed presets.json fails here loudly too.
 export async function runPreset(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv;
-  const { loadPresets, requirePreset } = await import("../tracker/presets.ts");
+  const { loadPresets, requirePreset } = await import("../run/presets.ts");
   let presets;
   try {
     presets = loadPresets(paths.presetsFile);
@@ -1131,180 +1166,6 @@ export async function runPreset(argv: string[]): Promise<void> {
     }
   }
   fail("usage: beckett preset ls | show <name>");
-}
-
-// ── plan (in-process: file a whole dependency DAG at once) ───────────────────────────────
-// For BIG, multi-part work only. Reads a JSON DAG on stdin (or --file), validates it (unique
-// keys, known edges, no cycles), then files the tickets in dependency order: roots (no `needs`)
-// start NOW (in_progress), dependents wait in `backlog` with a blocked-by edge. The dispatcher
-// promotes each dependent to in_progress once all its blockers reach `done`. For anything that
-// is one cohesive unit, DON'T plan — file a single `beckett ticket create`.
-export async function runPlan(argv: string[]): Promise<void> {
-  const [sub, ...rest] = argv;
-  const { flags } = parse([sub, ...rest].filter((x) => x !== undefined) as string[]);
-  const raw = flags.file
-    ? await Bun.file(String(flags.file)).text()
-    : await Bun.stdin.text();
-  let spec: any;
-  try {
-    spec = JSON.parse(raw);
-  } catch (err) {
-    fail(`plan: input is not valid JSON (${(err as Error).message})`);
-  }
-  const tickets: any[] = Array.isArray(spec?.tickets) ? spec.tickets : [];
-  if (tickets.length === 0) {
-    fail(
-      'usage: beckett plan [--file <f>] < dag.json\n' +
-        '  dag.json = { "channel"?: "<id>", "board"?: "ops|vid|vidpip", "tickets": [ { "key", "title", "board"?, "body"?, ' +
-        '"criteria"?: string[], "preset"?: "<name>", "cast"?: {...}, "needs"?: ["key", ...] }, ... ] }',
-    );
-  }
-
-  // 1. validate keys + edges
-  const keys = new Set<string>();
-  for (const t of tickets) {
-    if (!t.key || typeof t.key !== "string") fail(`plan: every ticket needs a string "key" (got ${JSON.stringify(t.key)})`);
-    if (keys.has(t.key)) fail(`plan: duplicate key "${t.key}"`);
-    if (!t.title || typeof t.title !== "string") fail(`plan: ticket "${t.key}" needs a "title"`);
-    keys.add(t.key);
-  }
-  const byKey = new Map<string, any>(tickets.map((t) => [t.key, t]));
-  for (const t of tickets) {
-    for (const need of (t.needs ?? [])) {
-      if (!keys.has(need)) fail(`plan: ticket "${t.key}" needs unknown key "${need}"`);
-      if (need === t.key) fail(`plan: ticket "${t.key}" cannot depend on itself`);
-    }
-  }
-
-  const planDefaultBoard = spec.board ? String(spec.board) : undefined;
-  const boardForKey = new Map<string, string>();
-  // Presets read FRESH here (once per plan) so a just-edited flow applies with no restart. A node
-  // may name a "preset" (expanded into its cast, explicit "cast" overriding per stage) exactly like
-  // `ticket create --preset`. A malformed presets.json fails the whole plan before any node is filed.
-  const { loadPresets, requirePreset, resolveCasting } = await import("../tracker/presets.ts");
-  const { validateCasting } = await import("../tracker/cast.ts");
-  let planPresets;
-  try {
-    planPresets = loadPresets(paths.presetsFile);
-  } catch (err) {
-    fail((err as Error).message);
-  }
-  const castForKey = new Map<string, Casting>();
-  // Restricted self-repo gate, board validation, and cast resolution — fail the WHOLE plan before
-  // filing any node.
-  for (const t of tickets) {
-    guardRestrictedProject(t.project ? String(t.project) : undefined, !!flags["confirm-beckett"]);
-    boardForKey.set(t.key, cliBoardName(t.board ? String(t.board) : planDefaultBoard));
-    let presetCast: Casting | undefined;
-    if (t.preset) {
-      try {
-        presetCast = requirePreset(planPresets, String(t.preset));
-      } catch (err) {
-        fail(`plan: ticket "${t.key}": ${(err as Error).message}`);
-      }
-    }
-    const casting = resolveCasting(presetCast, (t.cast ?? {}) as Casting);
-    const castErrors = validateCasting(casting);
-    if (castErrors.length > 0) {
-      fail(`plan: ticket "${t.key}" has a broken cast:\n  - ${castErrors.join("\n  - ")}`);
-    }
-    castForKey.set(t.key, casting);
-  }
-
-  if ([...boardForKey.values()].some((board) => board.toLowerCase() === "int") && !spec.channel) {
-    fail("plan: INT tickets require a top-level \"channel\" so Review (Design) can ask the owner for approval");
-  }
-
-  // 2. topological order (Kahn) — also the cycle detector
-  const indeg = new Map<string, number>(tickets.map((t) => [t.key, (t.needs ?? []).length]));
-  const dependents = new Map<string, string[]>(); // need → [keys that need it]
-  for (const t of tickets) {
-    for (const need of (t.needs ?? [])) {
-      if (!dependents.has(need)) dependents.set(need, []);
-      dependents.get(need)!.push(t.key);
-    }
-  }
-  let queue = tickets.filter((t) => (indeg.get(t.key) ?? 0) === 0).map((t) => t.key);
-  const order: string[] = [];
-  const levels: string[][] = [];
-  while (queue.length > 0) {
-    const level = queue;
-    levels.push(level);
-    const next: string[] = [];
-    for (const k of level) {
-      order.push(k);
-      for (const dep of dependents.get(k) ?? []) {
-        indeg.set(dep, (indeg.get(dep) ?? 1) - 1);
-        if (indeg.get(dep) === 0) next.push(dep);
-      }
-    }
-    queue = next;
-  }
-  if (order.length !== tickets.length) {
-    const cyclic = tickets.map((t) => t.key).filter((k) => !order.includes(k));
-    fail(`plan: dependency cycle among [${cyclic.join(", ")}] — a plan must be a DAG`);
-  }
-
-  // 3. file in order, mapping each key → its created identifier so dependents can reference it
-  const { createTrackerClient } = await import("../tracker/client.ts");
-  const clientsByBoard = new Map<string, ReturnType<typeof createTrackerClient>>();
-  const clientForBoard = (board: string) => {
-    let client = clientsByBoard.get(board);
-    if (!client) {
-      client = createTrackerClient({ config, board, logger: quietLogger });
-      clientsByBoard.set(board, client);
-    }
-    return client;
-  };
-  const channel = spec.channel ? String(spec.channel) : undefined;
-  const identForKey = new Map<string, string>();
-  const filed: any[] = [];
-  for (const level of levels) {
-    const createdLevel = await Promise.all(
-      level.map(async (key) => {
-        const t = byKey.get(key)!;
-        const needs: string[] = t.needs ?? [];
-        const blockedBy = needs.map((n) => identForKey.get(n)!).filter(Boolean);
-        // INT roots start at Design; OPS roots start at In Progress. Blocked nodes stay parked.
-        const state = blockedBy.length === 0
-          ? boardForKey.get(key)!.toLowerCase() === "int" ? "design" : "in_progress"
-          : "backlog";
-        const created = await clientForBoard(boardForKey.get(key)!).createIssue({
-          title: String(t.title),
-          body: t.body ? String(t.body) : "",
-          casting: castForKey.get(key) ?? {},
-          criteria: Array.isArray(t.criteria) ? t.criteria.map(String) : [],
-          blockedBy,
-          // Per-node code project (its own repo). Sibling nodes may share one project or each get
-          // their own; defaults at dispatch to the ticket id when unset.
-          project: t.project ? String(t.project) : undefined,
-          state: state as TicketState,
-          originChannel: channel,
-        });
-        return {
-          key,
-          identifier: created.identifier,
-          filed: { key, board: boardForKey.get(key)!, id: created.id, identifier: created.identifier, state, blockedBy, url: created.url },
-        };
-      }),
-    );
-    for (const row of createdLevel) {
-      identForKey.set(row.key, row.identifier);
-      filed.push(row.filed);
-    }
-  }
-  // A plan files N tickets in one turn — notify the Concierge for each so a plan drafted from
-  // inside a user workspace thread grounds that workspace with every ticket. Best-effort.
-  if (channel) {
-    for (const row of filed) {
-      await notifyBus("ticket.filed", {
-        identifier: row.identifier,
-        channelId: channel,
-        title: String(byKey.get(row.key)?.title ?? row.identifier),
-      });
-    }
-  }
-  out({ planned: filed.length, tickets: filed });
 }
 
 // ── status (control bus → the live daemon; issue #30) ─────────────────────────────────────
@@ -1330,13 +1191,12 @@ export async function runStatus(argv: string[]): Promise<void> {
     out(lines.join("\n"));
   }
   lines.push(`discord:   ${data.discord?.connected ? "connected" : "DISCONNECTED"}`);
-  const p = data.poller ?? {};
+  const tick = data.supervisor?.lastReconcileAt;
   lines.push(
-    `poller:    last poll ${p.lastPollAgeMs != null ? `${Math.round(p.lastPollAgeMs / 1000)}s ago` : "never"}` +
-      (p.consecutiveFailures ? `, ${p.consecutiveFailures} CONSECUTIVE FAILURES` : ""),
+    `engine:    last staffing pass ${
+      typeof tick === "number" ? `${Math.round((Date.now() - tick) / 1000)}s ago` : "not yet"
+    }`,
   );
-  const tr = data.tracker ?? {};
-  lines.push(`tracker:   last HTTP ${tr.lastHttpStatus ?? "-"}${tr.lastError ? ` (last error: ${tr.lastError})` : ""}`);
   const c = data.concierge ?? {};
   const gate = c.turnGate ?? {};
   lines.push(
@@ -1352,13 +1212,11 @@ export async function runStatus(argv: string[]): Promise<void> {
         `${s.liveChild ? "" : " [child recycled]"}`,
     );
   }
-  const workers = Array.isArray(data.workers) ? data.workers : [];
-  lines.push(`workers:   ${workers.length === 0 ? "none" : workers.length}`);
-  for (const w of workers) {
+  const runs = Array.isArray(data.runs) ? data.runs : [];
+  lines.push(`runs:      ${runs.length === 0 ? "none" : runs.length}`);
+  for (const r of runs) {
     lines.push(
-      w.state === "live"
-        ? `  ${w.ticket} · ${w.stage} on ${w.harness} (pid ${w.pid ?? "?"}) — up ${fmtSecs(w.elapsedSecs)}, last event ${w.lastEventAgeSecs != null ? `${w.lastEventAgeSecs}s ago` : "never"} [${w.workerState}]`
-        : `  ${w.ticket} · ${w.stage} QUEUED (waiting for ${w.waitingFor})`,
+      `  ${r.runId} · ${r.state}${r.stage ? ` (${r.stage})` : ""} — ${r.workerId ? `worker ${r.workerId}` : "no live worker"}`,
     );
   }
   out(lines.join("\n"));

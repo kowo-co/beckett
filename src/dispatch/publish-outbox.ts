@@ -3,11 +3,11 @@
  *
  * A finished checkout is valuable: a GitHub hiccup must not turn it back into work or lose the
  * only worktree containing it.  Like AdvanceOutbox this is deliberately boring JSONL, but each
- * ticket has exactly one row (the row owns its worktree until it is removed).
+ * run has exactly one row (the row owns its worktree until it is removed).
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type { Ticket } from "../tracker/types.ts";
+import type { WorkItem } from "../run/work-item.ts";
 import type { Logger } from "../types.ts";
 
 export const PUBLISH_RETRY_DELAYS_MS = [60_000, 5 * 60_000, 30 * 60_000] as const;
@@ -17,7 +17,7 @@ export type PublishPurpose = "done" | "wip";
 
 export interface PublishOperation {
   id: string;
-  ticket: Ticket;
+  item: WorkItem;
   slug: string;
   repoRoot: string;
   messagePrefix: string;
@@ -59,31 +59,31 @@ export class PublishOutbox {
 
   constructor(private readonly path: string, private readonly logger: Logger) {}
 
-  /** Replaces an existing row for the ticket: an outbox row has exclusive publish ownership. */
+  /** Replaces an existing row for the run: an outbox row has exclusive publish ownership. */
   append(op: PublishOperation): void {
     // A genuinely new operation after a previous courier handoff owns the ticket anew.
-    this.cancelled.delete(op.ticket.id);
-    const ops = this.read().filter((existing) => existing.ticket.id !== op.ticket.id);
+    this.cancelled.delete(op.item.id);
+    const ops = this.read().filter((existing) => existing.item.id !== op.item.id);
     ops.push(op);
     this.writeAll(ops);
     this.logger.warn("queued GitHub publish for retry", {
-      id: op.id, ticket: op.ticket.identifier, attempt: op.attempt, nextAttemptAt: op.nextAttemptAt,
+      id: op.id, item: op.item.identifier, attempt: op.attempt, nextAttemptAt: op.nextAttemptAt,
     });
   }
 
-  has(ticketId: string): boolean {
-    return this.read().some((op) => op.ticket.id === ticketId);
+  has(itemId: string): boolean {
+    return this.read().some((op) => op.item.id === itemId);
   }
 
   /** A human courier owns publishing from this point; never race them with a stale retry. */
-  cancel(ticketId: string): boolean {
+  cancel(itemId: string): boolean {
     const ops = this.read();
     // Record the cancellation before an async drain can resume and rewrite its stale snapshot.
-    this.cancelled.add(ticketId);
-    const kept = ops.filter((op) => op.ticket.id !== ticketId);
+    this.cancelled.add(itemId);
+    const kept = ops.filter((op) => op.item.id !== itemId);
     if (kept.length === ops.length) return false;
     this.writeAll(kept);
-    this.logger.info("cancelled queued GitHub publish for human courier", { ticketId });
+    this.logger.info("cancelled queued GitHub publish for human courier", { itemId });
     return true;
   }
 
@@ -124,7 +124,7 @@ export class PublishOutbox {
         } catch (err) {
           kept.push(op);
           this.logger.warn("queued GitHub publish reconciliation still failing", {
-            id: op.id, ticket: op.ticket.identifier, error: (err as Error).message,
+            id: op.id, item: op.item.identifier, error: (err as Error).message,
           });
         }
         continue;
@@ -137,7 +137,7 @@ export class PublishOutbox {
         // A dispatcher crash/ticket-comment failure must not erase the ownership row.
         kept.push(op);
         this.logger.warn("queued GitHub publish still failing", {
-          id: op.id, ticket: op.ticket.identifier, error: (err as Error).message,
+          id: op.id, item: op.item.identifier, error: (err as Error).message,
         });
       }
     }
@@ -146,9 +146,9 @@ export class PublishOutbox {
     // its synchronous append may have happened while this async drain held an old snapshot.
     const newlyAppended = this.read().filter((current) => !ops.some((original) => original.id === current.id));
     const final = [
-      ...kept.filter((op) => !newlyAppended.some((newer) => newer.ticket.id === op.ticket.id)),
+      ...kept.filter((op) => !newlyAppended.some((newer) => newer.item.id === op.item.id)),
       ...newlyAppended,
-    ].filter((op) => !this.cancelled.has(op.ticket.id));
+    ].filter((op) => !this.cancelled.has(op.item.id));
     this.writeAll(final);
     return applied;
   }
@@ -161,8 +161,8 @@ export class PublishOutbox {
       try {
         const raw = JSON.parse(line) as Partial<PublishOperation>;
         if (
-          typeof raw.id === "string" && raw.ticket && typeof raw.ticket.id === "string" &&
-          typeof raw.ticket.identifier === "string" && typeof raw.slug === "string" &&
+          typeof raw.id === "string" && raw.item && typeof raw.item.id === "string" &&
+          typeof raw.item.identifier === "string" && typeof raw.slug === "string" &&
           typeof raw.repoRoot === "string" && typeof raw.messagePrefix === "string" &&
           typeof raw.summary === "string" && (raw.purpose === "done" || raw.purpose === "wip") &&
           Number.isInteger(raw.attempt) && typeof raw.nextAttemptAt === "number" && typeof raw.createdAt === "string"

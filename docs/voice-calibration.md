@@ -165,9 +165,9 @@ words**, provenance listing the note ids, `channel` set. Nothing else happens au
 
 The containment is already built and already audited. `src/proposal/store.ts` cannot write to
 persona.md, doctrine, or any memory node — its only filesystem path resolves inside
-`<beckettDir>/proposals` — and `ACCEPT_ROUTE` maps `persona-change` to `ticket`, so **accepting a
-persona proposal does not apply an edit either**: it files ordinary work that takes the ordinary
-road through the ordinary review gate. A rejection requires a reason and writes a calibration
+`<beckettDir>/proposals` — and accepting a `persona-change` proposal routes to ordinary work, so
+**accepting a persona proposal does not apply an edit either**: it deploys a run that takes the
+ordinary road through the ordinary review gate. A rejection requires a reason and writes a calibration
 record, so a rejected voice proposal makes the *next* one in that room weigh differently — the
 decision ledger and the voice ledger closing the loop on each other, which is the shape that
 justifies keeping them siblings. Landed edit → `beckett reload` → every session re-reads persona.md
@@ -235,7 +235,7 @@ voice signal on the front-desk seat, any cross-channel aggregation.
 2. **Twice produces exactly one proposal.** Two notes of the same class produce one
    `persona-change` proposal naming the note ids and quoting the words, once, and a third note of
    the same class before the decision does not produce a second proposal.
-3. **The human gate is total.** Accepting changes persona.md through an ordinary ticket and the
+3. **The human gate is total.** Accepting changes persona.md through an ordinary run and the
    ordinary review gate; rejecting writes the calibration record the reject path already writes;
    and with the proposal open and undecided, persona.md is byte-identical to what it was.
 

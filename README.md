@@ -3,15 +3,15 @@
 **A Discord-native AI engineer that lives in your server, talks like a person, and ships real code.**
 
 You @mention Beckett in Discord. It chats back in its own voice, decides how much effort your
-request actually deserves, and when there's real work to do it starts a numbered task and a fleet of
-coding agents builds it — opening PRs, deploying sites, generating images — while it keeps you
-posted in the channel you asked in. Open a thread and point it at the work (`&42`, or `&recent` for a
-whole wave) and it reports there instead. One long-lived agent is the face; a queue and a pool of
-workers are the hands.
+request actually deserves, and when there's real work to do it **deploys a run** in one call and a
+fleet of coding agents builds it — opening PRs, deploying sites, generating images — while it keeps
+you posted in the channel you asked in. Open a thread and point it at the work (`&42`, or `&recent`
+for a whole wave) and it reports there instead. One long-lived agent is the face; a run supervisor
+and a pool of workers are the hands.
 
-This repo is the whole thing: the Discord front-of-house, the task registry, the ticket queue, the worker
-dispatcher, and the ops to run it. It's built to be **forked** — rename it, give it a new
-personality, point it at your own Discord, and you have your own Beckett.
+This repo is the whole thing: the Discord front-of-house, the task registry, the run engine, and
+the ops to run it. It's built to be **forked** — rename it, give it a new personality, point it at
+your own Discord, and you have your own Beckett.
 
 ---
 
@@ -36,35 +36,31 @@ personality, point it at your own Discord, and you have your own Beckett.
 Beckett has two seats:
 
 - **The Concierge** — a long-lived `claude -p` (Opus) agent that owns Discord. It's the only
-  thing that talks to people. It chats, sizes effort, and for real work creates a numbered
-  **task** (`#42`) with executable **branches** (`#42.1`, `#42.2`). It never writes the code itself.
-  It's not single-threaded: each channel (and each DM) gets its own persistent session, so
-  conversations in different channels run concurrently under a bounded turn gate — being deep in a
-  task in one room never queues everyone else behind it.
-- **The fleet** — a poller watches the [bored](https://github.com/frgmt0/bored) ticket queue; a **dispatcher** turns ticket state changes
-  into work. A ticket moving to *In Progress* spawns a coding agent in an isolated git worktree;
-  *In Review* spawns a reviewer; a new comment steers the live worker; done advances the ticket
-  and posts a summary back to the channel.
+  thing that talks to people. It chats, sizes effort, and for real work makes exactly one call —
+  `beckett task deploy --prompt "<the ask>"`. It never writes the code itself. It's not
+  single-threaded: each channel (and each DM) gets its own persistent session, so conversations in
+  different channels run concurrently under a bounded turn gate — being deep in one room never
+  queues everyone else behind it.
+- **The fleet** — a **run supervisor** picks a deployed run up within seconds of the call: it
+  provisions the project repo, cuts an isolated git worktree and a branch, writes a `spec.md`
+  whose checklist the worker must fill in and tick off (a Stop hook enforces it), and spawns the
+  implement worker. A fresh reviewer then grinds the diff against that checklist; a pass publishes
+  the branch and opens the PR, a fail sends it back for a bounded number of rework cycles. Live
+  runs are steerable, and the concierge can message a running worker by name for status.
 
-Tracker tickets are internal execution records linked to task branches. The workers aren't all the
-same model. Each branch is **cast** per stage — implement with one
-model/effort, review with another — so cheap work stays cheap and hard work gets the firepower.
-Claude is the backbone; codex and pi can be enabled as alternates.
+The workers aren't all the same model. Each run is **cast** per stage — implement with one
+model/effort, review with another — so cheap work stays cheap and hard work gets the firepower;
+`--ultracode` puts a multifaceted build on the deepest seat with its own workflow of subagents.
+Claude is the backbone.
 
-### INT intensive branches
+### Deep work: `--ultracode`
 
-Normal task branches keep the short implementation flow. **INT** is a separate internal board for
-multi-stage work: **Backlog → Design → Review (Design) → In Progress → Review → Done**. `Design`,
-`In Progress`, and `Review` are live worker states. **Review (Design) is parked**: the design worker
-commits `docs/design/int-N.md`, an independent lightweight model checks it against the ticket, and
-Beckett sends an automated update to the filing channel asking the owner to greenlight it. Approval
-is just `beckett ticket state INT-N in_progress --board int`; implementation and review resume on
-the same ticket with its `design` / `implement` / `review` casts intact — no re-filing.
-
-Create the task normally, then start its branch with
-`beckett task start '#N.1' --intensive --preset intensive`; INT defaults to the live `Design` state. The internal `INT-N` identifier shown
-by `beckett task show '#N.1'` remains available for the approval-state command above. Quote numbered
-references in a shell because an unquoted `#` starts a comment.
+There is no separate board for big work. A run whose ask spans several subsystems — a migration
+plus its tests plus its docs, "audit everything and fix what's broken" — is deployed with
+`--ultracode`: the implement stage goes to the deepest seat and plans its own workflow of
+subagents inside the one worktree, so a large ask stays one branch, one review, one PR. Everything
+else stays on the default seat. (v7 removed the old INT design board along with the ticket
+tracker.)
 
 Beckett also has hands beyond code: it can generate images, deploy throwaway mockups to
 `<name>.your-domain`, manage its own public site, remember people and projects across
@@ -104,16 +100,17 @@ character is yours.
 ## Architecture in one paragraph
 
 > A **Concierge** (a long-lived `claude -p` Opus agent) owns Discord. It chats in Beckett's
-> voice, decides effort, and for real work creates a numbered task. Starting one of its branches
-> files an internal tracker ticket with per-stage **casting**.
-> It never does the work itself. The **shell** polls the bored HTTP API every `poll_secs` and
-> emits events. A **Dispatcher** consumes them: a ticket entering *in_progress* spawns the
-> implement harness as a worker (git worktree, under a scope-guard); *in_review* spawns the
-> review harness; a new comment on an in-flight ticket is injected as a steering nudge to the
-> live worker; *cancelled* aborts it; when a worker finishes, the dispatcher advances the ticket
-> and posts a summary comment.
+> voice, decides effort, and for real work runs `beckett task deploy --prompt "…"` — one call that
+> writes a **Run** to the ledger and pings the daemon. It never does the work itself. The
+> **RunSupervisor** takes it from there: worktree + branch + `spec.md` scaffold, then the implement
+> worker (under a scope-guard, with the spec-gate Stop hook), then a fresh reviewer with the diff
+> in hand, then publish → PR → done. Rework is a bounded loop; steering reaches a live worker as a
+> nudge; anything that needs a human parks with the reason. v7 removed the ticket tracker, the
+> poller, and the whole filing ceremony — a run's card in Discord is the receipt, and it edits
+> itself as the work moves.
 
-The authoritative architecture doc is [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Design
+The authoritative architecture doc is [`docs/architecture.md`](docs/architecture.md); the run
+engine's own contract lives in `src/run/` (types, store, spec-file, supervisor). Design
 history lives in [`specs/`](specs/): the original spec set under `specs/_legacy/`, the v2 design
 under `specs/_legacy-v2/`, and the v3 build contract under `specs/_legacy-v3/` — historical only.
 
@@ -141,9 +138,8 @@ bash /tmp/install-beckett.sh        # as root; otherwise: sudo bash /tmp/install
 ```
 
 It creates an unprivileged `beckett` account, enables user-service lingering, installs Node 24
-LTS plus Bun/Claude/Codex/Pi/GitHub CLI, clones the locked app dependencies, provisions the
-[bored](https://github.com/frgmt0/bored) ticket tracker (clone + build + a loopback `bored.service`
-user unit), downloads Chromium, writes private instance config, and links the systemd units. Set
+LTS plus Bun/Claude/Codex/Pi/GitHub CLI, clones the locked app dependencies, downloads Chromium,
+writes private instance config, and links the systemd units. Set
 `BECKETT_INSTALL_BROWSER_SMOKE=1` only when you want the optional live browser-sandbox smoke during
 installation (it is otherwise a post-install diagnostic). It deliberately does
 **not** grant passwordless sudo or weaken the host's AppArmor policy.
@@ -170,9 +166,8 @@ Browser/device authentication cannot be completed on someone else's behalf. On a
 the `beckett-v4` user service therefore starts in **`healthy-pending-configuration`** mode rather
 than crash-looping: `sudo -iu beckett beckett status --pretty` lists exactly what remains. It accepts
 only `status` until the required secrets and enabled harness credentials exist. The installer prints
-the exact login commands and one rerun command; that rerun starts bored (Beckett files, steers, and
-completes every ticket through it), confirms the tracker is reachable, validates the GitHub
-credential, and then runs `beckett doctor`. Every rerun is idempotent,
+the exact login commands and one rerun command; that rerun validates the GitHub credential and
+then runs `beckett doctor`. Every rerun is idempotent,
 preserves custom config/secrets, and explicitly restarts an already-running daemon onto the new code.
 
 Installing a fork is the same flow:
@@ -257,7 +252,7 @@ Discord exposes the common read/create paths natively:
 | Slash command | What it does |
 |---|---|
 | `/task create name:<name>` | Allocates `#N` and creates `#N.1`. Opens no thread — work reports into the channel it was asked in. |
-| `/task show number:<N>` | Shows the task and its branch states without internal ticket ids. |
+| `/task show number:<N>` | Shows the task and its branch states without internal identifiers. |
 | `/branch reference:<N.x>` | Shows aggregate additions, deletions, files, commits, checks, review, and conversation counts. Never raw diff lines. |
 | `/stats` | Privately shows the owner's remaining Claude and Codex subscription windows and reset times. |
 
@@ -271,21 +266,23 @@ Run on the box as the beckett user (`bun src/cli/beckett.ts <...>`, usually alia
 
 | Command | What it does |
 |---|---|
-| `beckett status --pretty` | What the live daemon is doing right now (workers, poller, Discord, concierge). |
+| `beckett status --pretty` | What the live daemon is doing right now (workers, runs, Discord, concierge). |
 | `beckett doctor` | Would Beckett work right now? Binaries, live token probes, env drift, leaked workers. Non-zero exit on any failure. |
 | `beckett discord reply --channel <id> "…"` | Post a message as Beckett into a channel. A reply-ack timeout reports `mayHaveSent`, not a retryable failure; do not resend it automatically. Set `BECKETT_DISCORD_REPLY_ACK_TIMEOUT_MS` to tune the 75s acknowledgement budget. |
 | `beckett reload` | Re-read `persona.md` and re-ground on a fresh session (live voice retune). |
-| `beckett task create|branch|start|show|list …` | Create numbered work, split it into branches, start execution, and inspect progress. |
-| `beckett ticket …` | Internal tracker-ticket controls used for comments, state changes, and compatibility. |
-| `beckett finish -m "…"` | The whole end-of-ticket motion from the branch's checkout: push, open/reuse the PR, wait for CI, merge to main, then run the guarded redeploy. Every stop names the blocker and its fix; re-running is safe. |
+| `beckett task deploy --prompt "…" [--repo <slug>] [--ultracode]` | The one call that starts real work: files a run, the supervisor builds it. |
+| `beckett task ask <run>` | A run's state, its `spec.md` checklist progress, its journal tail, and the live worker's session name. |
+| `beckett task steer <run> "…"` | Send a mid-flight instruction to the running worker. |
+| `beckett task create|branch|show|list …` | The public `#N` / `#N.x` registry: name work humans refer to, and inspect what's in flight. |
+| `beckett finish -m "…"` | The whole landing motion from the branch's checkout: push, open/reuse the PR, wait for CI, merge to main, then run the guarded redeploy. Every stop names the blocker and its fix; re-running is safe. |
 | `beckett eval "author/model" [--short|--full]` | Run the curated coding prompt suite against any OpenRouter model and save a readable report. |
 | `beckett memory recall "…"` / `remember …` | Query / write Beckett's cross-conversation knowledge. |
 | `beckett identity set --user <id> …` | Teach Beckett who someone is and how to address them. |
 
-`task create` allocates the durable task and its main `#N.1` branch; `task start '#N.1'` files that
-branch into the tracker and queues execution. Add real separations with `task branch '#N' --title "…"`;
-use `--needs '#N.x'` for scheduling and `--parent '#N.x'` for hierarchy. Dependent branches must
-share a `--project`; they start from the completed predecessor's local Git branch, not stale `main`.
+`task deploy` is the whole work motion: the prompt you pass is the worker's brief, `--channel`
+is where updates report back, `--repo <slug>` is the project it builds in (omit it and the run
+targets Beckett's own source). `task create` still allocates a durable `#N` / `#N.x` reference for
+work humans want to name and attach to a thread; a run can be linked to one with `--task '#N.x'`.
 
 (Beckett itself uses these via skills; you rarely need them by hand.)
 
@@ -295,7 +292,7 @@ Prod (`~/beckett` on the box) only ever runs `origin/main` and is **never edited
 the branch's checkout, once the work is finished:
 
 ```bash
-beckett finish -m "what this ticket shipped"
+beckett finish -m "what this work shipped"
 ```
 
 That is PR → CI → merge → deploy in one call, and it is how Beckett ships its own work. The deploy
@@ -322,9 +319,8 @@ anything, so a missing app key fails immediately with a named cause.
 src/
   concierge/    the Discord-facing Opus agent — concierge.md (doctrine) + persona seed
   discord/      gateway, message chunking, access control, federation (peer bots)
-  dispatch/     turns ticket-state changes into worker/reviewer spawns
-  bored/        bored tracker HTTP client
-  tracker/      shared ticket contract, cast blocks, poller
+  run/          the run model, ledger, spec.md codec, and the RunSupervisor engine
+  dispatch/     worker spawn + stage prompts (implement / review)
   task/         durable #N / #N.x task and branch registry
   worker/       the coding-agent harness (worktree, scope-guard, casting)
   drivers/      claude / codex / pi process drivers
@@ -333,7 +329,7 @@ src/
   cli/          the `beckett` CLI (one entrypoint, beckett.ts)
   config.ts     strict, fully-defaulted config schema
 deploy/         systemd units, install.sh, deploy-prod.sh, host-setup.md
-docs/           ARCHITECTURE.md (the current doc) + extending-capabilities.md + audits
+docs/           the design set: architecture.md, orchestration.md, vision.md, migration.md, …
 specs/          design history (v3 under _legacy-v3/, v2 under _legacy-v2/, original under _legacy/)
 ```
 
@@ -352,7 +348,7 @@ specs/          design history (v3 under _legacy-v3/, v2 under _legacy-v2/, orig
   to reproduce every label in every run.
 - **Style:** match the neighbors. This codebase leans on dense, explanatory comments that say
   *why*, strict config validation, and pure/testable helpers split out from I/O. Read
-  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the non-negotiable conventions.
+  [`docs/architecture.md`](docs/architecture.md) for the non-negotiable conventions.
 - **New to the repo?** There's a paste-into-your-AI-agent onboarding prompt at
   [`docs/onboarding-prompt.md`](docs/onboarding-prompt.md) that gets a coding agent up to speed
   fast.

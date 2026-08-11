@@ -305,14 +305,17 @@ test("routines.add validates at the seam, may restate but never redirect the rep
   });
   expect((await ext.store().list()).length).toBe(0);
 
+  // A vault entry name unrelated to "x.com" — the routine store's boot-time credsEntry
+  // migration (W4A: heals the dead "x.com" jingle entry to "x-account") would otherwise rewrite
+  // it on the next load, which is not what THIS test is exercising (plain add pass-through).
   const added = await registry.invoke(
-    { capabilityId: "routines.add", args: { ...ADD_ARGS, channelId: "chan", credsEntry: "x.com" }, origin: ORIGIN },
+    { capabilityId: "routines.add", args: { ...ADD_ARGS, channelId: "chan", credsEntry: "example-vault-entry" }, origin: ORIGIN },
     deps,
   );
   expect(added.ok).toBeTrue();
   expect(added.data).toMatchObject({ id: "daily-check", enabled: true, window: "09:00-09:40 America/New_York" });
   const stored = await ext.store().get("daily-check");
-  expect(stored!.action).toEqual({ kind: "browser", task: "check the thing", credsEntry: "x.com", channelId: "chan" });
+  expect(stored!.action).toEqual({ kind: "browser", task: "check the thing", credsEntry: "example-vault-entry", channelId: "chan" });
 
   // The store's own duplicate guard surfaces as a result, never an exit.
   const dup = await registry.invoke({ capabilityId: "routines.add", args: ADD_ARGS, origin: ORIGIN }, deps);
@@ -476,6 +479,84 @@ test("the browser lane still goes to the browser — the fork is on the lane, no
   });
   await dispatcher.dispatch(planFor("browser") as never, {} as never);
   expect(posted).toEqual(["go do the thing"]);
+});
+
+// ── the agent lane's POST: contract routes through chilltext before the browser (W4A) ────
+
+/** A plan shaped like the scheduler builds one for the `agent` lane. */
+function agentPlanFor(agentId: string, agentInput: string) {
+  return {
+    routineId: "daily-x-shitpost",
+    lane: "agent" as const,
+    agentId,
+    agentInput,
+    browserTask: null,
+    depsUpdate: null,
+    selfPrompt: null,
+    dream: false,
+    freeTime: false,
+    preview: "p",
+    credsEntry: "x-account",
+    channelId: null,
+    requesterId: null,
+  };
+}
+
+test("an agent-lane POST: output routes through the injected chillTransform before hitting the browser lane", async () => {
+  const posted: string[] = [];
+  const chillCalls: Array<{ cfg: { url: string; timeout_ms: number }; req: { agentOutput: string } }> = [];
+  const dispatcher = await dispatcherOf(
+    {
+      browserAgent: () => ({ async run(task: string) { posted.push(task); return undefined as never; } }) as never,
+      agentRegistry: () => ({ get: () => ({ id: "social-media" }) }) as never,
+      agentRunner: () => ({ run: async () => ({ state: "done", output: "POST: infra is on fire again" }) }) as never,
+      // The seam under test: production wiring binds this to the real chilltext.ts client and
+      // the real global fetch. Injecting it here proves that seam is exercised — and reachable —
+      // without a live network call, per the routine-extension DI pattern the other lanes use.
+      chillTransform: async (cfg, req) => {
+        chillCalls.push({ cfg, req });
+        return { messages: ["infra's on fire again, groundhog day fr"] };
+      },
+    },
+    (config) => {
+      config.social.chill = true;
+      config.concierge.chilltext.url = "https://chilltext.example";
+      config.concierge.chilltext.timeout_ms = 1234;
+    },
+  );
+
+  await dispatcher.dispatch(agentPlanFor("social-media", "") as never, {} as never);
+
+  // The transform was actually called, with the configured url/timeout — not skipped.
+  expect(chillCalls.length).toBe(1);
+  expect(chillCalls[0]!.cfg).toMatchObject({ url: "https://chilltext.example", timeout_ms: 1234 });
+  expect(chillCalls[0]!.req.agentOutput).toBe("infra is on fire again");
+  // The chilled text — not the raw draft — reaches the browser task.
+  expect(posted.length).toBe(1);
+  expect(posted[0]).toContain("infra's on fire again, groundhog day fr");
+  expect(posted[0]).not.toContain("infra is on fire again");
+});
+
+test("an agent-lane POST: output fails open to the draft when chillTransform errors", async () => {
+  const posted: string[] = [];
+  const dispatcher = await dispatcherOf(
+    {
+      browserAgent: () => ({ async run(task: string) { posted.push(task); return undefined as never; } }) as never,
+      agentRegistry: () => ({ get: () => ({ id: "social-media" }) }) as never,
+      agentRunner: () => ({ run: async () => ({ state: "done", output: "POST: ship it" }) }) as never,
+      chillTransform: async () => {
+        throw new Error("chilltext is down");
+      },
+    },
+    (config) => {
+      config.social.chill = true;
+    },
+  );
+
+  await dispatcher.dispatch(agentPlanFor("social-media", "") as never, {} as never);
+
+  expect(posted.length).toBe(1);
+  expect(posted[0]).toContain("ship it");
 });
 
 test("a self fire wakes the concierge and never resolves the browser lane (issue #26)", async () => {

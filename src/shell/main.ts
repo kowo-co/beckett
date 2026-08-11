@@ -1,21 +1,17 @@
 /**
  * Beckett — the shell entrypoint (`src/shell/main.ts`)
  * =======================================================================================
- * Boots the ticket-queue system and wires the four moving parts together:
+ * Boots the daemon and wires its moving parts together:
  *
- *   1. Config + env — `loadConfig()` reads `~/.beckett/config.toml` (the `[tracker]` /
- *      `[concierge]` sections) and loads `~/.beckett/.env`.
- *   2. BoredClient — the only module that speaks HTTP to the loopback bored tracker
- *      (BECKETT_BORED_URL, default http://127.0.0.1:7770).
- *   3. Poller — polls bored every `config.tracker.poll_secs`, diffs snapshots, and
- *      hands each batch of {@link PollEvent}s to the dispatcher.
- *   4. Dispatcher — the state machine: spawns implement/review workers, steers them from
- *      ticket comments, aborts on cancel, advances ticket state on finish.
- *   5. Concierge — the long-lived `claude -p` chat agent that owns Discord and files tickets.
+ *   1. Config + env — `loadConfig()` reads `~/.beckett/config.toml` and `~/.beckett/.env`.
+ *   2. RunStore — the run ledger at `<beckettDir>/runs.json`, written by `beckett task deploy`.
+ *   3. RunSupervisor — the engine: admits runs off the `run.deploy` bus ping, spawns
+ *      implement/review workers, steers them, publishes, and advances run state on finish.
+ *   4. Concierge — the long-lived `claude -p` chat agent that owns Discord and deploys runs.
  *
- * The Concierge and the poll→dispatch loop are independent: the Concierge writes tickets into
- * the tracker, the poller observes them, the dispatcher acts. They never call each other
- * directly — the tracker is the shared queue.
+ * The Concierge and the run engine are independent: the Concierge deploys work by writing a run
+ * (one CLI call) and pinging the bus; the supervisor acts on it. They never call each other
+ * directly — the run ledger is the shared queue.
  *
  * Run it with `bun run v4` (see package.json) or `bun src/shell/main.ts`. The `v4` script name
  * and the `beckett-v4.service` unit are kept for continuity with the 4.0.0 multiplayer release;
@@ -32,14 +28,11 @@ import { buildPaths } from "../paths.ts";
 import { recordBoot, recordCleanShutdown, uptimeLedgerPath } from "../uptime.ts";
 import { log as rootLog } from "../log.ts";
 import type { Config, Harness, Logger } from "../types.ts";
-import type { Ticket } from "../tracker/types.ts";
-import { projectSlug } from "../tracker/cast.ts";
-import { createTrackerClient, type TrackerClient } from "../tracker/client.ts";
-import { boredBaseUrl } from "../bored/client.ts";
-import { createTrackerPoller, type TrackerPoller } from "../tracker/poll.ts";
-import { BECKETT_COMMENT_MARKER, createDispatcher, type Dispatcher } from "../dispatch/dispatcher.ts";
+import { RunStore } from "../run/store.ts";
+import type { RunState } from "../run/types.ts";
+import { createRunSupervisor, runProjectSlug, runSpecReader, type RunSupervisor } from "../run/supervisor.ts";
 import { createStagesExtension, stageViewOf } from "../dispatch/stages.ts";
-import { createProgressCardService, type ProgressCardService } from "../progress/cards.ts";
+import { createProgressCardService, shouldObserveRunCard, type ProgressCardService } from "../progress/cards.ts";
 import { createGitHubPrPoller, type GitHubPrPoller } from "../github/poll.ts";
 import { createGitHubActivityPoller, type GitHubActivityPoller } from "../github/activity.ts";
 import { parsePrUrl } from "../github/types.ts";
@@ -64,17 +57,11 @@ import { LiveAgentRegistry } from "../agent/registry.ts";
 import { createAgentRunner } from "../agent/invoke.ts";
 import { TaskStore } from "../task/store.ts";
 import { createBranchStatusService } from "../task/status.ts";
-import { readLocalBranchStats } from "../git/branch-stats.ts";
-import { CfDns, apexDomain } from "../agency/cloudflare.ts";
-import { TunnelDeployer } from "./deploy.ts";
-import { PreviewManager, fetchProbe, type PreviewTicket } from "../preview/index.ts";
-import { serveBuild } from "../preview/serve-build.ts";
-import { createFrontendScreenshotHook, type ScreenshotTicketRef } from "../preview/screenshot.ts";
-import { gitBranchForTicket } from "../git/branch-name.ts";
-import { reconcileTaskTickets } from "../task/reconcile.ts";
+import { createRunTaskSync } from "../task/run-sync.ts";
 import { createAgentMailApi, defaultMailStateFile, safeMailError } from "../mail/index.ts";
 import { createAgentMailPoller, defaultMailListenerStateFile, type AgentMailPoller } from "../mail/listener.ts";
 import { ExtensionRegistry, type ExtensionContext } from "../ext/index.ts";
+import { ActionClass } from "../capability/index.ts";
 import { pendingConfigurationProblems, startPendingConfigurationDaemon } from "./pending.ts";
 // NOTE: the Phase 4 organs (github/dns/deploy/mail) are deliberately NOT daemon-registered yet —
 // deploy.create's in-daemon host side effects (cloudflared + ~/.cloudflared/config.yml) need
@@ -92,57 +79,10 @@ import { createRoutinesExtension } from "../capability/modules/routines.ts";
 import { createMemoryExtension } from "../capability/modules/memory.ts";
 
 /**
- * Root under which every ticket builds its OWN project repo — one directory per code project,
+ * Root under which every run builds its OWN project repo — one directory per code project,
  * e.g. `~/Projects/balloons`. Override via `BECKETT_PROJECTS_ROOT`.
  */
 const PROJECTS_ROOT = process.env.BECKETT_PROJECTS_ROOT?.trim() || join(homedir(), "Projects");
-
-/**
- * The git repo a ticket's worker runs in (v3.1): the ticket's OWN project repo at
- * `<PROJECTS_ROOT>/<slug>`, pushed to `<owner>/<slug>` — fully decoupled from Beckett's own
- * source repo (`~/beckett`, which a worker never touches). The slug is the ticket's
- * Concierge-named `project`, or the ticket identifier when unnamed (a per-ticket sandbox). The
- * dispatcher provisions the repo (clone if it exists on GitHub, else `git init`) before spawning.
- */
-function resolveRepoRoot(ticket: Ticket): string {
-  return join(PROJECTS_ROOT, projectSlug(ticket.project || ticket.identifier || "scratch"));
-}
-
-/**
- * The file paths a branch changed vs. `main`, for frontend-preview detection (#76). Best-effort:
- * a missing repo/branch or any git failure yields an empty list (no preview), never a throw.
- */
-function diffFileNames(repoRoot: string, branch: string): string[] {
-  try {
-    const r = Bun.spawnSync(["git", "-C", repoRoot, "diff", "--name-only", `main...${branch}`], {
-      stdout: "pipe",
-      stderr: "ignore",
-    });
-    if (!r.success) return [];
-    return r.stdout.toString().split("\n").map((l) => l.trim()).filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
-/**
- * The files a ticket's BUILT worktree changed vs. its fork base (#75) — the diff that decides
- * whether a finished ticket earns a result screenshot, and of what. Runs in the worktree against
- * the captured base SHA so it reflects the built branch, not `main`. Best-effort: any git failure
- * yields an empty list (→ no screenshot), never a throw.
- */
-function worktreeDiffNames(workspace: string, baseRef: string): string[] {
-  try {
-    const r = Bun.spawnSync(["git", "-C", workspace, "diff", "--name-only", baseRef], {
-      stdout: "pipe",
-      stderr: "ignore",
-    });
-    if (!r.success) return [];
-    return r.stdout.toString().split("\n").map((l) => l.trim()).filter(Boolean);
-  } catch {
-    return [];
-  }
-}
 
 /**
  * Beckett version. v4.0 — the multiplayer release (OPS-80): channel-scoped shared context, so
@@ -162,14 +102,11 @@ export const BECKETT_VERSION: string = (pkg as { version: string }).version;
 interface BootedSystem {
   config: Config;
   logger: Logger;
-  client: TrackerClient;
-  clients: Map<string, TrackerClient>;
-  poller: TrackerPoller;
-  pollers: Map<string, TrackerPoller>;
   prPoller: GitHubPrPoller | null;
   activityPoller: GitHubActivityPoller | null;
   mailPoller: AgentMailPoller | null;
-  dispatcher: Dispatcher;
+  /** The run engine (`src/run/supervisor.ts`) — the daemon's only staffing loop. */
+  runSupervisor: RunSupervisor;
   concierge: Concierge;
   voiceGateway: VoiceGateway;
   statusDashboard: StatusDashboardService;
@@ -181,9 +118,9 @@ interface BootedSystem {
 }
 
 /**
- * Construct and start the whole v3 stack. Returns the booted system so the caller can wire
- * shutdown. The Concierge is started first (fail fast on a bad `claude` launch); the poller is
- * started last so events only flow once the dispatcher is ready to consume them.
+ * Construct and start the whole stack. Returns the booted system so the caller can wire shutdown.
+ * The Concierge is started first (fail fast on a bad `claude` launch); the run supervisor starts
+ * after crash recovery so nothing re-staffs into a half-built system.
  */
 async function boot(): Promise<BootedSystem> {
   const config = loadConfig();
@@ -191,28 +128,14 @@ async function boot(): Promise<BootedSystem> {
 
   logger.info("booting beckett v4", {
     version: BECKETT_VERSION,
-    tracker: boredBaseUrl(),
-    defaultBoard: config.tracker.default_board,
-    boards: config.tracker.boards,
-    pollSecs: config.tracker.poll_secs,
     conciergeModel: config.concierge.model,
     projectsRoot: PROJECTS_ROOT,
   });
 
-  // bored serves ONE managed board per instance — poll only the default board.
-  const activeBoards = [config.tracker.default_board];
-  const clients = new Map<string, TrackerClient>();
-  for (const board of activeBoards) {
-    clients.set(board, createTrackerClient({ config, board, logger: logger.child(`tracker.client.${board}`) }));
-  }
-  const client = clients.get(config.tracker.default_board) ?? clients.values().next().value!;
-  const clientByProjectId = new Map<string, TrackerClient>();
-  const pollerByProjectId = new Map<string, TrackerPoller>();
-
-  // Deterministic GitHub publishing: when a ticket reaches done, its project repo is pushed to
+  // Deterministic GitHub publishing: when a run reaches done, its project repo is pushed to
   // `<owner>/<slug>` (public) so the links Beckett hands out actually resolve — instead of
   // relying on the worker to push, which it skipped and left repos that 404'd. Built from the
-  // GitHub identity; no credential makes it undefined → the dispatcher skips publishing and says so.
+  // GitHub identity; no credential makes it undefined → the supervisor skips publishing and says so.
   const identity = loadIdentity(config);
   const publishRepo = githubConfigured(identity)
     ? async (a: {
@@ -251,7 +174,7 @@ async function boot(): Promise<BootedSystem> {
   }
 
   // GitHub PR sense (OPS-124): watch the PRs Beckett opens on the kowo-co org and relay review/CI/
-  // merge signal back to the ticket's channel. Registry-driven — the dispatcher's `onPrOpened` hook
+  // merge signal back to the run's channel. Registry-driven — the supervisor's `onPrOpened` hook
   // (below) registers each PR at open time with its origin channel. Read-only: it observes and
   // relays, never replies or merges. Skipped without a credential (nothing to read GitHub with).
   const paths = buildPaths(config);
@@ -262,22 +185,6 @@ async function boot(): Promise<BootedSystem> {
   const tasks = new TaskStore(join(beckettDir, "tasks.json"));
   // The Concierge and dashboard deliberately share this one gateway connection.
   const gateway = createDiscordGateway({ config, logger: logger.child("discord") });
-  const syncTaskBranch = async (ticket: Ticket, board: string, snapshot = false): Promise<void> => {
-    if (!ticket.branchRef) return;
-    const branch = await tasks.syncTicket(ticket, board);
-    if (!snapshot || !branch?.git?.workspace || !branch.git.baseSha) return;
-    try {
-      const stats = await readLocalBranchStats(branch.git.workspace, branch.git.baseSha);
-      await tasks.setDiff(branch.ref, {
-        additions: stats.additions,
-        deletions: stats.deletions,
-        files: stats.changedFiles,
-        commits: stats.commits,
-      });
-    } catch (err) {
-      logger.warn("task branch diff snapshot failed", { branch: branch.ref, error: String(err) });
-    }
-  };
   const githubReader = githubConfigured(identity)
     ? new GitHubCli({
         ...githubAuth(identity),
@@ -315,14 +222,13 @@ async function boot(): Promise<BootedSystem> {
       })
     : null;
 
-  // 5. Concierge — owns Discord (and the private ticket journal the dispatcher feeds). Constructed
-  //    here (cheap, no I/O) so its progress sink can be wired into the dispatcher below; started
-  //    further down (FIRST of the live parts) so a bad claude launch fails the whole boot early.
+  // Concierge — owns Discord (and the private run journal the supervisor feeds). Constructed here
+  // (cheap, no I/O) so its progress sink can be wired into the supervisor below; started further
+  // down (FIRST of the live parts) so a bad claude launch fails the whole boot early.
   const concierge = createConcierge({
     config,
     logger: logger.child("concierge"),
     gateway,
-    tracker: client,
     tasks,
     branchStatus: createBranchStatusService({
       store: tasks,
@@ -331,264 +237,155 @@ async function boot(): Promise<BootedSystem> {
     }),
   });
 
-  // 3. Pollers — one per board, all feeding the same dispatcher. `start()` primes the
-  //    snapshot first (so we don't replay history) then self-schedules every poll_secs.
-  //    Constructed BEFORE the dispatcher so the dispatcher's instant-advance path (issue #33)
-  //    can reference the correct board poller.
-  const pollers = new Map<string, TrackerPoller>();
-  for (const [board, boardClient] of clients) {
-    pollers.set(
-      board,
-      createTrackerPoller({
-        client: boardClient,
-        logger: logger.child(`tracker.poll.${board}`),
-        pollSecs: config.tracker.poll_secs,
-        commentCursorPath: join(
-          beckettDir,
-          board === config.tracker.default_board ? "comment-cursors.json" : `comment-cursors-${board}.json`,
-        ),
-        snapshotPath: join(
-          beckettDir,
-          board === config.tracker.default_board ? "poll-snapshot.json" : `poll-snapshot-${board}.json`,
-        ),
-      }),
-    );
-  }
-  const poller = pollers.get(config.tracker.default_board) ?? pollers.values().next().value!;
-  // Health-check the tracker and pre-resolve board routing before polling. Boards are
-  // independent, so run their within-board sequential checks concurrently. Each request uses the
-  // client's 429 Retry-After/exponential-backoff wrapper. Failures remain non-fatal so a temporary
-  // tracker outage does not take Discord down; the poller retries through its normal client
-  // bootstrap on later ticks.
-  // A board-less instance (#141 staging) skips the board entirely: no health-check, no reconcile,
-  // no poll/dispatch below. The board is a shared HTTP service (BECKETT_BORED_URL), so this is the
-  // one switch that keeps a second daemon off the production queue — and off the boot-time retry
-  // storm an unreachable board would otherwise cost before Discord even connects.
-  if (config.tracker.enabled) {
-    await Promise.all(
-      [...clients].map(async ([board, boardClient]) => {
-        try {
-          await boardClient.ensureProvisioned();
-          const info = await boardClient.projectInfo();
-          clientByProjectId.set(info.projectId, boardClient);
-          const boardPoller = pollers.get(board);
-          if (boardPoller) pollerByProjectId.set(info.projectId, boardPoller);
-          // Poller priming intentionally emits recovery events only for active work. Reconcile the
-          // complete board here as well so terminal/parked changes made while offline cannot leave
-          // the public task registry stale or a dependent permanently held.
-          await reconcileTaskTickets(tasks, await boardClient.listIssues(), board, (ticket, err) => {
-            logger.warn("task branch boot reconciliation failed", {
-              branch: ticket.branchRef,
-              error: String(err),
-            });
-          });
-        } catch (err) {
-          logger.warn("tracker board health-check/pre-resolution failed", { board, error: (err as Error).message });
-        }
-      }),
-    );
-  } else {
-    logger.warn("tracker disabled (config.tracker.enabled=false) — no board poll or dispatch");
-  }
-  const rememberRouting = (events: Ticket | Ticket[], board: string) => {
-    const boardClient = clients.get(board);
-    const boardPoller = pollers.get(board);
-    for (const ticket of Array.isArray(events) ? events : [events]) {
-      if (ticket.projectId && boardClient) clientByProjectId.set(ticket.projectId, boardClient);
-      if (ticket.projectId && boardPoller) pollerByProjectId.set(ticket.projectId, boardPoller);
-    }
-  };
-
   // The v6 extension seam (docs/v6-architecture.md §6): the ONE runtime registry the daemon
   // dispatches extensions through — `ext.invoke`/`ext.catalog` on the control bus read it via
-  // the concierge. Constructed BEFORE the dispatcher (Phase 5: worker stages resolve through
-  // this registry); the stateful organs register further down, once their collaborators exist.
+  // the concierge. Constructed BEFORE the run supervisor (worker stages resolve through this
+  // registry); the stateful organs register further down, once their collaborators exist.
   // Registration order is teardown-reverse, and must honor concierge-first/pollers-last for
   // organs that migrate.
   const extensions = new ExtensionRegistry();
   const extCtx: ExtensionContext = { config, paths, logger };
-  // Phase 5 — the worker-stages facet: the four built-ins (implement/review/design/design_check)
-  // as ONE core-kind extension. Stateless, no capabilities (never @mention-routed, absent from
+  // The worker-stages facet: the built-ins (implement/review) as ONE core-kind extension. Stateless, no capabilities (never @mention-routed, absent from
   // the catalog), so registering it first constrains no lifecycle ordering below.
   extensions.register(createStagesExtension(extCtx));
 
-  // Branch previews (#76): while a frontend branch is in review, surface a live, externally-
-  // reachable URL on its ticket instead of a diff; tear it down when it lands/cancels. The worker
-  // stands the preview up via `beckett deploy <slug>-preview` (existing tunnel path); the daemon
-  // owns verify-and-surface (never an internal/unreachable link) and teardown. Wired only when the
-  // Cloudflare zone credentials exist — otherwise the dispatcher runs with no preview at all.
-  const preview = ((): { ensure: (t: Ticket) => Promise<{ status: "ready"; url: string; host: string } | { status: "skipped"; reason: string }>; teardown: (t: Ticket) => Promise<void> } | undefined => {
-    const token = process.env.CLOUDFLARE_API_TOKEN?.trim();
-    const zoneId = process.env.CLOUDFLARE_ZONE_ID?.trim();
-    if (!token || !zoneId) return undefined;
-    const previewLog = logger.child("preview");
-    const dns = new CfDns({ token, zoneId, logger: previewLog });
-    const deployer = new TunnelDeployer({ tunnelId: process.env.CLOUDFLARE_TUNNEL_ID, dns, logger: previewLog });
-    const manager = new PreviewManager({
-      deployer,
-      probe: (url) => fetchProbe(url),
-      changedFiles: async (pt) => {
-        if (!pt.branchRef) return [];
-        const repoRoot = join(PROJECTS_ROOT, pt.slug);
-        const branch = gitBranchForTicket({ identifier: pt.id, branchRef: pt.branchRef });
-        return diffFileNames(repoRoot, branch);
-      },
-      store: tasks,
-      logger: previewLog,
-      apex: apexDomain(),
-    });
-    const previewTicketOf = (t: Ticket): PreviewTicket => ({
-      id: t.id,
-      slug: projectSlug(t.project || t.identifier),
-      branchRef: t.branchRef,
-    });
-    return {
-      ensure: (t) => manager.ensure(previewTicketOf(t)),
-      teardown: (t) => manager.teardown(previewTicketOf(t)),
-    };
-  })();
-
-  // 4. Dispatcher — consumes PollEvents, owns the worker lifecycle. Its workers' granular event
-  //    streams are mirrored into each ticket's Discord thread via the Concierge's progress hub.
-  // Zero-token progress cards (progress.cards_as_code, default off): CODE keeps one status
-  // message per active ticket in the ticket's origin channel, edited straight off the dispatch
-  // event bus — no Concierge involvement, honoring "the Concierge and the poll-dispatch loop
+  // The run ledger — constructed before the card service, which needs it for the checklist reader.
+  const runStore = new RunStore(join(beckettDir, "runs.json"));
+  // Zero-token progress cards: CODE keeps one status message per active run, edited straight off
+  // the dispatch event bus — no Concierge involvement, honoring "the Concierge and the run engine
   // never call each other directly". Channel: the event's stamped originChannel, else the task
-  // registry's thread/origin (same precedent as the PR re-watch loop below).
-  const progressCards: ProgressCardService | null = config.progress.cards_as_code
+  // registry's thread/origin (same precedent as the PR re-watch loop below). `runs.cards`
+  // (default ON — the deploy receipt) is the one switch.
+  const runCardsEnabled = config.runs?.cards ?? true;
+  const progressCards: ProgressCardService | null = runCardsEnabled
     ? createProgressCardService({
         gateway,
         statePath: join(beckettDir, "progress-cards.json"),
         resolveChannel: (event) => {
           if (event.channel) return event.channel;
-          const hit =
-            tasks.findByTicket(event.ticketId) ??
-            tasks.findByTicket(event.ticketRef.replace(/^#/, ""));
+          const hit = tasks.findByRun(event.runId) ?? tasks.findByRun(event.runRef);
           return hit ? hit.task.threadId ?? hit.task.originChannelId ?? null : null;
         },
+        // The run card's checklist line (spec.md progress) — cards.ts stays fs-free, this reads
+        // the run's live workspace off the same store the run engine drives.
+        specReader: runSpecReader(runStore),
         logger: logger.child("progress-cards"),
       })
     : null;
 
-  const dispatcher = createDispatcher({
-    client,
-    clients: [...clients.values()],
-    clientForProjectId: (projectId) => clientByProjectId.get(projectId),
+  // The task registry ↔ run engine bridge (`../task/run-sync.ts`): what keeps `beckett task list`,
+  // the #104 task card, the branch card and the Merge button moving as a run works. Without it a
+  // started branch sits at "ready" forever — see that module's header for the whole rationale.
+  const taskSync = createRunTaskSync({
+    tasks,
+    projectSlugOf: runProjectSlug,
+    githubOwner: identity.github.owner,
+    logger: logger.child("task-sync"),
+  });
+
+  // The RUN engine — `beckett task deploy` files a Run, and this drives it implement → review →
+  // publish → done. It is the daemon's ONLY staffing loop.
+  const runSupervisor = createRunSupervisor({
+    store: runStore,
     config,
-    // v6 Phase 5: staff/cast/prompt worker stages through the boot registry's stage view — the
-    // one ExtensionRegistry — instead of the module-local default table.
     stages: stageViewOf(extensions),
-    resolveRepoRoot,
+    // `run.repo === null` is BECKETT ITSELF, not a per-run sandbox: the flagship default
+    // (`beckett task deploy "…"` with no --repo) must land in Beckett's own checkout. The slug
+    // resolver is shared with the supervisor so the repo root and the publish target can never
+    // point at two different repositories.
+    resolveRepoRoot: (run) => join(PROJECTS_ROOT, runProjectSlug(run)),
     publishRepo,
     progress: concierge.progressSink(),
-    advanceOutboxPath: join(beckettDir, "advance-outbox.jsonl"),
-    publishOutboxPath: join(beckettDir, "publish-outbox.jsonl"),
-    // OPS-167: append before relaying to Discord. `postDispatchEvent` is deliberately not awaited
-    // by the bus, so gateway outages degrade to an on-disk timeline rather than blocking dispatch.
     dispatchEventsPath: join(paths.eventsDir, "dispatch.jsonl"),
     dispatchLiveSink: (event) => {
-      // Fire-and-forget: a card hiccup must never delay the digest relay, and neither is awaited
-      // by the bus. Flag off ⇒ progressCards is null and this is behaviorally identical.
-      if (progressCards) void progressCards.observe(event);
+      // `runs.cards` (default ON) is this lane's own switch — the deploy receipt posts
+      // independently of the ticket dispatcher's `progress.cards_as_code` above.
+      if (shouldObserveRunCard(progressCards, runCardsEnabled)) void progressCards?.observe(event);
       return concierge.postDispatchEvent(event);
     },
-    runtimeStatePath: join(beckettDir, "dispatcher-state.json"),
+    publishOutboxPath: join(beckettDir, "run-publish-outbox.jsonl"),
+    runtimeStatePath: join(beckettDir, "run-state.json"),
     spendLedgerPath: paths.spend,
-    // Harness health probe (issue #17): a dead harness (binary gone, login expired) becomes one
-    // clear substitution comment instead of a wedged ticket. ~5-min cached per harness.
     preflight: (harness) => preflightFor(harness, config),
-    onBeforePublish: async ({ ticket }) => {
-      if (!ticket.branchRef) return;
-      const board = clientByProjectId.get(ticket.projectId)?.board() ?? config.tracker.default_board;
-      // Snapshot against the original task base before an owned-repo push rebases onto a parallel
-      // branch that reached main first. This persisted aggregate survives worktree teardown.
-      await syncTaskBranch(ticket, board, true);
-    },
-    // Instant milestone path (issue #33): a dispatcher-written advance reaches Discord NOW
-    // (concierge.notify) instead of after the next poll, and the poller's snapshot is synced so
-    // the same transition isn't re-emitted as a duplicate ping ≤5s later.
-    onAdvance: async (event) => {
-      (pollerByProjectId.get(event.ticket.projectId) ?? poller).observe(event);
-      if (event.ticket.branchRef) {
-        const board = clientByProjectId.get(event.ticket.projectId)?.board() ?? config.tracker.default_board;
-        try {
-          // Publication snapshots completed contributions before any rebase. State advances only
-          // update lifecycle here so the accurate pre-publish aggregate is never overwritten.
-          await syncTaskBranch(event.ticket, board);
-        } catch (err) {
-          logger.warn("task branch state sync failed", { branch: event.ticket.branchRef, error: String(err) });
-        }
-      }
+    // The closed loop: every run transition reaches the concierge, which decides whether it is
+    // worth telling the person who asked. Fire-and-forget by contract — the supervisor logs and
+    // continues if this throws, so a Discord hiccup can never wedge the engine.
+    onStateChange: (event) => {
+      // The user-facing board first (fire-and-forget, same contract), then the voice.
+      void taskSync.onStateChange(event);
       concierge.notify(event);
     },
-    onPublished: async ({ url, kind, ticket }) => {
-      if (!ticket.branchRef) return;
-      try {
-        await tasks.setPublication(ticket.branchRef, {
-          repo: `${identity.github.owner}/${projectSlug(ticket.project || ticket.identifier)}`,
-          url,
-          kind,
-        });
-      } catch (err) {
-        logger.warn("task branch publication sync failed", { branch: ticket.branchRef, error: String(err) });
-      }
-    },
-    // OPS-124: a PR Beckett just opened → start watching it, routed to the ticket's origin channel.
-    // Parse the repo+number from the PR URL; a non-PR URL yields null and is ignored. #31: the
-    // poller no longer drops PRs outside our org — a cross-fork PR into a third-party upstream is
-    // watched exactly like one on our own org.
-    //
-    // What is stamped here is the FALLBACK destination, not the destination. A user-opened thread
-    // that owns this work wins, but that is resolved when the event is relayed
-    // (`Concierge.channelForPr`), never here: under the user-owned thread model `&12` writes the
-    // attachment into the workspace registry only, and the person usually opens the room AFTER
-    // the PR exists. Stamping a thread at open time would both miss those attachments and freeze
-    // the wrong channel for the PR's whole life.
-    onPrOpened: async ({ prUrl, ticket }) => {
+    onPrOpened: ({ prUrl, run }) => {
       const parsed = parsePrUrl(prUrl);
       if (!parsed) return;
-      if (ticket.branchRef) {
-        try {
-          await tasks.setPullRequest(ticket.branchRef, { repo: parsed.repo, number: parsed.number, url: prUrl });
-        } catch (err) {
-          logger.warn("task branch PR sync failed", { branch: ticket.branchRef, error: String(err) });
-        }
-      }
-      if (prPoller) {
-        prPoller.watch({
-          repo: parsed.repo,
-          number: parsed.number,
-          url: prUrl,
-          title: ticket.title,
-          ticket: ticket.identifier,
-          channel: ticket.originChannel,
-        });
-      }
+      // The task registry's PR link: what puts the artifact on the card and arms the Merge
+      // button, what `concierge.stampPrState` updates on merge/close, and what the boot PR
+      // re-watch loop below scans for. Recorded whether or not a poller exists.
+      void taskSync.onPrOpened(run, { repo: parsed.repo, number: parsed.number, url: prUrl });
+      if (!prPoller) return;
+      prPoller.watch({
+        repo: parsed.repo,
+        number: parsed.number,
+        url: prUrl,
+        title: run.title,
+        // The PR poller is keyed by the RUN id — its relays land on the run's own channel.
+        runId: run.id,
+        ...(run.channelId ? { channel: run.channelId } : {}),
+      });
     },
-    onBranchWorkspace: ({ ticket, workspace, gitRef, baseSha }) => {
-      if (!ticket.branchRef) return;
-      void tasks.setGit(ticket.branchRef, {
-        project: projectSlug(ticket.project || ticket.identifier),
-        workspace,
-        gitRef,
-        baseSha,
-      }).catch((err) => logger.warn("task branch Git sync failed", { branch: ticket.branchRef, error: String(err) }));
-    },
-    preview,
-    logger: logger.child("dispatch"),
+    onPublished: ({ url, kind, run }) => void taskSync.onPublished(run, { url, kind }),
+    logger: logger.child("run"),
   });
-
-  // Wire the Concierge's intervention levers (issue #21): `beckett ticket restaff` on the control
-  // bus routes here. Done post-construction because the Concierge is built first (progress sink).
-  concierge.setDispatcherOps({
-    restaff: (id, harness) => dispatcher.restaff(id, harness as Harness | undefined),
-    courier: (id) => dispatcher.courier(id),
-  });
-
-  // Instant tick on filing (issue #33): `beckett ticket create --channel …` pings the control bus;
-  // poking the poller staffs the fresh ticket in well under a second instead of the 0–5s poll gap.
-  concierge.setTicketFiledListener(() => {
-    for (const p of pollers.values()) p.poke();
+  // `beckett task deploy` pings `run.deploy` on the control bus; `beckett task steer` pings
+  // `run.steer`; `beckett task cancel` (and the task card's Cancel button) pings `run.cancel`.
+  // Registered post-construction because the supervisor needs the concierge's progress sink, so it
+  // cannot exist when the concierge builds its own bus surface.
+  concierge.registerBusCapability({
+    id: "runs",
+    summary: "v7 runs: deploy admission, mid-flight steering, and cancellation",
+    actionClass: ActionClass.FREE,
+    cliVerbs: [],
+    busCommands: [
+      {
+        name: "run.deploy",
+        summary: "admit a freshly-created run for staffing",
+        handle: async (req) => {
+          const runId = typeof req.args.runId === "string" ? req.args.runId.trim() : "";
+          if (!runId) return { ok: false, error: "run.deploy needs a runId" };
+          // THREAD GROUNDING: work deployed from inside a workspace thread binds to it here, at
+          // the one moment both ids are in hand (`task deploy` stamps the channel onto the ping).
+          // Without this a thread's runIds stay empty, so an unmentioned "how's it going?" has no
+          // run to name and updates fall back to the run's stamped channel.
+          const channelId = typeof req.args.channelId === "string" ? req.args.channelId.trim() : "";
+          if (channelId) concierge.bindRunToWorkspace(channelId, runId);
+          await runSupervisor.admit(runId);
+          return { ok: true, data: { runId } };
+        },
+      },
+      {
+        name: "run.cancel",
+        summary: "stop a live run: abort its worker and mark it cancelled",
+        handle: async (req) => {
+          const runId = typeof req.args.runId === "string" ? req.args.runId.trim() : "";
+          if (!runId) return { ok: false, error: "run.cancel needs a runId" };
+          const reason = typeof req.args.reason === "string" && req.args.reason.trim() ? req.args.reason.trim() : undefined;
+          const outcome = await runSupervisor.cancel(runId, reason);
+          if (outcome === "unknown") return { ok: false, error: `no such run: ${runId}` };
+          return { ok: true, data: { runId, outcome } };
+        },
+      },
+      {
+        name: "run.steer",
+        summary: "deliver a note to a live run (nudge), or buffer it for its next stage",
+        handle: async (req) => {
+          const runId = typeof req.args.runId === "string" ? req.args.runId.trim() : "";
+          const note = typeof req.args.note === "string" ? req.args.note : "";
+          if (!runId || !note.trim()) return { ok: false, error: "run.steer needs a runId and a note" };
+          const delivery = await runSupervisor.steer(runId, note);
+          return { ok: true, data: { runId, delivery } };
+        },
+      },
+    ],
   });
 
   // #31: a PR opened by hand from the concierge seat (`beckett gh pr create`) reaches the poller
@@ -645,7 +442,7 @@ async function boot(): Promise<BootedSystem> {
     // The free-time idle gate (docs/freetime.md), read at fire time: an unprompted session waits
     // for a machine with nothing else to do. Both are cheap in-memory census reads — the
     // scheduler asks them on the tick that would otherwise claim the period.
-    isFleetIdle: () => dispatcher.live().length === 0,
+    isFleetIdle: () => runSupervisor.live().length === 0,
     conciergeQuiet: () => concierge.queueDepth() === 0,
   })({ config, paths, logger });
   extensions.register(routinesExtension);
@@ -675,81 +472,6 @@ async function boot(): Promise<BootedSystem> {
   concierge.setBrowserRuntime(browser);
   concierge.setBrowserAgent(browserAgent);
 
-  // Frontend result screenshot (#75): when a ticket that touched a frontend lands, serve its built
-  // branch locally, capture ONE screenshot through the shared persistent browser, and attach it to
-  // the ticket record (+ its channel ping). Wired here — not in the dispatcher's construction —
-  // because the browser runtime is only built now. Best-effort throughout; `BECKETT_FRONTEND_SCREENSHOT=0`
-  // opts a box out entirely.
-  if (process.env.BECKETT_FRONTEND_SCREENSHOT !== "0") {
-    const shotLog = logger.child("screenshot");
-    const captureScreenshot = async (url: string, ticket: ScreenshotTicketRef): Promise<string | null> => {
-      // The persistent browser is a single exclusive resource: yield it to any live background run
-      // rather than racing for the lease. A missed screenshot is fine; a broken browser run is not.
-      const busy = browserAgent
-        .stats()
-        ?.runs.some((run) => run.state === "running" || run.state === "waiting" || run.state === "queued");
-      if (busy) {
-        shotLog.info("browser busy — skipping screenshot", { ticket: ticket.identifier });
-        return null;
-      }
-      const runId = `screenshot-${crypto.randomUUID()}`;
-      const controlToken = crypto.randomUUID();
-      const artifactsDir = join(beckettDir, "browser-agent", "screenshots", ticket.id, runId);
-      try {
-        await browser.acquire({ runId, channelId: ticket.originChannel ?? null, artifactsDir, controlToken });
-        const code =
-          `await page.goto(${JSON.stringify(url)}, { waitUntil: "load", timeout: 20000 });\n` +
-          `await page.waitForTimeout(1500);\n` +
-          `return await screenshot("frontend");`;
-        const result = await browser.evaluate(runId, code, controlToken);
-        return result.screenshots?.[0] ?? null;
-      } catch (err) {
-        shotLog.warn("screenshot capture failed", { ticket: ticket.identifier, error: (err as Error).message });
-        return null;
-      } finally {
-        if (browser.hasLease(runId)) await browser.release(runId, false).catch(() => undefined);
-      }
-    };
-    const attachScreenshot = async (ticket: ScreenshotTicketRef, pngPath: string): Promise<void> => {
-      const caption = `📸 Frontend screenshot of the built branch for **${ticket.identifier}**.`;
-      // Post to the channel first (when there is one): that upload also gives us a hosted URL to
-      // embed on the ticket, since a tracker comment can render an image but cannot host bytes.
-      let hostedUrl: string | null = null;
-      if (ticket.originChannel) {
-        try {
-          hostedUrl = (await gateway.postImage?.(ticket.originChannel, caption, pngPath)) ?? null;
-        } catch (err) {
-          shotLog.warn("screenshot channel ping failed", { ticket: ticket.identifier, error: (err as Error).message });
-        }
-      }
-      // Feed the task card's gallery reel: the hosted URL is evergreen CDN, so storing it on the
-      // branch lets the next card refresh render the screenshot inline instead of only as a ping.
-      if (hostedUrl) {
-        try {
-          const found = tasks.findByTicket(ticket.id) ?? tasks.findByTicket(ticket.identifier);
-          if (found) {
-            await tasks.addBranchImage(found.branch.ref, { url: hostedUrl, description: ticket.identifier });
-          }
-        } catch (err) {
-          shotLog.warn("screenshot card-image store failed", { ticket: ticket.identifier, error: (err as Error).message });
-        }
-      }
-      const body = hostedUrl
-        ? `${BECKETT_COMMENT_MARKER}\n📸 **Frontend screenshot** of the built branch:\n\n![${ticket.identifier} frontend](${hostedUrl})`
-        : `${BECKETT_COMMENT_MARKER}\n📸 **Frontend screenshot** of the built branch captured at \`${pngPath}\`.`;
-      await client.addComment(ticket.id, body);
-    };
-    dispatcher.setScreenshotCapturer(
-      createFrontendScreenshotHook({
-        changedFiles: async (workspace, baseRef) => worktreeDiffNames(workspace, baseRef),
-        serve: (repoRoot) => serveBuild(repoRoot, { logger: shotLog }),
-        screenshot: captureScreenshot,
-        attach: attachScreenshot,
-        logger: shotLog,
-      }),
-    );
-  }
-
   // The quick extension's init built the ONE runner every surface shares. Phase 3 keeps the
   // concierge's quick.run/quick.list bus command bodies v5-shaped (bus-characterization pins
   // their not-wired refusal), so the runner still arrives through the setter.
@@ -771,23 +493,14 @@ async function boot(): Promise<BootedSystem> {
     commit: (await currentGitCommit(join(import.meta.dir, "..", ".."))).short,
     pid: process.pid,
     uptimeSecs: Math.round((Date.now() - bootedAt) / 1000),
-    workers: dispatcher.statusWorkers(),
+    runs: runSupervisor.live(),
     quick: quick.stats(),
     browser: browser.stats(),
     browserAgent: browserAgent.stats(),
     extensions: await extensions.health(),
-    poller: {
-      boards: Object.fromEntries([...pollers].map(([board, p]) => [board, p.stats()])),
-      ...poller.stats(),
-    },
+    supervisor: { lastReconcileAt: runSupervisor.lastReconcileAt() },
     githubPr: prPoller ? prPoller.stats() : null,
     githubActivity: activityPoller ? { repo: activityConfig.repo, branch: activityConfig.branch } : null,
-    tracker: {
-      baseUrl: boredBaseUrl(),
-      defaultBoard: config.tracker.default_board,
-      boards: Object.fromEntries([...clients].map(([board, c]) => [board, c.stats()])),
-      ...client.stats(),
-    },
   }));
 
   // Start the Concierge FIRST (of the live parts) so a bad claude launch fails the whole boot
@@ -833,9 +546,12 @@ async function boot(): Promise<BootedSystem> {
   // I/O; the renderer remains a pure snapshot → embed function.
   const statusCollector = createStatusSnapshotCollector({
     version: BECKETT_VERSION,
-    pollIntervalMs: config.tracker.poll_secs * 1_000,
-    poller,
-    tracker: client,
+    // Health staleness is measured against the engine's OWN cadence: the staffing watchdog tick.
+    pollIntervalMs: Math.max(1, config.supervise.staffing_watchdog_s) * 1_000,
+    runs: {
+      live: () => runSupervisor.live().map((row) => ({ state: row.state as RunState })),
+      lastTickAt: () => runSupervisor.lastReconcileAt(),
+    },
     metrics: createSystemMetricsReader(),
     lifecycleLedgerPath,
     spendPath: paths.spend,
@@ -868,15 +584,14 @@ async function boot(): Promise<BootedSystem> {
     statePath: statusDashboardMessagePath(beckettDir),
     collectSnapshot: async () => {
       const snapshot = await statusCollector.collect();
-      // Assemble the board off in-memory stats already gathered this tick — no extra poll of the
-      // tracker. `update` is fire-and-forget (it never rejects) so a presence hiccup cannot stall
-      // or fail the dashboard cycle.
+      // Assemble the board off in-memory stats already gathered this tick. `update` is
+      // fire-and-forget (it never rejects) so a presence hiccup cannot stall the dashboard cycle.
       const browser = browserAgent.stats();
       const inputs: PresenceInputs = {
         degraded: snapshot.health.some((h) => h.reachable === false),
         deployInFlight: isDeployActive(beckettDir),
         browserRunLive: browser.running > 0 || browser.waiting > 0,
-        branchesInFlight: dispatcher.statusWorkers().filter((w) => w.state === "live").length,
+        branchesInFlight: runSupervisor.live().filter((row) => row.workerId !== null).length,
       };
       void presenceController.update(inputs);
       return snapshot;
@@ -901,38 +616,22 @@ async function boot(): Promise<BootedSystem> {
     // nothing.
     for (const task of tasks.list()) {
       for (const branch of task.branches) {
-        if (!branch.pullRequest || !branch.ticket) continue;
+        if (!branch.pullRequest || !branch.run) continue;
         prPoller.watch({
           repo: branch.pullRequest.repo,
           number: branch.pullRequest.number,
           url: branch.pullRequest.url,
           title: branch.title,
-          ticket: branch.ticket.identifier,
+          runId: branch.run.runId,
           channel: task.threadId ?? task.originChannelId,
         });
       }
     }
   }
-  await dispatcher.replayAdvances();
-  await dispatcher.replayPublishes();
-  // Reconciling dependents reads the board; a board-less instance (#141) has none to reconcile.
-  if (config.tracker.enabled) await dispatcher.reconcileDependents();
-
-  // Crash recovery (issue #20): BEFORE the poller re-staffs anything, sweep worker processes a
-  // crashed daemon orphaned, commit their ghost WIP, and arm session-resume hints so re-staffed
-  // tickets continue their interrupted sessions instead of re-running from scratch.
-  await dispatcher.recoverFromCrash();
-
-  // Blip-proofing (OPS-125): with recovery done, arm the periodic worktree-checkpoint loop so a
-  // HARD crash (SIGKILL / OOM / power) — where the graceful shutdown drain never runs — loses at
-  // most one checkpoint window of in-flight WIP, not the whole session. The graceful path
-  // (drainForShutdown) still commits WIP itself and stops this loop first.
-  dispatcher.startCheckpointLoop();
-
-  // Staffing watchdog (issue #9): arm the reconciliation pass that re-staffs — or, failing that,
-  // parks with a comment — any ticket left silently staffed-but-workerless (the mid-spawn discard
-  // race, or any other wedge). Runs after crash recovery so it never races the boot re-staff sweep.
-  dispatcher.startStaffingWatchdog();
+  // The run engine: crash-recover its own ledger (sweeping processes a crashed daemon orphaned
+  // and committing their ghost WIP), drain durable publish rows, re-admit every live run, then arm
+  // its checkpoint + staffing loops.
+  await runSupervisor.start();
 
   // EARLY extension background loops start here — after crash recovery (so a migrated organ
   // never races the recovery block) and BEFORE the pollers, which stay last so events only flow
@@ -942,27 +641,9 @@ async function boot(): Promise<BootedSystem> {
   // "late" sweep further down instead — see LifecycleStartPhase.
   await extensions.startAll(extCtx, "early");
 
-  // Fan each board's poll batch to BOTH the dispatcher (acts on the work) and the Concierge
-  // (surfaces milestones/errors back to the Discord conversation that filed the ticket). A
-  // board-less instance (#141) never arms the pollers — nothing to poll, nothing to dispatch.
-  if (config.tracker.enabled) await Promise.all(
-    [...pollers].map(([board, p]) =>
-      p.start((events) => {
-        rememberRouting(events.map((event) => event.ticket), board);
-        for (const event of events) {
-          if (!event.ticket.branchRef) continue;
-          void syncTaskBranch(event.ticket, board).catch((err) =>
-            logger.warn("task branch poll sync failed", { branch: event.ticket.branchRef, error: String(err) })
-          );
-        }
-        concierge.notify(events);
-        return dispatcher.handle(events);
-      }),
-    ),
-  );
-  // GitHub PR sense (OPS-124): start watching after the dispatcher is live, so any PR opened during
+  // GitHub PR sense (OPS-124): start watching after the engine is live, so any PR opened during
   // boot recovery already has a home. Each material transition lands as a Concierge update turn —
-  // the same routing as ticket updates. Best-effort: a poll failure never affects the rest.
+  // the same routing as run updates. Best-effort: a poll failure never affects the rest.
   if (prPoller) {
     await prPoller.start((events) => concierge.notifyPrEvents(events));
   }
@@ -1031,14 +712,14 @@ async function boot(): Promise<BootedSystem> {
   // routine cron scheduler, Phase 3b; the memory maintain loop, Phase 6).
   await extensions.startAll(extCtx, "late");
 
-  logger.info("beckett v4 online", { liveWorkers: dispatcher.live().length, boards: [...pollers.keys()] });
+  logger.info("beckett online", { liveRuns: runSupervisor.live().length });
 
-  return { config, logger, client, clients, poller, pollers, prPoller, activityPoller, mailPoller, dispatcher, concierge, voiceGateway, statusDashboard, quick, browserAgent, browser, extensions, lifecycleLedgerPath };
+  return { config, logger, prPoller, activityPoller, mailPoller, runSupervisor, concierge, voiceGateway, statusDashboard, quick, browserAgent, browser, extensions, lifecycleLedgerPath };
 }
 
 /** Tear the system down in reverse boot order. Best-effort: one failure never blocks the rest. */
 async function shutdown(sys: BootedSystem, signal: string): Promise<void> {
-  sys.logger.info("shutting down beckett v3", { signal });
+  sys.logger.info("shutting down beckett", { signal });
   // The routine scheduler (Phase 3b) and the memory maintain loop (Phase 6) now stop inside
   // the extensions.stopAll sweep below — AFTER the pollers stop, not before them as the
   // hand-wired first-line stops used to. A clearInterval landing a beat later is accepted
@@ -1052,10 +733,10 @@ async function shutdown(sys: BootedSystem, signal: string): Promise<void> {
   } catch (err) {
     sys.logger.warn("voice leaveAll on shutdown failed", { error: (err as Error).message });
   }
+  sys.runSupervisor.stop();
   sys.prPoller?.stop();
   sys.activityPoller?.stop();
   sys.mailPoller?.stop();
-  for (const p of sys.pollers.values()) p.stop();
   // Mirrors startAll's boot position (just before the pollers started). The registry sweep is
   // best-effort per organ — a throwing stop is logged, never blocks the rest of the drain.
   // The browser organ tears down inside this sweep: agent.stopAll settles live runs as errors
@@ -1063,14 +744,6 @@ async function shutdown(sys: BootedSystem, signal: string): Promise<void> {
   // The quick organ (Phase 3) drains here too: stragglers are killed ahead of concierge.stop
   // below, so their "daemon shut down" results can still route through it.
   await sys.extensions.stopAll(sys.logger);
-  try {
-    const drain = await sys.dispatcher.drainForShutdown(signal, 20_000);
-    if (drain.timedOut) {
-      sys.logger.warn("dispatcher shutdown drain did not finish before deadline", { ...drain });
-    }
-  } catch (err) {
-    sys.logger.warn("dispatcher shutdown drain failed", { error: (err as Error).message });
-  }
   try {
     await sys.concierge.stop();
   } catch (err) {
@@ -1125,5 +798,5 @@ if (import.meta.main) {
   });
 }
 
-export { boot, shutdown, main, resolveRepoRoot };
+export { boot, shutdown, main };
 export type { BootedSystem };

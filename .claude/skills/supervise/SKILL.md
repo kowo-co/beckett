@@ -1,46 +1,49 @@
 ---
 name: supervise
-description: Use when a ticket update reports trouble — a stalled worker, a retry, a repeated failure, or a human asking "what's happening with OPS-N?". Read the ticket's real state and pick the lightest sufficient intervention.
+description: Use when a run reports trouble — a stalled worker, a retry, a repeated failure, or a human asking "what's happening with that build?". Read the run's real state and pick the lightest sufficient intervention.
 ---
 
 # supervise
 
-Something on a ticket needs your judgment. The dispatcher already handles the routine ladder
+Something in flight needs your judgment. The machinery already handles the routine ladder
 automatically (a quiet worker gets a status-check nudge, then an abort+retry from its committed
-WIP; failed implements retry up to 3×; exhausted tickets are parked in `todo` with a comment).
-Your job starts where the automation stops: deciding whether the *approach* is wrong, telling the
-person honestly what's going on, and using your levers when a different path is needed.
+WIP; failed implements retry a bounded number of times; exhausted runs are parked). Your job
+starts where the automation stops: deciding whether the *approach* is wrong, telling the person
+honestly what's going on, and using your levers when a different path is needed.
 
 ## Look first
 
-1. `beckett ticket show <id>` — accepts `OPS-42` or the uuid. Read `state` and the comment trail:
-   the dispatcher narrates every step there (stall nudges, retries, WIP commits, parks, verdicts).
-2. `beckett ticket list --state in_progress` (or `in_review`) — the board at a glance when the
-   question is "what's running?"
-3. `beckett status` — the live daemon in one JSON blob: every worker (ticket, stage, harness, pid,
-   elapsed, last-event age), poller health, tracker API health, your own session stats. The fastest
-   answer to "is anything actually moving?"
-4. `beckett journal <id> --tail 200` — the private, ticket-keyed worker play-by-play if you need
-   finer grain. Nothing streams to Discord; summarize it, never paste raw journal lines back.
+1. `beckett task ask <run-id|slug>` — the one call: state, `spec.md` checklist progress, journal
+   tail, and the worker's session name. If the run is live, ask the worker itself (see the
+   `progress-questions` playbook) — it knows things no record does.
+2. `beckett task list` — everything in flight at a glance when the question is "what's running?"
+3. `beckett status` — the live daemon in one JSON blob: every worker (run, stage, harness, pid,
+   elapsed, last-event age), supervisor health, your own session stats. The fastest answer to "is
+   anything actually moving?"
+4. `beckett journal <run-id> --tail 200` — the private per-run play-by-play if you need finer
+   grain. Nothing streams to Discord; summarize it, never paste raw journal lines back.
 
 ## Your levers (all real commands)
 
 | Lever | When | How |
 |---|---|---|
-| do nothing | the automation is mid-ladder (nudge/retry already posted) and the approach is sound | — |
-| steer | the worker is working on the wrong thing, or you know something it doesn't | `beckett ticket comment <id> "<guidance>"` — a comment on a staffed ticket is delivered to the live worker as a nudge |
-| restaff | the worker is wedged/looping and a fresh start (or a different model) will do better | `beckett ticket restaff <id>` — aborts (WIP committed), spawns fresh on the claude harness |
-| park | the ticket needs a human decision before more tokens are spent | `beckett ticket state <id> todo` + a comment saying why |
-| cancel | the work is genuinely not wanted | `beckett ticket state <id> cancelled` |
+| do nothing | the automation is mid-ladder (nudge/retry already in progress) and the approach is sound | — |
+| ask | you don't actually know what it's doing yet | `beckett task ask <ref>`, then `SendMessage` to its session name |
+| steer | the run is still going and the worker is on the wrong thing, or you know something it doesn't | `beckett task steer <ref> "<guidance>"` — prints `delivered` (nudged the live worker) or `buffered` (waiting for its next stage) |
+| stop | the work is genuinely not wanted and the run is still going | `beckett task steer <ref> "stop — we're not doing this"`; it wraps up and commits what it has rather than being killed mid-write |
+| redeploy | the run is parked, failed, or wedged past saving — a fresh start (or a different seat) will do better | a new `beckett task deploy` carrying what was learned, against the same `--repo`, and say so |
 
 ## Rules
 
-- **A stall signal is a prompt to think, not a verdict.** The dispatcher already nudged and will
+- **A stall signal is a prompt to think, not a verdict.** The machinery already nudged and will
   retry; only step in when the *pattern* is wrong — same failure across retries, a worker looping
   on the same command, or work drifting off-scope.
-- **Prefer nothing > steer > restaff > park > cancel.** Never cheap-stop good work.
-- Same problem across several tickets (every worker hitting the same broken tool/login) → that's
-  an infrastructure problem, not a per-ticket one: tell the human and park the affected tickets
-  rather than burning retries.
-- When a person asks about a ticket, answer from `ticket show` — its real state and the last
-  dispatcher comment — not from memory.
+- **Prefer nothing > ask > steer > stop.** Never cheap-stop good work.
+- **Steering only reaches a run that is still going.** `beckett task steer` refuses a parked,
+  failed, done, or cancelled run and tells you so — that refusal is the signal to redeploy, not
+  something to work around. Never report "it's picking back up" off a command that errored.
+- Same problem across several runs (every worker hitting the same broken tool or login) → that's
+  an infrastructure problem, not a per-run one: tell the human and stop the affected runs rather
+  than burning retries.
+- When a person asks how something's going, answer from what you just read — its real state and
+  the worker's own words — not from memory.

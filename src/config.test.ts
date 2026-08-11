@@ -8,7 +8,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defaultConfigToml, loadConfig, validateConfig } from "./config.ts";
+import { defaultConfigToml, dropRetiredSections, loadConfig, validateConfig } from "./config.ts";
 import { browserHostSettings } from "./browser/runtime.ts";
 
 /**
@@ -60,66 +60,39 @@ test("per-harness default efforts land where they should", () => {
   expect(config.harness.claude.default_effort).toBe("high"); // untouched default
 });
 
-test("tracker config parses with defaults and a custom board list", () => {
-  const config = loadToml(`
-[tracker]
-default_board = "vid"
-boards = ["ops", "vid"]
-`);
-  expect(config.tracker.default_board).toBe("vid");
-  expect(config.tracker.boards).toEqual(["ops", "vid"]);
-  expect(config.tracker.poll_secs).toBe(5);
+test("an unknown top-level section is a loud config error (the schema is strict)", () => {
+  expect(() => loadToml(`[nonsense]\nwidgets = 3\n`)).toThrow(/Unrecognized key|refusing to start/);
 });
 
-test("an empty config yields the stock board set with ops as default", () => {
-  const config = loadToml("");
-  expect(config.tracker.default_board).toBe("ops");
-  expect(config.tracker.boards).toEqual(["ops", "int", "vid", "vidpip"]);
-});
+// The one deliberate hole in that strictness: sections that USED to be schema keys. A prod
+// config.toml written before the v7 run engine still carries `[tracker]`/`[progress]`, and the
+// daemon refusing to start on a file the deploy never touches is a Discord outage, not a safety
+// feature. They are stripped with a deprecation line instead — and ONLY they are; the assertion
+// above proves an actually-unknown section is still fatal.
+describe("retired sections", () => {
+  test("[tracker] / [progress] / [plane] are stripped instead of blocking the boot", () => {
+    const config = loadToml(
+      `[tracker]\nenabled = true\ndefault_board = "ops"\n\n[progress]\ncards_as_code = false\n\n[plane]\nbase_url = "x"\n\n[concurrency]\nmax_workers = 4\n`,
+    );
+    // Stripped, not merged into anything, and the rest of the file still applies.
+    expect(config).not.toHaveProperty("tracker");
+    expect(config).not.toHaveProperty("progress");
+    expect(config).not.toHaveProperty("plane");
+    expect(config.concurrency.max_workers).toBe(4);
+  });
 
-test("legacy [plane] section folds into [tracker] — an existing box keeps booting (OPS-191)", () => {
-  // The exact shape of a pre-cutover host config: flat [plane] with Plane-only keys.
-  const config = loadToml(`
-[plane]
-project_slug = "ops"
-base_url = "https://plane.0xbeckett.me"
-workspace_slug = "beckett"
-poll_secs = 3
+  test("stripping is announced once per retired section, and silent when there are none", () => {
+    const seen: string[] = [];
+    const warn = (message: string) => void seen.push(message);
+    expect(dropRetiredSections({ tracker: { enabled: true }, runs: {} }, warn)).toEqual({ runs: {} });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatch(/\[tracker\]/);
 
-[plane.state_map]
-in_progress = "Doing"
-`);
-  expect(config).not.toHaveProperty("plane");
-  expect(config.tracker.poll_secs).toBe(3);
-  expect(config.tracker.default_board).toBe("ops");
-  expect(config.tracker.boards).toEqual(["ops", "int", "vid", "vidpip"]);
-});
-
-test("legacy [plane.boards.<name>] tables collapse to their names", () => {
-  const config = loadToml(`
-[plane]
-default_board = "web"
-
-[plane.boards.web]
-project_slug = "WEB"
-`);
-  expect(config.tracker.default_board).toBe("web");
-  expect(config.tracker.boards).toEqual(["ops", "int", "vid", "vidpip", "web"]);
-});
-
-test("an explicit [tracker] section wins over a lingering [plane] one", () => {
-  const config = loadToml(`
-[plane]
-poll_secs = 3
-
-[tracker]
-poll_secs = 9
-`);
-  expect(config.tracker.poll_secs).toBe(9);
-});
-
-test("unknown default board is a loud config error listing valid boards", () => {
-  expect(() => loadToml(`[tracker]\ndefault_board = "missing"\n`)).toThrow(/unknown default_board "missing" \(have: ops, int, vid, vidpip\)/);
+    seen.length = 0;
+    const clean = { runs: { max_live: 3 } };
+    expect(dropRetiredSections(clean, warn)).toBe(clean); // untouched object, not a clone
+    expect(seen).toHaveLength(0);
+  });
 });
 
 test("github activity relay is off until an instance configures its own repository and dev feed", () => {

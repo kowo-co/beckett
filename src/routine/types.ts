@@ -95,7 +95,7 @@ export type Schedule = z.infer<typeof ScheduleSchema>;
  *   so there is exactly ONE runtime path. New routines should use `agent`.
  * - `self` (issue #26): the ONLY lane that wakes Beckett itself instead of the browser. It runs a
  *   framed SYSTEM turn on the concierge — the seat with the doctrine, the memory graph, the Bash
- *   tool, and the ability to file tickets — so a routine can put Beckett on its own open-loop
+ *   tool, and the ability to deploy runs — so a routine can put Beckett on its own open-loop
  *   ledger a few times a day. No agent, no browser task, no credentials: like `deps-update` it must
  *   never be routed through the privileged browser lane, which it has no use for.
  * - `dream` (issue #36): the nightly dream pass on the self lane — same fork, same "never the
@@ -191,7 +191,7 @@ export const RoutineActionSchema = z.discriminatedUnion("kind", [
     kind: z.literal("watch"),
     /** The feed to poll — a plain HTTP(S) URL, checked for a `200` + `items[]` body each round. */
     feedUrl: z.string().min(1),
-    /** How often to poll. Default matches the ticket's ask: 15 minutes. */
+    /** How often to poll. Default 15 minutes. */
     pollIntervalMinutes: z.number().int().positive().default(15),
     /** Registry id of the agent a qualifying fire is dispatched to (e.g. "social-media"). */
     agentId: z.string().min(1),
@@ -215,7 +215,7 @@ export const RoutineActionSchema = z.discriminatedUnion("kind", [
      * The instruction Beckett gives ITSELF when this fires. It is Beckett's own text from a
      * routine definition, not third-party content, so it is framed as a SYSTEM turn (never a user
      * message) but needs no untrusted-input quoting. See {@link ../concierge/index.ts}'s self-wake
-     * bus command, which hands it to `askUpdate` — the same lane ticket updates use.
+     * bus command, which hands it to `askUpdate` — the same lane run updates use.
      */
     prompt: z.string().min(1),
     /** Discord channel the self turn is told to report to (optional; env fallback). */

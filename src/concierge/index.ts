@@ -2,9 +2,9 @@
  * Beckett v3 — the Concierge (`src/concierge/index.ts`)
  * =======================================================================================
  * The long-lived `claude -p` chat agent that OWNS Discord (v3 §0/§8). It chats in Beckett's
- * voice, sizes effort, and for real work files a ticket into the tracker by shelling
- * `beckett ticket ...` from its own Bash tool. It NEVER spawns workers — that is the
- * dispatcher's job. Work state lives in the tracker; chat context stays clean.
+ * voice, sizes effort, and for real work deploys a run by shelling `beckett task deploy ...`
+ * from its own Bash tool. It NEVER spawns workers — that is the run supervisor's job. Work state
+ * lives in the run ledger; chat context stays clean.
  *
  * Wiring:
  *   - {@link DiscordJsGateway} (`../discord/gateway.ts`) is the human-facing I/O.
@@ -33,7 +33,7 @@ import { dirname, join } from "node:path";
 // stamp the restart release note's `-#` subheader so it tracks the shipped version, never a literal.
 import pkg from "../../package.json" with { type: "json" };
 import type { Config, IncomingMessage, IncomingReaction, Logger, ProactivityMode, ThreadCreated } from "../types.ts";
-import type { PollEvent, TicketComment, Ticket } from "../tracker/types.ts";
+import type { Run, RunStateChange } from "../run/types.ts";
 import type { PrPollEvent, PrRef } from "../github/types.ts";
 import type { WatchRequest } from "../github/poll.ts";
 import type { GitHubActivityEvent } from "../github/activity.ts";
@@ -41,12 +41,15 @@ import { resolveGitHubOwner } from "../github/owner.ts";
 import { log as rootLog } from "../log.ts";
 import { loadConfig } from "../config.ts";
 import { buildPaths } from "../paths.ts";
+import { renderClaudeSettings } from "../hooks/registry.ts";
+import { supportsNameFlag } from "../drivers/claude.ts";
 import { DispatchDigestFeed } from "../dispatch/digest-feed.ts";
 import type { DispatchEvent } from "../dispatch/events.ts";
 import { serveBus, type BusRequest, type BusResponse } from "../shell/control-bus.ts";
 import { ActionClass, CapabilityRegistry, type Capability } from "../capability/index.ts";
 import { effectiveActionClass, renderCatalogBlock, type ExtensionContext, type ExtensionRegistry, type InvocationOrigin } from "../ext/index.ts";
 import { createDiscordGateway, type DiscordGateway } from "../discord/gateway.ts";
+import { deliverChilled } from "./chill-gate.ts";
 import { contentWithForwardedSnapshots } from "./forwarded-message.ts";
 import {
   downloadAttachments,
@@ -61,12 +64,11 @@ import {
   type UserIdentity,
 } from "../discord/identity.ts";
 import { createTicketJournal, type TicketJournal, type ProgressSink } from "../progress/journal.ts";
-import { formatFiledLine, normalizeFiledRefs } from "../discord/filed-line.ts";
 import { parseAttachCommand } from "./thread-attach.ts";
 import {
   createWorkspaceRegistry,
   type WorkspaceRegistry,
-  type TicketWorkspaceContext,
+  type WorkspaceContext,
 } from "../discord/workspaces.ts";
 import { setChannelModeOverride, setEnabledOverride } from "./proactivity-store.ts";
 import { readPersistedOffers } from "./ambient.ts";
@@ -128,7 +130,6 @@ import { createTriageClassifier, type TriageFn, type TriageVerdict } from "./tri
 import type { DiscordButton, DiscordComponentInteraction, DiscordEmbed, TaskThreadCreated } from "../types.ts";
 import { ComponentRouter, decodeComponentId, type ComponentActionContext } from "../discord/interactions.ts";
 import { GitHubCli, githubAuth, githubConfigured, loadIdentity } from "../agency/index.ts";
-import { createTrackerClient } from "../tracker/client.ts";
 import { TaskStore, displayTaskName, effectivePings, type TaskBranch, type WorkTask } from "../task/store.ts";
 import { renderMentions } from "../discord/mentions.ts";
 import type { BranchStatusService } from "../task/status.ts";
@@ -239,21 +240,7 @@ const FORWARD_LOOKBACK_WINDOW_MS = 2 * 60_000;
 /** Only the tail of the channel record is checked — a burst of chatter shouldn't bury the forward. */
 const FORWARD_LOOKBACK_MESSAGES = 5;
 
-/**
- * How long freshly-filed refs are held before the single `-# filed …` subtext line posts.
- *
- * The line is ONE PER WAVE, not one per ticket, and a wave arrives as a burst of independent
- * `ticket.filed` bus calls — `beckett plan` expanding a DAG fires them a few hundred ms apart as
- * each tracker create round-trips. The window is the seam. Too short and a twelve-ticket wave
- * fragments into four grey lines, which is exactly the noise threads were removed to stop; too
- * long and the receipt drifts away from Beckett's spoken ack and reads as an unexplained artifact
- * minutes later. Four seconds comfortably spans a plan's filing burst while still landing in the
- * same beat of the conversation. It is a buffer, not a debounce: the timer is NOT extended by
- * later filings, so a channel filing continuously can never starve its receipt forever.
- */
-const FILED_LINE_WINDOW_MS = 4_000;
-
-/** Journal tail (lines per ticket) folded into an attach seed — enough to say what's happening. */
+/** Journal tail (lines per run) folded into an attach seed — enough to say what's happening. */
 const ATTACH_SEED_JOURNAL_LINES = 20;
 /**
  * Past this many attached tasks the seed carries NO journal at all. A `&recent` on a wave of
@@ -410,6 +397,31 @@ const DEFAULT_ROTATE_AT_TOKENS = 160_000;
 /** Safety fallback for a channel that never becomes idle; still rotate only after releasing its gate slot. */
 const FORCED_ROTATE_AT_TOKENS = 190_000;
 
+/** Prefix every concierge pool scope's cross-session address shares (Claude Code ≥2.1.224, `--name`). */
+export const CONCIERGE_SESSION_NAME_PREFIX = "beckett-concierge";
+
+/**
+ * The cross-session address ONE pool scope launches under. W2A shipped a FIXED
+ * `beckett-concierge` for every scope, which is an address collision the moment two pooled
+ * sessions are live at once (the default pool runs up to 6 plus SYSTEM_SCOPE): two children
+ * registering the same name, and a worker's status reply landing on whichever won.
+ *
+ * So the name carries the scope: the last 6 characters of the scope key — a Discord channel id's
+ * tail (`beckett-concierge-482913`), or the scope word itself for the short internal scopes
+ * (`system`, `global`). Six is enough to separate the handful of scopes a pool holds while keeping
+ * the name short and greppable.
+ *
+ * Nothing else has to learn these names: a worker answers a status ping by replying to the SENDER
+ * of the message it received (its reply address), never to a hardcoded address, and the concierge
+ * addresses workers by `run.sessionName`. This name only has to be UNIQUE and recognisable.
+ */
+export function conciergeSessionName(scope: string): string {
+  const key = scope.trim() || GLOBAL_SCOPE;
+  // `--name` wants a plain token: keep it to characters that can't need quoting anywhere.
+  const suffix = key.replace(/[^A-Za-z0-9_-]/g, "").slice(-6) || GLOBAL_SCOPE;
+  return `${CONCIERGE_SESSION_NAME_PREFIX}-${suffix}`;
+}
+
 /** Small, fast seat for a best-effort handoff; never spend an Opus chat turn on bookkeeping. */
 const HANDOFF_MODEL = "claude-haiku-4-5";
 const HANDOFF_EFFORT = "low";
@@ -505,7 +517,7 @@ const FILING_TURN_BUDGET_MS = 20_000;
  * an odd quoting style cost nothing.
  */
 export function isFilingShapedToolUse(command: string): boolean {
-  const markers = ["task create", "task start", "ticket create", "ticket state", "beckett plan"];
+  const markers = ["task deploy", "task create", "task start", "ticket create", "ticket state", "beckett plan"];
   return markers.some((marker) => command.includes(marker));
 }
 
@@ -1027,6 +1039,12 @@ export interface ConciergeSessionOptions {
    * itself has no route back to the Discord path, so it only reports.
    */
   onOrphanedInjection?: (messageId: string) => void;
+  /**
+   * Fired once per UNSOLICITED turn — a `result` with no ask waiting on it, i.e. a cross-session
+   * peer message that woke this session (see {@link ConciergeSession.noteUnsolicitedResult}). The
+   * owner uses it to keep the pool's idle bookkeeping honest; the session itself only reports.
+   */
+  onPeerTurn?: () => void;
 }
 
 /**
@@ -1038,6 +1056,8 @@ export interface ConciergeSessionOptions {
 export class ConciergeSession {
   private readonly config: Config;
   private readonly log: Logger;
+  /** `concierge.peer` — cross-session (peer) traffic only; see {@link noteUnsolicitedResult}. */
+  private readonly peerLog: Logger;
   private readonly cwd: string;
   /** Test-only override: when set, used verbatim as the system prompt (skips file composition). */
   private readonly staticPrompt: string | undefined;
@@ -1107,6 +1127,32 @@ export class ConciergeSession {
   private readonly onCrashLoop?: (info: { count: number; code: number }) => void;
   /** Reports a mid-flow message no turn ever answered, so the owner can re-run it (see options). */
   private readonly onOrphanedInjection?: (messageId: string) => void;
+  /** Reports an unsolicited (peer-message) turn, so the owner can keep pool idle bookkeeping honest. */
+  private readonly onPeerTurn?: () => void;
+  /** Unsolicited turns this session has absorbed — diagnostics only (`beckett status`). */
+  private peerTurns = 0;
+  /**
+   * TRUE while a turn NO ask() owns is executing on this child — an unsolicited (peer) turn that a
+   * cross-session message started (W2A/W2B). Raised by the first liveness event seen with no
+   * pending turn ({@link notePeerTurnStart}), lowered when that turn's `result` is attributed to it
+   * ({@link noteUnsolicitedResult}) or when the child goes away.
+   *
+   * It exists because "no pending turn" alone is NOT enough to recognise an unsolicited result. A
+   * peer turn runs for tens of seconds (the model reads a run, posts a `beckett discord reply`), so
+   * a human message landing in that window would arm `pending` FIRST and then collect the PEER
+   * turn's result — delivering peer prose under the human's mention claim, and swallowing the
+   * human's own answer as "unsolicited" when it finally arrived. With this flag the two are told
+   * apart by what the child is actually doing, not by arrival order.
+   */
+  private peerTurnLive = false;
+  /**
+   * The user line an ask() is holding back because {@link peerTurnLive} was already up when it
+   * started. Writing it immediately would hand the human's message to the peer turn as a mid-flow
+   * injection (the input-format contract: extra user lines land at the next turn BOUNDARY), so it
+   * waits for that boundary here and {@link flushDeferredUserLine} writes it the moment the peer
+   * turn settles. Null = nothing held (the normal case: the line went out in {@link driveTurn}).
+   */
+  private deferredTurn: { outbound: TurnMessage } | null = null;
 
   // ── turn bookkeeping (issue #24) ─────────────────────────────────────────────────────────
   /** Caller-supplied metadata of the CURRENTLY EXECUTING turn (reply-claim correlation). */
@@ -1146,12 +1192,16 @@ export class ConciergeSession {
   constructor(opts: ConciergeSessionOptions) {
     this.config = opts.config;
     this.log = (opts.logger ?? rootLog).child("concierge.session");
+    // Peer (cross-session) traffic gets its own component so an operator can grep the status
+    // relay without wading through every turn this session ran.
+    this.peerLog = (opts.logger ?? rootLog).child("concierge.peer");
     this.cwd = opts.cwd ?? defaultRepoRoot();
     this.staticPrompt = opts.systemPrompt;
     this.model = opts.config.concierge.model;
     this.rotateAtTokens = opts.config.concierge.rotate_at_tokens ?? DEFAULT_ROTATE_AT_TOKENS;
     this.onCrashLoop = opts.onCrashLoop;
     this.onOrphanedInjection = opts.onOrphanedInjection;
+    this.onPeerTurn = opts.onPeerTurn;
     this.scope = opts.scope?.trim() || GLOBAL_SCOPE;
     this.gate = opts.gate ?? null;
     this.handoffWindow = opts.handoffWindow ?? (() => "");
@@ -1358,6 +1408,10 @@ export class ConciergeSession {
   injectIntoLiveTurn(text: string, messageId?: string): "injected" | "no-live-turn" | "capped" {
     const p = this.pending;
     if (!p || !this.child) return "no-live-turn";
+    // The turn on the floor is an UNSOLICITED peer turn, not this pending one (W2B): injecting here
+    // would hand the person's message to a turn that is answering a worker, and it would land ahead
+    // of the pending turn's own still-held line. Treat it as no live turn — the caller queues.
+    if (this.peerTurnLive) return "no-live-turn";
     if (this.liveTurnInjections >= MAX_LIVE_TURN_INJECTIONS) return "capped";
     try {
       this.writeUserLine(text);
@@ -1432,6 +1486,8 @@ export class ConciergeSession {
     // A shutdown is the one exit that must not re-run anything: the owed-mention ledger already
     // holds every injected message (claimed at injection time), so boot replay is the recovery.
     this.injectedRecords = [];
+    this.peerTurnLive = false;
+    this.deferredTurn = null;
     if (this.pending) {
       this.clearPendingTimers(this.pending);
       this.pending.reject(new Error("concierge session stopped"));
@@ -1508,6 +1564,18 @@ export class ConciergeSession {
       // Armed once, here, and never reset: this one IS a wall clock, deliberately (issue #150).
       const ceilingTimer = setTimeout(() => this.onCeilingTimeout(ceilingTimer), TURN_ABSOLUTE_CEILING_MS);
       this.pending = { parts: [], resolve, reject, timer, ceilingTimer, timedOut: false };
+      // A peer turn is ALREADY executing on this child (W2B): hold this line back until its
+      // `result` has been attributed to it, or the human's message becomes a mid-flow injection
+      // into a turn that answers a worker, not them. See {@link deferredTurn}. The timers are
+      // deliberately armed anyway — a peer turn that never finishes must not hang this ask.
+      if (this.peerTurnLive) {
+        this.deferredTurn = { outbound };
+        this.peerLog.info("holding a turn's user line until the live peer turn settles", {
+          sessionId: this.sessionId,
+          scope: this.scope,
+        });
+        return;
+      }
       try {
         this.writeUserLine(outbound);
       } catch (err) {
@@ -1591,6 +1659,10 @@ export class ConciergeSession {
   private recycleChild(reason: string): void {
     const old = this.child;
     this.child = null;
+    // Whatever that process was doing — including an unsolicited peer turn — dies with it, and a
+    // user line held for a turn that is already settled must never be written to its successor.
+    this.peerTurnLive = false;
+    this.deferredTurn = null;
     if (!old) return;
     this.log.warn("recycling concierge child process", { reason, sessionId: this.sessionId });
     try {
@@ -1605,6 +1677,11 @@ export class ConciergeSession {
     const args = this.buildArgs(isResume);
     this.initSeen = false;
     this.lastLaunchWasResume = isResume;
+    // A brand-new process is running nothing, least of all somebody else's peer turn. Clearing here
+    // (as well as in recycleChild) is what stops a flag stranded by a mid-turn death from making
+    // every later ask hold its line forever — driveTurn relaunches through here first.
+    this.peerTurnLive = false;
+    this.deferredTurn = null;
 
     this.log.info("spawning concierge claude session", {
       bin,
@@ -1658,6 +1735,17 @@ export class ConciergeSession {
       "--model",
       this.model,
     ];
+    // Cross-session address (Claude Code ≥2.1.224): lets a live worker (or another concierge
+    // scope) reach the chat seat via SendMessage for status questions (ctx-docs.md). PER-SCOPE —
+    // see {@link conciergeSessionName}; a shared fixed name collides across pooled sessions.
+    // Gated on the SAME cached --help probe the worker driver uses (issue #54's KILL-vs-FAIL
+    // distinction applies here too): on a claude binary older than 2.1.224 (e.g. a pinned
+    // /usr/bin/claude wrapper — see deploy/config.toml.example), an unconditional --name/--settings
+    // would exit immediately on the unknown flag and crash-loop the whole chat lane. Fail open —
+    // same as the worker driver — never fail closed over a missing flag.
+    if (supportsNameFlag(this.config.harness.claude.bin, this.log)) {
+      args.push("--name", conciergeSessionName(this.scope), "--settings", this.conciergeSettingsPath());
+    }
     // Reasoning effort for the chat seat (issue #25) — a config knob; empty = CLI default.
     const effort = this.config.concierge.effort?.trim();
     if (effort) args.push("--effort", effort);
@@ -1674,6 +1762,32 @@ export class ConciergeSession {
       if (!args.includes(f)) args.push(f);
     }
     return args;
+  }
+
+  /**
+   * Render `<beckettDir>/concierge-settings.json` fresh at each launch — `{"crossSessionInbound":
+   * "accept"}`, no hooks (the concierge is MCP-free and hook-free by design). Without this an
+   * unattended bypassPermissions session HOLDS an inbound SendMessage instead of accepting it, so
+   * a worker's status question would never land (ctx-docs.md §Cross-session messaging).
+   */
+  private conciergeSettingsPath(): string {
+    const beckettDir = buildPaths(this.config).beckettDir;
+    const path = join(beckettDir, "concierge-settings.json");
+    mkdirSync(beckettDir, { recursive: true });
+    // tmp+rename (not a bare writeFileSync): up to 6 pool sessions plus SYSTEM_SCOPE can launch
+    // concurrently against this ONE shared path, and a bare truncating write leaves a window where
+    // another session's claude child reads a partial/empty file and dies on invalid JSON. rename()
+    // is atomic, so every reader always sees either the old or the new complete content.
+    const content = JSON.stringify(renderClaudeSettings([], { crossSessionInbound: "accept" }), null, 2);
+    const temp = `${path}.${process.pid}.tmp`;
+    try {
+      writeFileSync(temp, content);
+      renameSync(temp, path);
+    } catch (error) {
+      try { unlinkSync(temp); } catch { /* absent */ }
+      throw error;
+    }
+    return path;
   }
 
   private childEnv(): Record<string, string | undefined> {
@@ -1722,6 +1836,9 @@ export class ConciergeSession {
       return;
     }
     this.child = null;
+    // No process, no live turn of any kind — and nothing held for one (see {@link deferredTurn}).
+    this.peerTurnLive = false;
+    this.deferredTurn = null;
     if (this.stopped) return;
     this.log.warn("concierge claude process exited", { code, sessionId: this.sessionId });
 
@@ -1829,7 +1946,12 @@ export class ConciergeSession {
     try {
       // Evidence of life restarts the silence clock BEFORE the line is interpreted (issue #150) —
       // a turn is judged on whether the child is still working, never on how long it has run.
-      if (this.pending && isLivenessEvent(obj)) this.noteTurnLiveness();
+      if (isLivenessEvent(obj)) {
+        if (this.pending) this.noteTurnLiveness();
+        // Work with NO ask waiting on it is an unsolicited turn already under way (W2B). Recognise
+        // it HERE, before any ask() can arrive and mistake its result for its own.
+        else this.notePeerTurnStart();
+      }
       switch (obj.type) {
         case "system":
           if (obj.subtype === "init") this.onInit();
@@ -1857,7 +1979,10 @@ export class ConciergeSession {
   }
 
   private onAssistant(obj: Record<string, unknown>): void {
-    if (!this.pending) return;
+    // No pending turn, or a PEER turn holding the floor: these blocks belong to nobody's ask. A
+    // deferred ask must not inherit the peer turn's text parts, tool-use flag or last-activity
+    // crumb — that turn's work is not its work (W2B).
+    if (!this.pending || this.peerTurnLive) return;
     const message = obj.message as Record<string, unknown> | undefined;
     const content = message?.content;
     if (!Array.isArray(content)) return;
@@ -2005,13 +2130,19 @@ export class ConciergeSession {
   private onResult(result: Record<string, unknown>): void {
     const p = this.pending;
     const output = parseDiscordTurnOutput(result.structured_output);
+    // WHOSE result is this? Not "whoever is pending" — an unsolicited (peer) turn that was already
+    // running when an ask arrived would collect that ask's promise (W2B). A frame is the pending
+    // turn's ONLY if the pending turn's user line actually reached the child before it, which is
+    // exactly what {@link peerTurnLive} tracks. (With no pending turn at all it is unsolicited by
+    // definition — the original W2B case.)
+    const peerOwnsResult = this.peerTurnLive;
     // A bare result (no valid delivery output) on a session that never emitted `init` is NOT a
     // deliberate pass — it's the harness reporting a dead/unresumable turn just before the process
     // exits (issue #98). Distinguish it from the legit "model chose to stay silent" case: leave the
     // pending turn INTACT (do not resolve, do not reset the crash counter) so the imminent onExit
     // mints a fresh seeded session and re-drives this exact turn. Resolving as a silent pass here
     // was the lost-message bug — a person's @mention answered by nothing.
-    if (p && !output && !this.initSeen) {
+    if (p && !peerOwnsResult && !output && !this.initSeen) {
       this.log.warn("concierge result on an uninitialized session — lost turn, deferring to relaunch retry", {
         assistantTextBlocks: p.parts.length,
         subtype: typeof result.subtype === "string" ? result.subtype : undefined,
@@ -2025,7 +2156,7 @@ export class ConciergeSession {
     // discarded exactly as before (assistant text never posts), but each message it swallowed is
     // handed back for a real turn instead of disappearing.
     if (this.injectedRecords.length > 0) {
-      const orphans = orphanedInjectionIds(this.injectedRecords, p !== null);
+      const orphans = orphanedInjectionIds(this.injectedRecords, p !== null && !peerOwnsResult);
       this.injectedRecords = [];
       for (const messageId of orphans) {
         this.log.debug("requeueing a mid-flow message no turn ever absorbed", {
@@ -2035,7 +2166,12 @@ export class ConciergeSession {
         this.onOrphanedInjection?.(messageId);
       }
     }
-    if (!p) return;
+    if (!p || peerOwnsResult) {
+      this.noteUnsolicitedResult(output);
+      // The floor is free again: a turn that has been holding its user line can finally speak.
+      this.flushDeferredUserLine();
+      return;
+    }
     this.clearPendingTimers(p);
     if (this.liveTurnFilingShaped && filingTurnBudgetExceeded(Date.now() - this.turnStartedAt)) {
       this.log.warn("filing-shaped turn exceeded its shape budget", {
@@ -2085,6 +2221,105 @@ export class ConciergeSession {
         ? { decision: "send", message: `${LATE_TURN_FRAME}\n\n${output.message}` }
         : output,
     );
+  }
+
+  /**
+   * The first evidence that an UNSOLICITED turn is executing: a liveness event (assistant text, a
+   * `tool_use`, a `tool_result` echo) seen while NO ask() is pending. Only a turn can produce
+   * those, and no turn of ours is running, so a peer message started one — raise the flag that
+   * makes {@link onResult} attribute the coming `result` to it rather than to whichever ask
+   * happens to arrive in the meantime.
+   *
+   * Idempotent: a turn emits many liveness events and this only cares about the first.
+   */
+  private notePeerTurnStart(): void {
+    if (this.peerTurnLive) return;
+    this.peerTurnLive = true;
+    this.peerLog.info("an unsolicited (peer) turn started on this session", {
+      sessionId: this.sessionId,
+      scope: this.scope,
+      sessionName: conciergeSessionName(this.scope),
+    });
+  }
+
+  /**
+   * Write the user line an ask() held back while a peer turn owned the floor ({@link deferredTurn}),
+   * now that the peer turn's `result` has settled. No-op when nothing is held or the waiting turn
+   * has since been reaped/cancelled/rejected.
+   *
+   * The silence clock is restarted here on purpose: the held turn's work starts NOW, and charging
+   * it for the peer turn's runtime would frame a perfectly prompt answer as a late one.
+   */
+  private flushDeferredUserLine(): void {
+    const held = this.deferredTurn;
+    if (!held) return;
+    this.deferredTurn = null;
+    const p = this.pending;
+    if (!p) return; // the waiting turn is already gone (reaped, cancelled, child died)
+    try {
+      this.writeUserLine(held.outbound);
+      this.noteTurnLiveness();
+      this.peerLog.info("released a held turn's user line — the peer turn is done", {
+        sessionId: this.sessionId,
+        scope: this.scope,
+      });
+    } catch (err) {
+      this.clearPendingTimers(p);
+      this.pending = null;
+      p.reject(err instanceof Error ? err : new Error(String(err)));
+    }
+  }
+
+  /**
+   * A `result` frame that belongs to an UNSOLICITED turn (W2B) — either no ask() is waiting at all,
+   * or one is waiting but a peer turn had the floor first ({@link peerTurnLive}).
+   *
+   * Since W2A the session is addressable (`--name`) and accepts cross-session inbound
+   * (`crossSessionInbound: "accept"`), so an idle child starts a turn of its OWN when a peer
+   * message lands — typically a live worker answering "how's it going?" (ctx-docs.md
+   * §Cross-session messaging). That turn ends in a `result` no ask() authored, which is
+   * the shape this method exists to make safe:
+   *
+   *  - Its delivery decision is NEVER acted on. `decision:"send"` here has no trustworthy channel
+   *    binding — `currentMeta` belongs to no one, and the last mention this session answered is
+   *    not who the peer wrote about — so posting it would be a message to an arbitrary channel.
+   *    Doctrine (W3B) tells the model to relay peer news with `beckett discord reply --channel <id>`
+   *    and then return `{decision:"pass"}`; this is the backstop for when it doesn't.
+   *  - Bookkeeping is untouched: no pending turn is cleared (a turn waiting behind this one keeps
+   *    its promise and its timers and gets its line written by {@link flushDeferredUserLine}),
+   *    `turnQueue`/`pumping` (and therefore {@link queueDepth}) never saw this turn, and the next
+   *    real ask() runs normally on the same warm transcript.
+   *  - The pool's idle timer is told the scope was busy ({@link onPeerTurn}), so a peer
+   *    conversation doesn't get its child recycled out from under it as "long idle".
+   *
+   * KNOWN LIMIT: this recognises ONE unsolicited turn at a time, which is the shape the relay
+   * actually produces (a peer message wakes an otherwise-idle session). If a SECOND peer message
+   * were queued behind the first, its turn would start after the held line was written and there is
+   * no signal in the stream that distinguishes it from the held turn's own work — correlating a
+   * `result` to the exact input that caused it needs a turn/uuid field the harness does not emit.
+   */
+  private noteUnsolicitedResult(output: DiscordTurnOutput | null): void {
+    // The peer turn is over — the floor is free for a real ask again.
+    this.peerTurnLive = false;
+    this.peerTurns += 1;
+    const suppressed = output?.decision === "send";
+    this.peerLog.info("unsolicited concierge turn (cross-session peer message) — not delivered", {
+      sessionId: this.sessionId,
+      scope: this.scope,
+      sessionName: conciergeSessionName(this.scope),
+      decision: output?.decision ?? "none",
+      // Length only: peer prose is never logged verbatim (it can quote a private channel).
+      messageChars: output?.message ? output.message.length : 0,
+      suppressedSend: suppressed,
+      peerTurns: this.peerTurns,
+    });
+    if (suppressed) {
+      this.peerLog.warn("peer turn asked to SEND with no channel binding — suppressed", {
+        sessionId: this.sessionId,
+        scope: this.scope,
+      });
+    }
+    this.onPeerTurn?.();
   }
 
   /**
@@ -2273,6 +2508,8 @@ export class ConciergeSession {
       queueDepth: this.queueDepth(),
       consecutiveCrashes: this.consecutiveCrashes,
       liveChild: this.hasLiveChild(),
+      sessionName: conciergeSessionName(this.scope),
+      peerTurns: this.peerTurns,
     };
   }
 
@@ -2377,8 +2614,6 @@ export interface ConciergeOptions {
   session?: ConciergeSession;
   /** Inject a per-scope session factory (pool tests); defaults to real ConciergeSessions. */
   sessionFactory?: (scope: string) => ConciergeSession;
-  /** Tracker read access for milestone enrichment (issue #21) — the shared tracker client in prod. */
-  tracker?: { listComments(ticketId: string): Promise<TicketComment[]> };
   /** Inject the ambient triage classifier (tests); defaults to the real one-shot Haiku classifier. */
   ambientTriage?: TriageFn;
   /** Inject the ambient clock (tests); defaults to the coordinator's real-timer clock. */
@@ -2475,7 +2710,7 @@ interface HeldDirectedTurn {
   m: IncomingMessage;
   /** The newest message's turn text (forwarded snapshots already folded in). */
   anchorText: string;
-  workspace: TicketWorkspaceContext | null;
+  workspace: WorkspaceContext | null;
   /** The newest message's claim. Older claims are discarded once their text is carried. */
   mention: MentionClaim;
   /** Texts this turn owes an answer to, oldest first, NOT including {@link anchorText}. */
@@ -2512,8 +2747,8 @@ function readInvocationOrigin(raw: unknown): InvocationOrigin | null {
   return Object.keys(origin).length > 0 ? origin : null;
 }
 
-/** A framed automated ticket-update turn, addressed to an origin channel via CLI from SYSTEM_SCOPE. */
-interface TicketUpdate {
+/** A framed automated run-update turn, addressed to an origin channel via CLI from SYSTEM_SCOPE. */
+interface RunUpdate {
   channel: string;
   text: string;
   ident: string;
@@ -2532,19 +2767,19 @@ export class Concierge {
   /** Cross-session cap on turns executing at once (the fast-ack "will wait" signal, too). */
   private readonly turnGate: TurnGate;
   /**
-   * The private ticket journal: each ticket's worker-event firehose appends to a ticket-keyed
-   * file under `<beckettDir>/journal/` instead of a user-facing Discord thread. The dispatcher
-   * feeds events in via {@link progressSink}; the session pulls the detail on demand
-   * (`beckett journal <ticket>`) when a human asks how the work is going.
+   * The private run journal: each run's worker-event firehose appends to a run-keyed file under
+   * `<beckettDir>/journal/` instead of a user-facing Discord thread. The supervisor feeds events
+   * in via {@link progressSink}; the session pulls the detail on demand (`beckett journal <run>`)
+   * when a human asks how the work is going.
    */
   private readonly journal: TicketJournal;
   /**
-   * Discord thread → task/ticket routing. Every workspace in here is a thread a PERSON opened:
+   * Discord thread → task/run routing. Every workspace in here is a thread a PERSON opened:
    * registered on its ThreadCreate event or, failing that, on its first authorized message. Work
    * is attached to one only by explicit `&<ref>` / `&recent`, or by being filed from inside it.
    */
   private readonly workspaces: WorkspaceRegistry;
-  /** User-facing `#N` / `#N.x` organization; tracker ticket ids stay behind this boundary. */
+  /** User-facing `#N` / `#N.x` organization; run ids stay behind this boundary. */
   private readonly tasks: TaskStore;
   private branchStatus: BranchStatusService | null;
   /** The one self-editing card per task (#104): posted on filing, edited in place thereafter. */
@@ -2558,14 +2793,6 @@ export class Concierge {
    *  Null until wired: the bus command then answers with a clear "not wired" error. */
   private memory: MemoryStore | null;
   private readonly taskThreadCreates = new Map<number, Promise<TaskThreadCreated>>();
-  /**
-   * Filed refs awaiting their single `-# filed …` subtext line, keyed by the channel the line
-   * will land in. See {@link noteFiledRef} / {@link FILED_LINE_WINDOW_MS}.
-   */
-  private readonly pendingFiledRefs = new Map<
-    string,
-    { refs: string[]; timer: ReturnType<typeof setTimeout> }
-  >();
   /**
    * One-shot grounding blocks waiting to ride the NEXT turn in a thread, keyed by thread id.
    * Written by {@link handleThreadAttach} when work is attached, consumed (and deleted) by
@@ -2591,20 +2818,11 @@ export class Concierge {
     { promise: Promise<BusResponse>; completedAt?: number }
   >();
   /**
-   * Per-(ticket, milestone) idempotency for {@link notify}: `key → epoch ms first surfaced`. A
+   * Per-(run, milestone) idempotency for {@link notify}: `key → epoch ms first surfaced`. A
    * milestone re-delivered inside {@link MILESTONE_NOTIFY_DEDUPE_MS} is dropped so a delivered-but-
    * unacked update is never re-queued as a second update turn (the done-update re-fire loop).
    */
   private readonly recentMilestoneNotifies = new Map<string, number>();
-  /**
-   * Dispatcher levers wired in AFTER construction (v4-main creates the Concierge first so its
-   * progress sink can feed the dispatcher). Serves `beckett ticket restaff` from the control bus
-   * (issue #21). Null until wired — the bus op then answers with a clear "not available" error.
-   */
-  private dispatcherOps: {
-    restaff(id: string, harness?: string): Promise<{ ticket: string; stage: string; harness?: string }>;
-    courier(id: string): Promise<{ ticket: string; cancelled: boolean }>;
-  } | null = null;
   /**
    * Routine levers wired in by v4-main (issue #62): serves `beckett routine fire … --force`
    * from the control bus — a real, live dispatch through the browser lane. Null until wired.
@@ -2623,7 +2841,7 @@ export class Concierge {
   private agentRegistry: { list(): AgentDefinition[]; get(id: string): AgentDefinition | null } | null = null;
   /**
    * Daemon-wide status assembler wired in by v4-main (issue #30): answers the `status` bus command
-   * with poller/dispatcher/tracker health the Concierge can't see itself. Null until wired — the bus
+   * with run-engine health the Concierge can't see itself. Null until wired — the bus
    * command then answers with the Concierge-local half only.
    */
   private statusProvider: (() => Record<string, unknown> | Promise<Record<string, unknown>>) | null = null;
@@ -2635,17 +2853,11 @@ export class Concierge {
    */
   private extensions: { registry: ExtensionRegistry; ctx: ExtensionContext } | null = null;
   /**
-   * Fired on every `ticket.filed` bus ping (issue #33): v4-main wires this to `poller.poke()` so a
-   * freshly-filed `in_progress` ticket is staffed in well under a second instead of waiting out
-   * the 0–5s poll gap. Best-effort — filing never depends on it.
-   */
-  private ticketFiledListener: (() => void) | null = null;
-  /**
    * Registers a hand-opened PR with the daemon's GitHub poller (#31). v4-main wires this to
    * `prPoller.watch` when a PAT (and thus a poller) exists; null otherwise, so the `pr.watch` bus
    * op then reports a clean no-op instead of half-working. Serves `beckett gh pr create`'s
    * best-effort registration so a PR opened by hand — including a cross-org upstream PR — gets a
-   * watcher too, not just the ones the dispatcher opens for a ticket.
+   * watcher too, not just the ones the supervisor opens for a run.
    */
   private prWatchRegistrar: ((req: WatchRequest) => void) | null = null;
   /**
@@ -2661,12 +2873,6 @@ export class Concierge {
   /** Native Discord reply id -> parked browser run. Answers bypass shared chat context entirely. */
   private readonly pendingBrowserQuestions = new Map<string, BrowserQuestionRecord>();
   private stopping = false;
-  /**
-   * Tracker read access for milestone enrichment (issue #21): the poller stops collecting comments
-   * on terminal tickets, so the `done` ping fetches the dispatcher's done comment here to carry
-   * the artifact/PR link. Optional — absent (tests), the ping falls back to the ticket URL only.
-   */
-  private readonly tracker: { listComments(ticketId: string): Promise<TicketComment[]> } | null;
   /**
    * The @mention turns currently in flight, keyed by channel (at most one live turn per channel —
    * a channel's session serializes its own turns; different channels run concurrently, OPS-80
@@ -2826,6 +3032,10 @@ export class Concierge {
           // A mid-flow message whose turn never absorbed it (it raced the result) gets its own
           // turn rather than dying with the discarded orphan result.
           onOrphanedInjection: (messageId) => this.requeueOrphanedInjection(messageId),
+          // A cross-session peer turn (a worker answering a status ping) is real activity on this
+          // scope; without this the pool's idle sweep only ever sees ask() traffic and can recycle
+          // the child a peer conversation is still using.
+          onPeerTurn: () => this.pool.notePeerActivity(scope),
           // Crash-loop alarm (issue #24): a repeating child crash (bad auth/config) pings the ops
           // channel instead of surfacing only as per-message "something broke" replies.
           onCrashLoop: (info) => {
@@ -2856,7 +3066,6 @@ export class Concierge {
       ...(opts.session ? { fixedSession: opts.session } : {}),
       logger: this.log,
     });
-    this.tracker = opts.tracker ?? null;
     this.journal = createTicketJournal({
       dir: journalDir(this.config, this.log),
       logger: this.log,
@@ -3025,10 +3234,6 @@ export class Concierge {
     return this.pool.queueDepth();
   }
 
-  setDispatcherOps(ops: NonNullable<Concierge["dispatcherOps"]>): void {
-    this.dispatcherOps = ops;
-  }
-
   /** Wire the routine levers (v4-main, issue #62). See {@link routineOps}. */
   setRoutineOps(ops: NonNullable<Concierge["routineOps"]>): void {
     this.routineOps = ops;
@@ -3103,9 +3308,24 @@ export class Concierge {
     return renderProposalsBlock(buildPaths(this.config).proposalsDir);
   }
 
-  /** Wire the instant-tick hook for freshly-filed tickets (v4-main, issue #33). See {@link ticketFiledListener}. */
-  setTicketFiledListener(fn: NonNullable<Concierge["ticketFiledListener"]>): void {
-    this.ticketFiledListener = fn;
+  /**
+   * Register one more control-bus capability after construction (v7). The daemon builds the
+   * {@link RunSupervisor} AFTER the concierge (it needs the progress sink), so the run verbs
+   * — `run.deploy`, `run.steer`, `run.cancel` — cannot be declared in {@link buildBusCapabilities}.
+   * Duplicate ids/commands still fail loudly in the registry.
+   */
+  registerBusCapability(capability: Capability): void {
+    this.busRegistry.register(capability);
+  }
+
+  /**
+   * Ground a freshly-deployed run in the workspace thread it was deployed FROM (the `run.deploy`
+   * handler calls this with the channel id riding the ping). The registry owns the "is this
+   * channel a workspace" test, so a run deployed from a plain channel is a silent no-op. This is
+   * what makes an unmentioned "how's it going?" in a thread able to name the journal to read.
+   */
+  bindRunToWorkspace(channelId: string, runId: string): void {
+    this.workspaces.bindRun(channelId, runId);
   }
 
   /** Wire the hand-opened-PR registrar (#31). See {@link prWatchRegistrar}. */
@@ -3421,13 +3641,13 @@ export class Concierge {
 
   /**
    * Record a PR's terminal state on its branch and re-render the task card (#104). Resolves the
-   * branch from the ticket the poller carries; a PR with no matching branch, or one we never
-   * linked, is a silent no-op. Registry failures are swallowed — a card refresh must never crash
+   * branch from the run the poller carries; a PR with no matching branch, or one we never linked,
+   * is a silent no-op. Registry failures are swallowed — a card refresh must never crash
    * the poll relay.
    */
   private async stampPrState(pr: PrRef, state: "MERGED" | "CLOSED"): Promise<void> {
     try {
-      const branchRef = pr.ticket ? this.tasks.findByTicket(pr.ticket)?.branch.ref : undefined;
+      const branchRef = pr.runId ? this.tasks.findByRun(pr.runId)?.branch.ref : undefined;
       if (!branchRef) return;
       await this.tasks.setPullRequestState(branchRef, state);
       const taskRef = taskRefOfBranch(branchRef);
@@ -3439,7 +3659,7 @@ export class Concierge {
 
   /**
    * Where a PR event belongs RIGHT NOW — same precedence as {@link updateTurn}: the thread the
-   * person attached this PR's task to, then the workspace its ticket is grounded in, then the
+   * person attached this PR's task to, then the workspace its run is grounded in, then the
    * channel stamped on the PR when it was opened.
    *
    * Resolved at RELAY time, deliberately, rather than stamped onto {@link PrRef} when the PR is
@@ -3449,34 +3669,35 @@ export class Concierge {
    * into the origin channel with nothing anywhere to say why. `pr.channel` stays as the durable
    * fallback for a PR whose task nobody has claimed.
    *
-   * The task ref comes from the ticket identifier the poller carries: the registry knows which
-   * branch that ticket is, and {@link taskRefOfBranch} turns `"12.1"` into the `"12"` routing is
-   * keyed on — the one ref-parsing path, shared with the ticket-update relay.
+   * The task ref comes from the run id the poller carries: the registry knows which branch that
+   * run is, and {@link taskRefOfBranch} turns `"12.1"` into the `"12"` routing is keyed on — the
+   * one ref-parsing path, shared with the run-update relay.
    */
   private channelForPr(pr: PrRef): string | undefined {
-    const identifier = pr.ticket;
+    const runId = pr.runId;
     let branchRef: string | undefined;
     try {
       // Read-only registry lookup. An unreadable/absent registry is not a reason to lose a PR
       // ping, so it degrades to the stamped channel rather than throwing out of the relay.
-      branchRef = identifier ? this.tasks.findByTicket(identifier)?.branch.ref : undefined;
+      branchRef = runId ? this.tasks.findByRun(runId)?.branch.ref : undefined;
     } catch (err) {
       this.log.debug("PR routing task lookup failed; falling back to the stamped channel", {
-        ticket: identifier,
+        run: runId,
         err: String(err),
       });
     }
     const taskRef = taskRefOfBranch(branchRef);
     return (
       (taskRef ? this.workspaces.channelForTask(taskRef) : null) ??
-      (identifier ? this.workspaces.channelForTicket(identifier) : null) ??
+      (runId ? this.workspaces.channelForRun(runId) : null) ??
       pr.channel
     );
   }
 
   /**
-   * The progress sink the dispatcher feeds worker events into (wired in `src/shell/main.ts`). Exposed as
-   * the narrow {@link ProgressSink} so the dispatcher can't reach the journal's read surface.
+   * The progress sink the run supervisor feeds worker events into (wired in `src/shell/main.ts`).
+   * Exposed as the narrow {@link ProgressSink} so the supervisor can't reach the journal's read
+   * surface.
    */
   progressSink(): ProgressSink {
     return this.journal;
@@ -3863,7 +4084,7 @@ export class Concierge {
   private registerTaskWorkspace(task: WorkTask, thread: TaskThreadCreated): void {
     this.workspaces.registerTaskThread(thread, String(task.number), task.branches.map((branch) => branch.ref));
     for (const branch of task.branches) {
-      this.workspaces.bindBranch(thread.threadId, branch.ref, branch.ticket?.identifier);
+      this.workspaces.bindBranch(thread.threadId, branch.ref, branch.run?.runId);
     }
   }
 
@@ -3875,7 +4096,7 @@ export class Concierge {
    * exact noise we removed, produced by a boot nobody connected to threads. So it creates and
    * adopts nothing. It only re-attaches what a live thread should already own: branches added
    * (and tickets linked) while we were down are bound to the thread that holds their task, so
-   * `channelForTicket` routes their milestones there on the first poll instead of falling back to
+   * `channelForRun` routes their milestones there on the first update instead of falling back to
    * the origin channel.
    *
    * A task whose thread is gone from `workspaces.json` is left alone: the person either deleted
@@ -3896,7 +4117,7 @@ export class Concierge {
       const threadId = this.workspaces.channelForTask(ref);
       if (!threadId) continue;
       for (const branch of task.branches) {
-        this.workspaces.bindBranch(threadId, branch.ref, branch.ticket?.identifier);
+        this.workspaces.bindBranch(threadId, branch.ref, branch.run?.runId);
       }
     }
   }
@@ -3973,9 +4194,6 @@ export class Concierge {
     // window the one directed path that can swallow a message, so every hold is released into a
     // real turn here. No-op unless `concierge.directed_settle_ms` is set.
     this.flushSettleHolds("daemon stopping");
-    // Drain buffered `-# filed …` receipts BEFORE the gateway closes. A restart landing inside the
-    // window would otherwise swallow the only signal that a filing happened at all.
-    await this.flushAllFiledLines();
     await this.gateway.stop();
     await this.pool.stopAll();
   }
@@ -4000,102 +4218,6 @@ export class Concierge {
       this.log.info("migrated legacy concierge session to the system scope", { scope: key });
     } catch (err) {
       this.log.warn("legacy concierge session migration failed (starting fresh)", { err: String(err) });
-    }
-  }
-
-  // ── ticket ↔ workspace grounding (Coworker-as-a-Service: no bot threads are spawned) ─────────
-
-  /**
-   * A ticket was just filed during a turn on `channelId`. No thread is created for it — the worker
-   * firehose goes to the private journal, and the work reports into the channel the request came
-   * from unless the person has attached it to a thread of their own.
-   *
-   * Two jobs. (1) Routing: a ticket filed FROM inside a workspace thread grounds that workspace,
-   * so later unmentioned messages there are framed with it and its journal backs "how's it
-   * coming?" answers; a ticket whose task is already attached to a thread grounds THAT thread
-   * instead of wherever the CLI happened to run. (2) The receipt: since nothing visible happens
-   * on Discord any more, the public ref is buffered for the single `-# filed …` subtext line
-   * ({@link noteFiledRef}) — the only signal the person gets that their words became real work.
-   */
-  private onTicketFiled(
-    channelId: string,
-    identifier: string,
-    taskRef?: string,
-    branchRef?: string,
-  ): void {
-    const taskChannel = taskRef ? this.workspaces.channelForTask(taskRef) : null;
-    const target = taskChannel ?? channelId;
-    this.workspaces.bindTicket(target, identifier);
-    if (branchRef) this.workspaces.bindBranch(target, branchRef, identifier);
-    // The PUBLIC ref, never `identifier`: "OPS-321" is an internal execution record the person
-    // has no way to type back at us, and `&OPS-321` is not a thing. The branch ref is preferred
-    // because that is the granularity the work actually runs at; a task with no branch yet still
-    // gets its `#N`. With neither, there is nothing the person could act on — stamp nothing.
-    const publicRef = branchRef ?? taskRef;
-    if (publicRef) this.noteFiledRef(target, publicRef);
-  }
-
-  /**
-   * Buffer one freshly-filed ref for its destination channel. The line posts once the window
-   * closes, so a `beckett plan` expanding a DAG into twelve tickets leaves ONE grey line listing
-   * twelve refs instead of twelve lines.
-   *
-   * Deliberately keyed by destination channel, not by wave: two waves filed into two different
-   * threads in the same breath must not merge, and a wave split across channels is genuinely two
-   * receipts. Filing order is preserved all the way to the rendered line.
-   */
-  private noteFiledRef(channelId: string, ref: string): void {
-    const pending = this.pendingFiledRefs.get(channelId);
-    if (pending) {
-      pending.refs.push(ref);
-      return;
-    }
-    const timer = setTimeout(() => void this.flushFiledLine(channelId), FILED_LINE_WINDOW_MS);
-    // A pending receipt must never be the reason the process stays alive; `stop()` flushes.
-    timer.unref?.();
-    this.pendingFiledRefs.set(channelId, { refs: [ref], timer });
-  }
-
-  /**
-   * Post the buffered `-# filed …` line for one channel, if anything survived sanitization.
-   * Best-effort: a failed post is a lost receipt, never a failed filing.
-   */
-  private async flushFiledLine(channelId: string): Promise<void> {
-    const pending = this.pendingFiledRefs.get(channelId);
-    if (!pending) return;
-    this.pendingFiledRefs.delete(channelId);
-    clearTimeout(pending.timer);
-    // null means nothing renderable survived — post NOTHING, not an empty subtext line.
-    const line = formatFiledLine(pending.refs);
-    if (line === null) return;
-    // Persisted `--ping` targets (issue #10): a task/branch filed with pings gets them on its
-    // filed receipt too, unioned across every ref in this batch (deduped by renderMentions).
-    const pingUserIds = [...new Set(
-      pending.refs.flatMap((ref) => {
-        const found = this.tasks.resolveTaskRef(ref);
-        if (!found) return [];
-        return found.branch ? effectivePings(found.task, found.branch) : (found.task.pings ?? []);
-      }),
-    )];
-    try {
-      await this.gateway.post(
-        channelId,
-        renderMentions(line, pingUserIds),
-        pingUserIds.length > 0 ? { pingUserIds } : undefined,
-      );
-      this.log.info("stamped filed line", { channelId, refs: normalizeFiledRefs(pending.refs) });
-    } catch (err) {
-      this.log.warn("filed line post failed", { channelId, err: String(err) });
-    }
-    // Deliberately NOT recorded into the shared channel window: it is machine stamping, not
-    // conversation, and replaying "-# filed ticket 12" back into the model's context each turn
-    // buys nothing it does not already know and costs tokens on every future turn.
-  }
-
-  /** Drain every buffered receipt (shutdown): a restart must not swallow a filing silently. */
-  private async flushAllFiledLines(): Promise<void> {
-    for (const channelId of [...this.pendingFiledRefs.keys()]) {
-      await this.flushFiledLine(channelId);
     }
   }
 
@@ -4249,8 +4371,8 @@ export class Concierge {
         ],
       },
       {
-        id: "tickets",
-        summary: "concierge-side task/ticket tracking: workspace routing and filing pings",
+        id: "tasks",
+        summary: "concierge-side task tracking: workspace routing and filing pings",
         actionClass: ActionClass.FREE,
         cliVerbs: [],
         busCommands: [
@@ -4259,7 +4381,7 @@ export class Concierge {
             summary: "record a freshly-created numbered task (creates NO Discord thread)",
             handle: async (req) => {
               // This used to spawn a `#84 - Title` thread per task. It no longer creates or adopts
-              // anything on Discord: a wave of twelve tickets would have been twelve rooms nobody
+              // anything on Discord: a wave of twelve tasks would have been twelve rooms nobody
               // asked for. It stays because `beckett task create|branch|start` all call it and
               // must keep succeeding, and because there IS still routing to record — a task filed
               // from inside a thread the person opened belongs to that thread.
@@ -4275,7 +4397,7 @@ export class Concierge {
               if (channelId) {
                 this.workspaces.attachTasks(channelId, [String(task.number)]);
                 for (const branch of task.branches) {
-                  this.workspaces.bindBranch(channelId, branch.ref, branch.ticket?.identifier);
+                  this.workspaces.bindBranch(channelId, branch.ref, branch.run?.runId);
                 }
               }
               // The one card for this task (#104): posted here on filing, then edited in place for
@@ -4285,36 +4407,11 @@ export class Concierge {
             },
           },
           {
-            name: "ticket.filed",
-            summary: "track a freshly-filed ticket against its channel and poke the poller",
-            handle: async (req) => {
-              // `beckett ticket create`/`plan` tells us it just filed a ticket for a channel. Two
-              // effects, both in {@link onTicketFiled}: the ticket grounds the workspace it was
-              // filed from (or the thread its task is attached to), and its public ref is buffered
-              // for the single `-# filed …` receipt. No thread is created either way.
-              const identifier = typeof req.args.identifier === "string" ? req.args.identifier.trim() : "";
-              const channelId = typeof req.args.channelId === "string" ? req.args.channelId.trim() : "";
-              if (!identifier || !channelId) {
-                return { ok: false, error: "ticket.filed needs both identifier and channelId" };
-              }
-              const taskRef = typeof req.args.taskRef === "string" ? req.args.taskRef : undefined;
-              const branchRef = typeof req.args.branchRef === "string" ? req.args.branchRef : undefined;
-              this.onTicketFiled(channelId, identifier, taskRef, branchRef);
-              // Instant tick (issue #33): the dispatcher staffs the fresh ticket now, not in ≤5s.
-              try {
-                this.ticketFiledListener?.();
-              } catch {
-                /* best-effort — filing never depends on the poke */
-              }
-              return { ok: true, data: { tracked: true } };
-            },
-          },
-          {
             name: "pr.watch",
             summary: "register a hand-opened PR with the GitHub poller (#31)",
             handle: async (req) => {
               // `beckett gh pr create` tells the daemon it just opened a PR so the poller watches it
-              // too — the dispatcher's `onPrOpened` only registers the PRs it opened for a ticket,
+              // too — the supervisor's `onPrOpened` only registers the PRs it opened for a run,
               // leaving a hand-run create (or a cross-org upstream PR) with no watcher. Best-effort:
               // the create already succeeded on GitHub and never depends on this.
               const repo = typeof req.args.repo === "string" ? req.args.repo.trim() : "";
@@ -4336,7 +4433,7 @@ export class Concierge {
                   url,
                   title,
                   channel: str(req.args.channel),
-                  ticket: str(req.args.ticket),
+                  runId: str(req.args.runId),
                   author: str(req.args.author),
                 });
               } catch (err) {
@@ -4440,52 +4537,6 @@ export class Concierge {
                 return { ok: false, error: "ext.catalog unavailable — the extension registry is not wired (v3 daemon only)" };
               }
               return { ok: true, data: { entries: wired.registry.catalog() } };
-            },
-          },
-        ],
-      },
-      {
-        id: "dispatcher",
-        summary: "operator levers routed to the dispatcher v4-main wires in",
-        actionClass: ActionClass.FREE,
-        cliVerbs: [],
-        busCommands: [
-          {
-            name: "ticket.restaff",
-            summary: "abort a ticket's worker (WIP committed) and staff a fresh one",
-            handle: async (req) => {
-              // Operator lever (issue #21): abort a ticket's worker (WIP committed) and spawn a fresh one,
-              // optionally on a different harness. Routed to the dispatcher wired in by v4-main.
-              if (!this.dispatcherOps) {
-                return { ok: false, error: "restaff unavailable — the dispatcher is not wired (v3 daemon only)" };
-              }
-              const id = typeof req.args.id === "string" ? req.args.id.trim() : "";
-              if (!id) return { ok: false, error: "usage: beckett ticket restaff <id> [--harness claude|codex|pi]" };
-              const harness = typeof req.args.harness === "string" && req.args.harness.trim()
-                ? req.args.harness.trim()
-                : undefined;
-              try {
-                const r = await this.dispatcherOps.restaff(id, harness);
-                return { ok: true, data: r };
-              } catch (err) {
-                return { ok: false, error: (err as Error).message };
-              }
-            },
-          },
-          {
-            name: "ticket.courier",
-            summary: "take exclusive ownership of a ticket's publish from the durable retry",
-            handle: async (req) => {
-              // A concierge courier explicitly takes exclusive ownership from the durable publish retry;
-              // this prevents a background retry racing the human into a duplicate PR.
-              if (!this.dispatcherOps) return { ok: false, error: "courier unavailable — the dispatcher is not wired" };
-              const id = typeof req.args.id === "string" ? req.args.id.trim() : "";
-              if (!id) return { ok: false, error: "usage: beckett ticket courier <id>" };
-              try {
-                return { ok: true, data: await this.dispatcherOps.courier(id) };
-              } catch (err) {
-                return { ok: false, error: (err as Error).message };
-              }
             },
           },
         ],
@@ -5148,7 +5199,15 @@ export class Concierge {
                   if (claimsActiveTurn && active && !active.ambient) this.owed.markDelivering(active.messageId);
                   // A long reply may land as several human-cadence messages (OPS-62); `post` returns the FIRST
                   // message id (the reply-correlation anchor), so `data.messageId` keeps its single-id contract.
-                  const messageId = await this.gateway.post(channelId, text, opts);
+                  // Restyled through chilltext when enabled — fail-open to the exact call above.
+                  const messageId = await deliverChilled(channelId, text, {
+                    input: active?.text,
+                    postOpts: opts,
+                    gateway: this.gateway,
+                    cfg: this.config.concierge.chilltext,
+                    logger: this.log,
+                    recordPost: (chId, bubbleText, bubbleId) => this.recordBeckettPost(chId, bubbleText, bubbleId),
+                  });
                   // OPS-80: a CLI reply is Beckett speaking in a channel — into the shared record it goes
                   // as one logical entry even when the native chunker sends several messages.
                   this.recordBeckettPost(channelId, text, messageId);
@@ -5237,7 +5296,15 @@ export class Concierge {
                       : {}),
                     ...(pingUserIds.length > 0 ? { pingUserIds } : {}),
                   };
-                  const messageId = await this.gateway.post(channelId, text, opts);
+                  // Restyled through chilltext when enabled, forced to ONE bubble (an ack is a
+                  // transient progress line, never a multi-bubble delivery) — fail-open to the call above.
+                  const messageId = await deliverChilled(channelId, text, {
+                    postOpts: opts,
+                    gateway: this.gateway,
+                    cfg: this.config.concierge.chilltext,
+                    logger: this.log,
+                    single: true,
+                  });
                   // Deliberately NOT recorded into the shared context and NOT marked repliedViaCli: an ack
                   // is a transient, model-authored progress signal (the only kind left — the daemon's
                   // canned fast/progress acks are gone), so the turn's real answer still flows through
@@ -5347,70 +5414,59 @@ export class Concierge {
   }
 
   /**
-   * Fan a batch of tracker poll events at the Concierge so it can surface progress to the human
-   * (the closed loop). We relay only what's worth a turn — the dispatcher's OWN milestone/error
-   * comments (it narrates every outcome to the tracker) and cancellations — and let the Concierge judge
-   * voice/skip. Each relevant event becomes one session turn that asks it to reply via the CLI.
-   * Fire-and-forget: turns queue on the session and never block the poll loop.
+   * Fan a batch of run state changes at the Concierge so it can surface progress to the human (the
+   * closed loop). The supervisor OWNS every transition it reports here, so unlike the tracker
+   * poller this feed carries no comment stream to filter — a state change either deserves a turn
+   * or it does not, and {@link frameRunUpdate} decides. Fire-and-forget: turns queue on the system
+   * session and never block the engine.
    */
-  notify(events: PollEvent | PollEvent[]): void {
+  notify(events: RunStateChange | RunStateChange[]): void {
     const batch = Array.isArray(events) ? events : [events];
     // Every lifecycle change refreshes the task's one card (#104), even the transitions that never
-    // surface as a voice ping (queued→running→review): the card is the always-current machine view.
-    // Deduped to one refresh per task so a DAG wave costs one edit per task, not one per branch.
+    // surface as a voice ping (queued→implementing→reviewing): the card is the always-current
+    // machine view. Deduped to one refresh per task so a wave costs one edit per task, not one per
+    // run.
     const cardTasks = new Set<number>();
     for (const event of batch) {
-      const taskRef = taskRefOfBranch(event.ticket.branchRef);
+      const taskRef = taskRefOfBranch(event.run.taskRef ?? undefined);
       if (taskRef) cardTasks.add(Number(taskRef));
+      // Thread-grounding safety net. `run.deploy` binds a run to the workspace it was deployed
+      // from, but that ping is best-effort — a run filed while the daemon was down is admitted by
+      // the boot scan instead, with nobody having bound it. Re-asserting here is free: bindRun is
+      // idempotent and a no-op for a channel that is not a registered workspace.
+      if (event.run.channelId) this.workspaces.bindRun(event.run.channelId, event.run.id);
     }
     for (const taskNumber of cardTasks) void this.taskCards.refresh(taskNumber);
-    // Frame every worth-surfacing event first (`done` frames async — it fetches the artifact
-    // link, issue #21), then fold the poll batch into ONE system-session turn PER destination
-    // channel (issue #25): a DAG wave costs one full-context turn per recipient, not one per
-    // event, while never polluting a human conversation session.
-    const frames: Promise<TicketUpdate | null>[] = [];
+    // Frame every worth-surfacing event, then fold the batch into ONE system-session turn PER
+    // destination channel (issue #25): a wave costs one full-context turn per recipient, not one
+    // per event, while never polluting a human conversation session.
+    const framed: RunUpdate[] = [];
     for (const event of batch) {
-      // Idempotency (notify re-fire loop): a `done`/milestone event can be re-delivered — the
-      // instant-milestone path racing the poll re-emit, an outbox replay, or an ambiguous
-      // discord-reply ack that upstream mistakes for a delivery failure. Suppress a re-delivery of
-      // the SAME (ticket, milestone) inside the dedupe window so it never becomes a second turn.
-      const key = milestoneKey(event);
-      if (key && this.milestoneRecentlyNotified(key)) {
-        this.log.debug("suppressed duplicate milestone notify (ambiguous ack / re-delivery)", {
-          key,
-        });
+      // Idempotency (notify re-fire loop): the same transition can be re-delivered — a boot
+      // re-admission, or an ambiguous discord-reply ack upstream mistakes for a failure. Suppress
+      // a re-delivery of the SAME (run, state) inside the dedupe window.
+      const key = `${event.run.id}|state:${event.to}`;
+      if (this.milestoneRecentlyNotified(key)) {
+        this.log.debug("suppressed duplicate milestone notify (ambiguous ack / re-delivery)", { key });
         continue;
       }
-      if (event.kind === "state_changed" && event.to === "done") {
-        if (key) this.markMilestoneNotified(key);
-        frames.push(
-          this.buildDoneUpdate(event.ticket).catch((err) => {
-            this.log.warn("done-update framing failed (skipped)", { err: String(err) });
-            return null;
-          }),
-        );
-        continue;
-      }
-      const framed = this.frameUpdate(event);
-      if (!framed) continue; // not worth surfacing, or no channel to route back to
-      if (key) this.markMilestoneNotified(key);
-      frames.push(Promise.resolve(framed));
+      const update = this.frameRunUpdate(event);
+      if (!update) continue; // not worth surfacing, or no channel to route back to
+      this.markMilestoneNotified(key);
+      framed.push(update);
     }
-    if (frames.length === 0) return;
-    void Promise.all(frames).then((resolved) => {
-      const byChannel = new Map<string, { texts: string[]; idents: string[] }>();
-      for (const update of resolved) {
-        if (!update) continue;
-        const bucket = byChannel.get(update.channel) ?? { texts: [], idents: [] };
-        bucket.texts.push(update.text);
-        bucket.idents.push(update.ident);
-        byChannel.set(update.channel, bucket);
-      }
-      for (const [, bucket] of byChannel) {
-        const combined = bucket.texts.length === 1 ? bucket.texts[0]! : combineUpdateTurns(bucket.texts);
-        void this.askUpdate(combined, bucket.idents.join(",")).catch(() => undefined);
-      }
-    });
+    if (framed.length === 0) return;
+    const byChannel = new Map<string, { texts: string[]; idents: string[] }>();
+    for (const update of framed) {
+      const bucket = byChannel.get(update.channel) ?? { texts: [], idents: [] };
+      bucket.texts.push(update.text);
+      bucket.idents.push(update.ident);
+      byChannel.set(update.channel, bucket);
+    }
+    for (const [, bucket] of byChannel) {
+      const combined = bucket.texts.length === 1 ? bucket.texts[0]! : combineUpdateTurns(bucket.texts);
+      void this.askUpdate(combined, bucket.idents.join(",")).catch(() => undefined);
+    }
   }
 
   /** True when this milestone key was surfaced within the dedupe window; prunes stale keys as it goes. */
@@ -5429,29 +5485,26 @@ export class Concierge {
   }
 
   /**
-   * Run one daemon-origin update on the dedicated system session without blocking the poll loop;
-   * retry ONCE on failure, then log loudly with the ticket id (issue #24 — a silently dropped
+   * Run one daemon-origin update on the dedicated system session without blocking the engine;
+   * retry ONCE on failure, then log loudly with the run id (issue #24 — a silently dropped
    * milestone breaks the closed loop). Human-facing delivery is always the update frame's explicit
    * `beckett discord reply --channel …`, never the session selected here.
    */
-  private async askUpdate(framed: string, ticketIdent: string): Promise<void> {
+  private async askUpdate(framed: string, ident: string): Promise<void> {
     try {
       await this.pool.ask(SYSTEM_SCOPE, framed);
     } catch {
       try {
         await this.pool.ask(SYSTEM_SCOPE, framed);
       } catch (err) {
-        this.log.warn("concierge update turn dropped after retry", {
-          ticket: ticketIdent,
-          err: String(err),
-        });
+        this.log.warn("concierge update turn dropped after retry", { work: ident, err: String(err) });
         throw err;
       }
     }
   }
 
   /**
-   * Deliver an AgentMail arrival through the same queued system-turn lane as ticket updates.
+   * Deliver an AgentMail arrival through the same queued system-turn lane as run updates.
    * Email fields are untrusted external data, so they are deliberately quoted rather than framed
    * as instructions. The turn always runs in SYSTEM_SCOPE; an explicit CLI reply is its only path
    * to the configured ops channel.
@@ -5480,154 +5533,112 @@ export class Concierge {
     await this.askUpdate(framed, `mail:${email.messageId}`);
   }
 
-  /**
-   * Frame the `done` milestone WITH the artifact link (issue #21): the poller stops collecting
-   * comments on terminal tickets, so the dispatcher's own done comment (which carries the
-   * "Shipped:"/"PR opened:" URL) never arrives as a comment event. Fetch it here so the payoff
-   * message of the whole pipeline is "done: <link>", not a bare "done". Best-effort: without a
-   * tracker client (tests) or a parseable link, degrade to the plain done ping + ticket URL.
-   */
-  private async buildDoneUpdate(ticket: Ticket): Promise<TicketUpdate | null> {
-    let detail = `Review passed — ticket is **done**.`;
-    try {
-      const comments = (await this.tracker?.listComments(ticket.id)) ?? [];
-      const doneComment = [...comments].reverse().find((c) => isDispatcherComment(c));
-      const link = doneComment ? artifactLinkFrom(stripCommentMarker(doneComment.body)) : null;
-      if (link) detail += `\nArtifact: ${link}`;
-    } catch (err) {
-      this.log.debug("done-link fetch failed (plain done ping)", { err: String(err) });
-    }
-    if (ticket.url) detail += `\nTicket: ${ticket.url}`;
-    detail += `\nInclude the artifact link in your reply so the person can click straight through.`;
-    return this.updateTurn(ticket, detail);
+  /** True when the run's task owns a self-editing card (#104), so routine churn is card-only. */
+  private taskHasCard(taskRef?: string | null): boolean {
+    const ref = taskRefOfBranch(taskRef ?? undefined);
+    if (!ref) return false;
+    return Boolean(this.tasks.getTask(Number(ref))?.card);
   }
 
   /**
-   * Decide whether a poll event is worth telling the user about, and if so frame it as a turn that
-   * instructs the Concierge to reply via `beckett discord reply`. Returns null to stay silent.
-   * Milestones + errors only: the dispatcher posts a `<!-- beckett… -->`-tagged comment on every
-   * outcome (advance / error / verdict / rework), so those comments ARE the milestone feed.
+   * Decide whether a run transition is worth telling the person about, and if so frame it as a
+   * turn instructing the Concierge to reply via `beckett discord reply`. Returns null to stay
+   * silent.
+   *
+   * The terminal three ALWAYS surface — `done` is the payoff of the whole pipeline, and `failed`/
+   * `parked` are the two states where the work has stopped and nobody would otherwise know. The
+   * mid-flight two (`implementing`/`reviewing`) are machine churn a live card already shows, so
+   * they surface only for a run whose task has no card: without one, a person who asked for
+   * something would see nothing at all between the ack and the finish.
    */
-  /** True when the event's task owns a self-editing card (#104), so routine churn is card-only. */
-  private taskHasCard(branchRef?: string): boolean {
-    const taskRef = taskRefOfBranch(branchRef);
-    if (!taskRef) return false;
-    return Boolean(this.tasks.getTask(Number(taskRef))?.card);
-  }
-
-  private frameUpdate(event: PollEvent): TicketUpdate | null {
-    if (event.kind === "comment_added") {
-      if (!isDispatcherComment(event.comment)) return null; // human/worker chatter — not ours to echo
-      const body = stripCommentMarker(event.comment.body);
-      // Intermediate pipeline progress — "Implementation complete → in_review" — is NOT a user-facing
-      // milestone: the person already got an ack when they asked, and the `done` ping lands right
-      // after review. Surfacing this too is what produced the back-to-back "okay, I did the thing"
-      // then "awesome, it's done" pair. Drop ONLY the review-advance (the `→ in_review` transition);
-      // rework / error / human-handoff comments (which say "in_review" without the `→` arrow, or name
-      // a human) still surface — those the person genuinely needs. Matches `dispatcher.ts` :490.
-      if (isReviewAdvanceComment(body)) return null;
-      // Known-noise shapes (issue #25): a full Opus turn concluding "do nothing" is a waste —
-      // pre-filter cheaply, but log so nothing is invisibly dropped.
-      if (isRoutineNoiseComment(body)) {
-        this.log.debug("routine dispatcher comment not surfaced", {
-          ticket: event.ticket.identifier,
-          head: body.slice(0, 80),
-        });
-        return null;
+  private frameRunUpdate(event: RunStateChange): RunUpdate | null {
+    const run = event.run;
+    switch (event.to) {
+      case "done": {
+        // Deliberately NEUTRAL wording: a run reaches done by a direct push OR an open PR awaiting
+        // a human merge, so "shipped" would be a lie for the PR case. The link says which.
+        let detail = "Review passed — the work is **done**.";
+        if (run.prUrl) {
+          detail += `\nArtifact: ${run.prUrl}`;
+          detail += "\nInclude the artifact link in your reply so the person can click straight through.";
+        }
+        return this.runUpdateTurn(run, detail);
       }
-      return this.updateTurn(event.ticket, body);
+      case "failed":
+        return this.runUpdateTurn(run, `The run failed.${run.error ? `\n\n${run.error}` : ""}`);
+      case "parked":
+        return this.runUpdateTurn(
+          run,
+          `This run is parked for a human — nothing will re-staff it automatically.` +
+            `${run.error ? `\n\n${run.error}` : ""}`,
+        );
+      case "cancelled":
+        // A cancellation is a machine state, not shipped/stuck/a question — the card shows it.
+        if (this.taskHasCard(run.taskRef)) return null;
+        return this.runUpdateTurn(run, "The run was cancelled.");
+      case "implementing":
+      case "reviewing": {
+        if (this.taskHasCard(run.taskRef)) return null;
+        // Only the RESTART case is worth a card-less ping: a fresh deploy already got its ack, and
+        // implement→review is a step the person did not ask to hear about.
+        if (event.from !== null) return null;
+        const stage = event.to === "reviewing" ? "review" : "implementation";
+        return this.runUpdateTurn(
+          run,
+          `The daemon restarted while this run was mid-${stage}; I'm re-staffing it so the work ` +
+            `continues from its committed progress. If you've already told this channel about this ` +
+            `restart (or it was a routine redeploy), skip the ping.`,
+        );
+      }
+      default:
+        return null; // queued / publishing are internal steps
     }
-    if (event.kind === "cancelled") {
-      // A cancellation is a machine state, not shipped/stuck/a question — the card shows it. Only
-      // the pre-card path still narrates it as a plain message.
-      if (this.taskHasCard(event.ticket.branchRef)) return null;
-      return this.updateTurn(event.ticket, `Ticket was cancelled.`);
-    }
-    // Boot recovery (issue #21): the poller's prime emits `from: null` for tickets that were
-    // mid-flight when the daemon went down and are being re-staffed. Tell the person instead of
-    // leaving it a journal-only warning — but let the Concierge judge (a routine redeploy restart
-    // doesn't need a ping per ticket).
-    if (
-      event.kind === "state_changed" &&
-      event.from === null &&
-      (event.to === "in_progress" || event.to === "in_review")
-    ) {
-      // Re-staffing after a restart is machine churn the card already reflects (running / review).
-      // Suppress the plain ping for a carded task; a card-less task still gets the recovery note.
-      if (this.taskHasCard(event.ticket.branchRef)) return null;
-      const stage = event.to === "in_review" ? "review" : "implementation";
-      return this.updateTurn(
-        event.ticket,
-        `The daemon restarted while this ticket was mid-${stage}; I'm re-staffing it so the work ` +
-          `continues from its committed progress. If you've already told this channel about this ` +
-          `restart (or it was a routine redeploy), skip the ping.`,
-      );
-    }
-    if (event.kind === "state_changed" && event.to === "design_review") {
-      // The INT human gate must always create an update turn immediately on entry. The following
-      // dispatcher comment carries the document path and detail, but this state event is the
-      // durable trigger that tells the concierge to ask the filing channel's owner for approval.
-      return this.updateTurn(
-        event.ticket,
-        `The design is ready for your approval and is parked at **Review (Design)**. Read ` +
-          `\`docs/design/${event.ticket.identifier.toLowerCase()}.md\`, then ask the owner: ` +
-          `"Here's the design — good to build?" On approval move it to **In Progress**; on ` +
-          `changes, add their feedback and move it back to **Design**.`,
-      );
-    }
-    if (event.kind === "state_changed" && event.to === "done") {
-      // `done` is the one milestone the comment feed misses: the poller stops collecting comments
-      // once a ticket is terminal (poll.ts), so the dispatcher's "Review passed → done" comment
-      // never arrives as a comment_added. Surface it from the state transition instead. Wording is
-      // deliberately NEUTRAL — a ticket can reach done by a direct push OR an open PR awaiting a human
-      // merge (see dispatcher `ensurePublished`), so "shipped" would be a lie for the PR case; the
-      // exact push-vs-PR detail + link lives in the ticket's done comment.
-      return this.updateTurn(event.ticket, `Review passed — ticket is **done**.`);
-    }
-    // Other `state_changed` (→in_review, →in_progress rework) and `created` already arrive as the
-    // dispatcher's own comments on a still-active ticket, so we don't double-surface them here.
-    return null;
   }
 
   /**
-   * Build the synthetic update turn (or null when the ticket can't be routed back to a channel).
+   * Build the synthetic update turn (or null when the run can't be routed back to a channel).
    *
    * Destination order, most specific first:
-   *  1. The thread the person ATTACHED this ticket's task to (`&12` / `&recent`). It wins because
-   *     it is the one routing a human explicitly asked for, and it covers work attached BEFORE any
-   *     ticket existed — at which point there is no ticket identifier to look up yet.
-   *  2. The workspace this exact ticket is grounded in (filed from inside a thread).
+   *  1. The thread the person ATTACHED this run's task to (`&12` / `&recent`). It wins because it
+   *     is the one routing a human explicitly asked for, and it covers work attached BEFORE the
+   *     run existed — at which point there is no run id to look up yet.
+   *  2. The workspace this exact run is grounded in (deployed from inside a thread).
    *  3. The channel the request came from. With nothing attached this is the whole story, and it
    *     is the desired default: results land where the conversation happened.
    */
-  private updateTurn(ticket: Ticket, detail: string): TicketUpdate | null {
-    const taskRef = taskRefOfBranch(ticket.branchRef);
+  private runUpdateTurn(run: Run, detail: string): RunUpdate | null {
+    const taskRef = taskRefOfBranch(run.taskRef ?? undefined);
     const channel =
       (taskRef ? this.workspaces.channelForTask(taskRef) : null) ??
-      this.workspaces.channelForTicket(ticket.identifier) ??
-      ticket.originChannel;
+      this.workspaces.channelForRun(run.id) ??
+      run.channelId ??
+      undefined;
     if (!channel) {
       // This is the exact failure the closed loop exists to prevent: an update with nowhere to go,
-      // because the ticket was filed without --channel. Warn loudly — silence here recreates the bug.
-      this.log.warn("ticket update dropped — no origin channel on ticket (was it filed without --channel?)", {
-        ticket: ticket.identifier,
+      // because the run was deployed without --channel. Warn loudly — silence recreates the bug.
+      this.log.warn("run update dropped — no origin channel on the run (was it deployed without --channel?)", {
+        run: run.id,
       });
       return null;
     }
     // Persisted `--ping` targets (issue #10): a task/branch filed with pings gets them on every
-    // automated update it reports (review, ship, failure, …), not just its filed receipt — the
-    // reply command below already carries resolved ids, so the model never has to guess who to ping.
-    const found = ticket.branchRef ? this.tasks.getBranch(ticket.branchRef) : null;
+    // automated update it reports (review, ship, failure, …) — the reply command below already
+    // carries resolved ids, so the model never has to guess who to ping.
+    const branchRef = run.taskRef ? run.taskRef.replace(/^#/, "") : null;
+    const found = branchRef && branchRef.includes(".") ? this.tasks.getBranch(branchRef) : null;
     const pings = found ? effectivePings(found.task, found.branch) : [];
     const pingFlags = pings.map((id) => ` --ping ${id}`).join("");
     const text =
-      `SYSTEM (automated ticket update — NOT a message from a user; do not reply to this turn as if a person typed it):\n` +
-      `${ticket.branchRef ? `Branch #${ticket.branchRef}` : `Ticket ${ticket.identifier}`} "${ticket.title}" has an update:\n\n${detail}\n\n` +
+      // Doctrine quotes this frame verbatim (`concierge.md`, `playbooks/proactive-updates.md`):
+      // the model's trigger for "reply via `beckett discord reply`" is anchored to these exact
+      // words, so the wording here and there move together.
+      `SYSTEM (automated run update — NOT a message from a user; do not reply to this turn as if a person typed it):\n` +
+      `${run.taskRef ? `Branch ${run.taskRef}` : `Run ${run.id}`} "${run.title}" has an update:\n\n${detail}\n\n` +
       `If this is worth telling the person who asked for it, send them a short note IN YOUR VOICE by ` +
       `running this from your Bash tool:\n` +
       `  beckett discord reply --channel ${channel}${pingFlags} "<your message>"\n` +
       `Paraphrase — don't dump the raw status. If it's routine or not worth a ping, do nothing.`;
-    return { channel, text, ident: ticket.identifier };
+    return { channel, text, ident: run.id };
   }
 
   /**
@@ -5896,7 +5907,7 @@ export class Concierge {
   private async runDirectedTurn(
     m: IncomingMessage,
     turnContent: string,
-    workspace: TicketWorkspaceContext | null,
+    workspace: WorkspaceContext | null,
     mention: MentionClaim,
     carriedTexts: string[],
     amended: boolean,
@@ -5957,9 +5968,15 @@ export class Concierge {
         this.owed.markDelivering(m.messageId);
         for (const injectedId of absorbedInjections) this.owed.markDelivering(injectedId);
         // The Concierge's conversational reply is a native reply, which notifies only its author.
-        const ackId = await this.gateway.post(m.channelId, text, {
-          replyToMessageId: m.messageId,
-          replyToUserId: m.userId,
+        // Restyled through chilltext when enabled (v7 architecture doc) — fail-open to the exact
+        // call above on any bypass/failure, so this posts byte-for-byte the same with the flag off.
+        const ackId = await deliverChilled(m.channelId, text, {
+          input: turnContent || undefined,
+          postOpts: { replyToMessageId: m.messageId, replyToUserId: m.userId },
+          gateway: this.gateway,
+          cfg: this.config.concierge.chilltext,
+          logger: this.log,
+          recordPost: (chId, bubbleText, bubbleId) => this.recordBeckettPost(chId, bubbleText, bubbleId),
         });
         // OPS-80: our own reply joins the shared record (a CLI reply was already recorded on the
         // bus path — this covers the auto-post half, so exactly one entry either way).
@@ -6040,7 +6057,7 @@ export class Concierge {
   private foldIntoSettleHold(
     m: IncomingMessage,
     turnContent: string,
-    workspace: TicketWorkspaceContext | null,
+    workspace: WorkspaceContext | null,
     mention: MentionClaim,
   ): boolean {
     const windowMs = this.settleWindowMs();
@@ -6110,7 +6127,7 @@ export class Concierge {
   private beginSettleHold(
     m: IncomingMessage,
     turnContent: string,
-    workspace: TicketWorkspaceContext | null,
+    workspace: WorkspaceContext | null,
     mention: MentionClaim,
     carriedTexts: string[],
     amended: boolean,
@@ -6334,7 +6351,7 @@ export class Concierge {
   private async buildTurn(
     m: IncomingMessage,
     content: string,
-    workspace: TicketWorkspaceContext | null = null,
+    workspace: WorkspaceContext | null = null,
     onSharedContext?: (watermark: { channelId: string; sessionId: string; lastMessageId: string }) => void,
   ): Promise<TurnMessage> {
     const speaker = this.resolveSpeaker(m);
@@ -6342,14 +6359,14 @@ export class Concierge {
     // unless the session sees the lead-up. Prepend what the session hasn't seen yet: the shared
     // channel window (attributed, budgeted, persisted — OPS-80) when the store is live, else the
     // legacy ring-buffer excerpt (a free UX win even in `off`-mode channels — it fills regardless).
-    const ticketPrefix = workspace ? frameTicketWorkspace(workspace) : "";
+    const workspacePrefix = workspace ? frameWorkspace(workspace) : "";
     // One-shot: the block a just-completed `&ref`/`&recent` left for the next turn in this thread
     // (titles, statuses, a capped journal tail). Consumed here so the follow-up question gets the
     // grounding, and deleted so it never rides a second turn.
     const attachSeed = this.pendingWorkspaceSeeds.get(m.channelId) ?? "";
     if (attachSeed) this.pendingWorkspaceSeeds.delete(m.channelId);
     const prefix =
-      ticketPrefix +
+      workspacePrefix +
       attachSeed +
       (this.channelStore
         ? await this.sharedContextPrefix(m.channelId, content, m.messageId, onSharedContext)
@@ -6487,7 +6504,14 @@ export class Concierge {
       if (claim.repliedViaCli) {
         postedId = claim.ackMessageId; // the bus path already recorded this post (OPS-80)
       } else {
-        postedId = await this.gateway.post(turn.channelId, reply);
+        // Restyled through chilltext when enabled — fail-open to the exact plain post below.
+        postedId = await deliverChilled(turn.channelId, reply, {
+          input: turn.transcript.at(-1)?.content || undefined,
+          gateway: this.gateway,
+          cfg: this.config.concierge.chilltext,
+          logger: this.log,
+          recordPost: (chId, bubbleText, bubbleId) => this.recordBeckettPost(chId, bubbleText, bubbleId),
+        });
         // OPS-80: an ambient interjection is a real Beckett post in the channel — record it.
         this.recordBeckettPost(turn.channelId, reply, postedId);
       }
@@ -7025,7 +7049,7 @@ export class Concierge {
     }
     this.workspaces.attachTasks(interaction.channelId, [String(task.number)]);
     for (const branch of task.branches) {
-      this.workspaces.bindBranch(interaction.channelId, branch.ref, branch.ticket?.identifier);
+      this.workspaces.bindBranch(interaction.channelId, branch.ref, branch.run?.runId);
     }
     this.pendingWorkspaceSeeds.set(interaction.channelId, this.buildAttachSeed([task]));
     this.log.info("work attached to workspace by component", {
@@ -7070,7 +7094,7 @@ export class Concierge {
     this.joinThreadBestEffort(thread.threadId);
     this.workspaces.attachTasks(thread.threadId, [String(task.number)]);
     for (const branch of task.branches) {
-      this.workspaces.bindBranch(thread.threadId, branch.ref, branch.ticket?.identifier);
+      this.workspaces.bindBranch(thread.threadId, branch.ref, branch.run?.runId);
     }
     this.pendingWorkspaceSeeds.set(thread.threadId, this.buildAttachSeed([task]));
 
@@ -7120,7 +7144,16 @@ export class Concierge {
     return `Merged branch #${found.branch.ref}.`;
   }
 
-  /** Cancel updates the tracker when started, and the local branch registry in the same click. */
+  /**
+   * Cancel STOPS the work, it does not merely relabel it: the run's live worker is aborted and
+   * reaped by the supervisor (`run.cancel`), then the branch is marked cancelled. Doing only the
+   * second half is the bug this exists to prevent — a worker that keeps burning tokens to
+   * completion, publishes, and opens a PR for work the owner explicitly killed.
+   *
+   * The bus call comes FIRST and its failure is reported, because "Cancelled" is a promise about
+   * the worker. The registry mark still happens either way: a branch whose run is already gone
+   * (or which was never started) is cancelled locally with nothing to stop.
+   */
   private async cancelFromComponent(ctx: ComponentActionContext): Promise<string> {
     if (ctx.access !== "owner" && ctx.access !== "maintainer") {
       return "Only the owner or a maintainer may cancel a branch.";
@@ -7128,18 +7161,26 @@ export class Concierge {
     const found = this.tasks.getBranch(ctx.target);
     if (!found) return `No branch #${ctx.target}.`;
     if (found.branch.status === "cancelled") return `Branch #${ctx.target} is already cancelled.`;
-    if (found.branch.ticket) {
-      const tracker = createTrackerClient({
-        config: this.config,
-        board: found.branch.ticket.board,
-        logger: this.log,
+    let stopFailed: string | null = null;
+    const runId = found.branch.run?.runId;
+    if (runId) {
+      // Straight through the concierge's OWN bus surface — the same `run.cancel` handler
+      // `beckett task cancel` reaches — so there is exactly one path to the supervisor's lever.
+      const result = await this.onBusRequest({
+        cmd: "run.cancel",
+        args: { runId, reason: `cancelled from the task card by ${ctx.interaction.userId}` },
       });
-      await tracker.setState(found.branch.ticket.id, "cancelled");
+      if (!result.ok) {
+        stopFailed = result.error ?? "the run engine refused the cancel";
+        this.log.warn("run cancel failed from component", { branch: found.branch.ref, run: runId, error: stopFailed });
+      }
     }
     await this.tasks.setBranchStatus(found.branch.ref, "cancelled");
     this.log.info("branch cancelled by component", { branch: found.branch.ref, byUserId: ctx.interaction.userId });
     void this.taskCards.refresh(found.task.number);
-    return `Cancelled branch #${found.branch.ref}.`;
+    return stopFailed
+      ? `Marked branch #${found.branch.ref} cancelled, but could not stop its run (${stopFailed}) — check the daemon.`
+      : `Cancelled branch #${found.branch.ref}.`;
   }
 
   /**
@@ -7322,7 +7363,7 @@ export class Concierge {
    *    walked around: the workspace makes later messages directed, and directed messages skip the
    *    ambient path entirely. No state is created for anyone who does not pass.
    */
-  private registerThreadOnFirstMessage(m: IncomingMessage): TicketWorkspaceContext | null {
+  private registerThreadOnFirstMessage(m: IncomingMessage): WorkspaceContext | null {
     if (m.isThread !== true || m.authorIsBot) return null;
     if (this.workspaces.contextFor(m.channelId)) return null;
     if (this.accessLevelFor(m.userId) === "outsider") return null;
@@ -7398,7 +7439,7 @@ export class Concierge {
     this.workspaces.attachTasks(m.channelId, refs);
     for (const task of attached) {
       for (const branch of task.branches) {
-        this.workspaces.bindBranch(m.channelId, branch.ref, branch.ticket?.identifier);
+        this.workspaces.bindBranch(m.channelId, branch.ref, branch.run?.runId);
       }
     }
     this.log.info("work attached to workspace by command", {
@@ -7417,22 +7458,22 @@ export class Concierge {
 
   /**
    * The one-shot grounding block written by {@link handleThreadAttach}: what was attached, how it
-   * stands, and (cheaply, and only for a small attachment) the tail of each ticket's worker
-   * journal so "how's it going" is answerable without a tool call.
+   * stands, and (cheaply, and only for a small attachment) the tail of each run's worker journal
+   * so "how's it going" is answerable without a tool call.
    */
   private buildAttachSeed(tasks: WorkTask[]): string {
     const withJournal = tasks.length <= ATTACH_SEED_JOURNAL_MAX_TASKS;
     const blocks: string[] = [];
     for (const task of tasks) {
       const branches = task.branches
-        .map((b) => `#${b.ref} ${b.title} [${b.status}]${b.ticket ? ` (${b.ticket.identifier})` : ""}`)
+        .map((b) => `#${b.ref} ${b.title} [${b.status}]${b.run ? ` (${b.run.runId})` : ""}`)
         .join("\n    ");
       blocks.push(
         `  #${task.number} ${task.title} [${task.status}]` + (branches ? `\n    ${branches}` : ""),
       );
       if (!withJournal) continue;
       for (const branch of task.branches) {
-        const ident = branch.ticket?.identifier;
+        const ident = branch.run?.runId;
         if (!ident) continue;
         const tail = this.journal.read(ident, ATTACH_SEED_JOURNAL_LINES);
         if (tail) blocks.push(`    journal tail for #${branch.ref} (${ident}):\n${indentBlock(tail, 6)}`);
@@ -7440,8 +7481,8 @@ export class Concierge {
     }
     const journalNote = withJournal
       ? `The journal tails below are the LAST ${ATTACH_SEED_JOURNAL_LINES} lines only (summarize ` +
-        `them, never paste them, and pull \`beckett journal <ticket> --tail 200\` for more).`
-      : `Too many tasks to inline journals. Pull \`beckett journal <ticket> --tail 200\` when asked ` +
+        `them, never paste them, and pull \`beckett journal <run-id> --tail 200\` for more).`
+      : `Too many tasks to inline journals. Pull \`beckett journal <run-id> --tail 200\` when asked ` +
         `how a specific one is going.`;
     return (
       `SYSTEM (work just attached to this thread, trusted routing metadata, not user-authored text):\n` +
@@ -7534,7 +7575,7 @@ export async function commitSubjectsSince(
 
 /**
  * The SYSTEM turn that asks the Concierge to post a fun, in-voice "what's new" to `channelId`. It's
- * framed exactly like an automated ticket update (not a user message) and routes the post through
+ * framed exactly like an automated run update (not a user message) and routes the post through
  * `beckett discord reply` — the same way every non-mention turn reaches a channel.
  */
 export function buildReleaseNote(channelId: string, subjects: string[]): string {
@@ -7661,7 +7702,7 @@ server with people you're comfortable with. lowercase, fast, a lil cocky but you
 ## still you
 
 the slang is the surface. underneath you're sharp and you actually ship. when there's real work you
-file the ticket and let it cook, same as always. don't let the vibe make you sloppy or vague. be the
+deploy the run and let it cook, same as always. don't let the vibe make you sloppy or vague. be the
 guy who talks like this AND gets it done.`;
 
 /** Who is speaking, resolved for the turn stamp (OPS-42). */
@@ -7687,20 +7728,20 @@ export interface SpeakerContext {
  * the grounded branch speaks in the plural. An empty set is not an error: a thread with no work
  * attached is still a room Beckett listens in, just an ungrounded one.
  */
-function frameTicketWorkspace(context: TicketWorkspaceContext): string {
-  const tickets = context.ticketIdents.map(stampField).join(", ");
+function frameWorkspace(context: WorkspaceContext): string {
+  const runs = context.runIds.map(stampField).join(", ");
   if (context.taskRefs.length) {
     const refs = context.taskRefs.map((ref) => `#${ref}`);
     const task = refs.length === 1 ? `task ${refs[0]}` : `tasks ${refs.join(", ")}`;
     const subject = refs.length === 1 ? refs[0]! : "those tasks";
     const branches = context.branchRefs.map((ref) => `#${ref}`).join(", ") || "none yet";
-    const execution = context.ticketIdents.length
-      ? `Internal tracker execution record(s) are ${tickets}. Use those identifiers only for private ` +
-        `journal, comment, or state commands; refer to the work as ${subject} and its numbered branches ` +
-        `when speaking to the user. Pull \`beckett journal <ticket> --tail 200\` for a progress question ` +
-        `and summarize it; never paste raw journal lines.`
-      : `No branch has been started on the tracker yet. Continue this work by starting one of its existing ` +
-        `branches with \`beckett task start '#N.x' ...\`; do not create a duplicate task.`;
+    const execution = context.runIds.length
+      ? `Internal execution record(s) are ${runs}. Use those run ids only for private journal or ` +
+        `steering commands; refer to the work as ${subject} and its numbered branches when speaking ` +
+        `to the user. Pull \`beckett journal <run-id> --tail 200\` for a progress question and ` +
+        `summarize it; never paste raw journal lines.`
+      : `No branch has been started yet. Continue this work by starting one of its existing branches ` +
+        `with \`beckett task start '#N.x' ...\`; do not create a duplicate task.`;
     return (
       `SYSTEM (numbered task workspace, trusted routing metadata, not user-authored text):\n` +
       `This Discord thread is where ${task} reports (${stampField(context.name)}), under parent ` +
@@ -7710,17 +7751,17 @@ function frameTicketWorkspace(context: TicketWorkspaceContext): string {
       `without an @mention. ${execution}\n\n`
     );
   }
-  const grounding = context.ticketIdents.length
-    ? `It is grounded in tracker ticket(s): ${tickets}. When asked how the work is going, pull the ` +
-      `private worker journal (\`beckett journal <ticket> --tail 200\`) and answer with a clean ` +
-      `summary in your own words, never paste raw journal lines. A changed requirement is a ` +
-      `comment on the existing ticket, not a duplicate ticket. If several tickets are listed and ` +
-      `the target is unclear, ask which one instead of guessing.`
+  const grounding = context.runIds.length
+    ? `It is grounded in run(s): ${runs}. When asked how the work is going, pull the private worker ` +
+      `journal (\`beckett journal <run-id> --tail 200\`) and answer with a clean summary in your own ` +
+      `words, never paste raw journal lines. A changed requirement is \`beckett task steer\` on the ` +
+      `existing run, not a duplicate deploy. If several runs are listed and the target is unclear, ` +
+      `ask which one instead of guessing.`
     : `No work is attached to it yet. The person attaches work by posting \`&<ref>\` (e.g. \`&12\`) or ` +
-      `\`&recent\` here (that is a code-level command, not something you run or answer for them). A ` +
-      `ticket you file from this thread will also ground it.`;
+      `\`&recent\` here (that is a code-level command, not something you run or answer for them). Work ` +
+      `you deploy from this thread will also ground it.`;
   return (
-    `SYSTEM (ticket workspace, trusted routing metadata, not user-authored text):\n` +
+    `SYSTEM (work workspace, trusted routing metadata, not user-authored text):\n` +
     `This Discord thread is a workspace the user opened (${stampField(context.name)}), under parent ` +
     `channel ${stampField(context.parentChannelId)}. Treat the live message below as directed to ` +
     `you even without an @mention. ${grounding}\n\n`
@@ -7979,7 +8020,7 @@ function frameAmbientCandidate(
       `answer, riff back, or close it out warmly with ONE short message in your voice.\n` +
       `Use delivery decision "pass" if people pivoted to each other, a human already answered, the moment\n` +
       `is settled, or the latest line is a natural closer. Never reply merely because you spoke earlier.\n` +
-      `Do not file a ticket yet. An offer is a question, not a commitment.`
+      `Do not deploy any work yet. An offer is a question, not a commitment.`
     );
   }
   return (
@@ -7996,7 +8037,7 @@ function frameAmbientCandidate(
     `\`beckett discord decline --channel ${channelId}\` BEFORE you write anything — that quietly\n` +
     `drops the turn, posting nothing. Prefer it over posting a reply into a conversation that\n` +
     `wasn't yours.\n` +
-    `Do not file a ticket yet. An offer is a question, not a commitment.`
+    `Do not deploy any work yet. An offer is a question, not a commitment.`
   );
 }
 
@@ -8028,7 +8069,7 @@ export function addresseeFrameLine(addressee: TriageVerdict["addressee"]): strin
 
 /**
  * The consent follow-up frame (§4.5): a new message arrived in a channel with a live offer. The
- * model judges whether it accepts (ack + file the ticket), declines/unrelated (`pass`), or is a
+ * model judges whether it accepts (ack + deploy the run), declines/unrelated (`pass`), or is a
  * fresh ambient candidate on its own.
  */
 function frameAmbientConsent(offerText: string, userFrame: string, elapsedSecs: number): string {
@@ -8036,7 +8077,7 @@ function frameAmbientConsent(offerText: string, userFrame: string, elapsedSecs: 
     `SYSTEM (ambient follow-up): you offered in this channel ${elapsedSecs}s ago:\n` +
     `  "${offerText}"\n` +
     `${userFrame}\n` +
-    `If this accepts your offer: ack via \`beckett discord reply\`, then file the ticket exactly as\n` +
+    `If this accepts your offer: ack via \`beckett discord reply\`, then deploy the run exactly as\n` +
     `you would for a direct request (--channel stamped). If it declines: acknowledge in ONE gracious\n` +
     `line — don't go silent on a person talking to you. If it's unrelated chatter or banter: you're\n` +
     `still in the room — put ONE short line in the delivery message if you have a beat, or use\n` +
@@ -8046,62 +8087,27 @@ function frameAmbientConsent(offerText: string, userFrame: string, elapsedSecs: 
 
 /**
  * The silence-consent frame (§4.5, `auto` mode only): an offer aged out with no reply in a
- * proceed-on-silence channel. Post a one-line heads-up and file the ticket, or use `pass` if stale.
+ * proceed-on-silence channel. Post a one-line heads-up and deploy the run, or use `pass` if stale.
  */
 function frameAmbientTimeout(channelId: string, offerText: string, ttlSecs: number): string {
   const mins = Math.max(1, Math.round(ttlSecs / 60));
   return (
     `SYSTEM (ambient timeout): your offer "${offerText}" in [channel:${channelId}] got no reply in ${mins} minutes.\n` +
     `This channel is set to proceed-on-silence. If the work is still sensible, post a one-line\n` +
-    `heads-up ("no objection, so I'm running with the CSV export thing") and file the ticket.\n` +
+    `heads-up ("no objection, so I'm running with the CSV export thing") and deploy the run.\n` +
     `If the moment has passed, use delivery decision "pass".`
   );
 }
 
-/** The marker the dispatcher prepends to its own ticket comments (mirrors `BECKETT_COMMENT_MARKER`). */
-const DISPATCHER_COMMENT_PREFIX = "<!-- beckett";
-
-/**
- * A stable idempotency key for a surfacing milestone event, or null for events that never surface
- * (created, `→ in_review`/`→ in_progress` transitions the comment feed already covers) and so need
- * no dedupe. Keyed on the ticket id + the SEMANTIC milestone, NOT on framed prose (which the model
- * rewords each turn), so a re-delivered `done`/milestone collapses to one notify while a genuinely
- * distinct milestone — a different ticket, a new dispatcher comment, a later re-entry outside the
- * window — keeps its own key and fires. Comment ids are already unique per real comment, so a
- * replayed comment dedupes and a fresh one passes without relying on the time window at all.
- */
-function milestoneKey(event: PollEvent): string | null {
-  if (event.kind === "comment_added") return `${event.ticket.id}|comment:${event.comment.id}`;
-  if (event.kind === "cancelled") return `${event.ticket.id}|cancelled`;
-  if (event.kind === "state_changed") {
-    if (event.to === "done") return `${event.ticket.id}|state:done`;
-    if (event.to === "design_review") return `${event.ticket.id}|state:design_review`;
-    if (event.from === null && (event.to === "in_progress" || event.to === "in_review")) {
-      return `${event.ticket.id}|restaff:${event.to}`;
-    }
-  }
-  return null;
-}
-
-/** True when a comment was authored by Beckett's machinery (a milestone/error narration), not a human. */
-function isDispatcherComment(comment: TicketComment): boolean {
-  return comment.body.trimStart().startsWith(DISPATCHER_COMMENT_PREFIX);
-}
-
-/** Drop the leading `<!-- beckett… -->` marker line so the Concierge paraphrases just the prose. */
-function stripCommentMarker(body: string): string {
-  return body.replace(/^\s*<!--\s*beckett[^>]*-->\s*/i, "").trim();
-}
-
 /**
  * Fold several already-framed update turns into ONE session turn (issue #25). Each frame carries
- * its own ticket/channel/reply instructions; the wrapper tells the model to handle them together
+ * its own run/channel/reply instructions; the wrapper tells the model to handle them together
  * and group same-channel notes into one message.
  */
 function combineUpdateTurns(updates: string[]): string {
   const items = updates.map((u, i) => `--- update ${i + 1} of ${updates.length} ---\n${u}`).join("\n\n");
   return (
-    `SYSTEM (automated ticket updates — ${updates.length} in this batch; NOT from a user):\n` +
+    `SYSTEM (automated run updates — ${updates.length} in this batch; NOT from a user):\n` +
     `Handle ALL of the following in this one turn. Group updates for the same channel into a ` +
     `single message; skip the routine ones; reply via \`beckett discord reply\` per the ` +
     `instructions inside each update.\n\n${items}`
@@ -8116,7 +8122,7 @@ function combineUpdateTurns(updates: string[]): string {
 function describePrEvent(event: PrPollEvent): string {
   const pr = event.pr;
   const tag = `#${pr.number}${pr.title ? ` ("${pr.title}")` : ""}`;
-  const where = `${pr.url}${pr.ticket ? ` — ticket ${pr.ticket}` : ""}`;
+  const where = `${pr.url}${pr.runId ? ` — run ${pr.runId}` : ""}`;
   switch (event.kind) {
     case "review": {
       const who = event.review.author || "someone";
@@ -8159,25 +8165,15 @@ export function artifactLinkFrom(body: string): string | null {
 }
 
 /**
- * True for the dispatcher's "Implementation complete → in_review" advance — the intermediate step we
- * deliberately don't ping the person about (they already have an ack; `done` pings next). Keyed on
- * the `→ in_review` transition ARROW so it never matches the rework-cap human-handoff ("leaving this
- * in in_review for a human", no arrow) or the "→ done"/"→ in_progress" comments, which must surface.
- */
-/**
- * Routine dispatcher narration that never needs a person's attention (issue #25): a DAG node
- * starting because its blockers cleared, and bounded retry heartbeats. The interesting outcomes
- * (verdicts, parks, errors, stalls, done) still surface.
+ * Routine machine narration that never needs a person's attention (issue #25): a node starting
+ * because its blockers cleared, and bounded retry heartbeats. The interesting outcomes (verdicts,
+ * parks, errors, stalls, done) still surface.
  */
 export function isRoutineNoiseComment(body: string): boolean {
   return (
     /all blockers done.*starting now/i.test(body) ||
     /retrying\s*(?:in \d+\w*\s*)?\(attempt \d+\/\d+\)/i.test(body)
   );
-}
-
-function isReviewAdvanceComment(body: string): boolean {
-  return /→\s*\*{0,2}in_review/i.test(body);
 }
 
 // Run standalone: `bun src/concierge/index.ts` brings the Concierge online.

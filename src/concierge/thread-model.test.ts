@@ -24,7 +24,7 @@ import { Concierge, type ConciergeSession } from "./index.ts";
 import type { WorkspaceRegistry } from "../discord/workspaces.ts";
 import { TaskStore } from "../task/store.ts";
 import type { Config, IncomingMessage, ThreadCreated } from "../types.ts";
-import type { Ticket } from "../tracker/types.ts";
+import type { Run } from "../run/types.ts";
 import type { PrRef } from "../github/types.ts";
 
 const OWNER = "111111111111111111";
@@ -129,25 +129,21 @@ function threadCreated(over: Partial<ThreadCreated> = {}): ThreadCreated {
   };
 }
 
-function ticket(over: Partial<Ticket> = {}): Ticket {
+function run(over: Partial<Run> = {}): Run {
   return {
-    id: "id-1",
-    identifier: "OPS-7",
+    id: "run-20260810-voting",
+    slug: "voting",
     title: "Voting API",
-    description: "",
-    body: "",
-    state: "in_progress",
-    assignees: [],
-    casting: {},
-    criteria: [],
-    blockedBy: [],
-    projectId: "p",
-    url: "http://x",
-    updatedAt: "now",
-    originChannel: CHAN,
-    branchRef: "1.1",
+    prompt: "",
+    channelId: CHAN,
+    taskRef: "#1.1",
+    state: "implementing",
+    cast: null,
+    repo: null,
+    prUrl: null,
+    error: null,
     ...over,
-  } as unknown as Ticket;
+  } as unknown as Run;
 }
 
 // ── 1. lazy registration ──────────────────────────────────────────────────────────────────────
@@ -161,7 +157,7 @@ test("a message in an unknown thread registers it and is answered without an @me
   expect(joined).toEqual([THREAD]);
   // Registered BEFORE the ambient split, so this very message is directed.
   expect(asks).toHaveLength(1);
-  expect(asks[0]).toContain("ticket workspace");
+  expect(asks[0]).toContain("work workspace");
 });
 
 test("an outsider opening a thread cannot mint a workspace", async () => {
@@ -377,20 +373,20 @@ test("an attach seeds the NEXT turn with the work's grounding, exactly once", as
 
 // ── 3. routing ────────────────────────────────────────────────────────────────────────────────
 
-test("an attached thread wins over the ticket's origin channel; unattached work stays put", async () => {
+test("an attached thread wins over the run's origin channel; unattached work stays put", async () => {
   const { concierge, tasks, asks } = harness();
   await tasks.createTask({ title: "Build voting", originChannelId: CHAN, initialBranchTitle: "API" });
 
   // Nothing attached yet: the update goes back to where the request came from.
-  concierge.notify({ kind: "state_changed", ticket: ticket(), from: "in_review", to: "done" });
+  concierge.notify({ kind: "state_changed", run: run({ state: "done" }), from: "publishing", to: "done" });
   await new Promise((r) => setTimeout(r, 0));
   expect(asks[0]).toContain(`--channel ${CHAN}`);
 
   await concierge.onMessage(message({ content: "&1" }));
   concierge.notify({
     kind: "state_changed",
-    ticket: ticket({ identifier: "OPS-8", id: "id-2" }),
-    from: "in_review",
+    run: run({ id: "run-20260810-voting-2", state: "done" }),
+    from: "publishing",
     to: "done",
   });
   await new Promise((r) => setTimeout(r, 0));
@@ -401,17 +397,13 @@ test("an attached thread wins over the ticket's origin channel; unattached work 
 test("PR events follow the thread the work was attached to, even when the PR opened first", async () => {
   const { concierge, tasks, asks } = harness();
   await tasks.createTask({ title: "Build voting", originChannelId: CHAN, initialBranchTitle: "API" });
-  await tasks.linkTicket(
-    "1.1",
-    { id: "id-1", identifier: "OPS-7", board: "ops", projectId: "p", url: "http://x" },
-    "in_progress",
-  );
+  await tasks.linkRun("1.1", { runId: "run-20260810-voting" }, "implementing");
   const pr: PrRef = {
     repo: "0xbeckett/foo",
     number: 96,
     url: "https://github.com/0xbeckett/foo/pull/96",
     title: "Voting API",
-    ticket: "OPS-7",
+    runId: "run-20260810-voting",
     // Stamped when the PR opened: the origin channel, the only destination known back then.
     channel: CHAN,
   };
@@ -433,18 +425,14 @@ test("PR events follow the thread the work was attached to, even when the PR ope
 test("a PR with no stamped channel still reports into the thread that owns its work", async () => {
   const { concierge, tasks, asks } = harness();
   await tasks.createTask({ title: "Build voting", originChannelId: CHAN, initialBranchTitle: "API" });
-  await tasks.linkTicket(
-    "1.1",
-    { id: "id-1", identifier: "OPS-7", board: "ops", projectId: "p", url: "http://x" },
-    "in_progress",
-  );
+  await tasks.linkRun("1.1", { runId: "run-20260810-voting" }, "implementing");
   await concierge.onMessage(message({ content: "&1" }));
 
   // An unstamped PR used to be dropped outright. The attachment is a real, human-chosen
   // destination, so it answers the "nowhere to route" question the drop exists for.
   concierge.notifyPrEvents({
     kind: "merged",
-    pr: { repo: "0xbeckett/foo", number: 96, url: "u", title: "Voting API", ticket: "OPS-7" },
+    pr: { repo: "0xbeckett/foo", number: 96, url: "u", title: "Voting API", runId: "run-20260810-voting" },
   });
   await new Promise((r) => setTimeout(r, 0));
   expect(asks.at(-1)).toContain(`--channel ${THREAD}`);
@@ -454,85 +442,9 @@ test("a PR for work nobody attached still lands in the channel stamped when it o
   const { concierge, asks } = harness();
   concierge.notifyPrEvents({
     kind: "merged",
-    pr: { repo: "0xbeckett/foo", number: 96, url: "u", title: "Voting API", ticket: "OPS-7", channel: CHAN },
+    pr: { repo: "0xbeckett/foo", number: 96, url: "u", title: "Voting API", runId: "run-20260810-voting", channel: CHAN },
   });
   await new Promise((r) => setTimeout(r, 0));
   expect(asks).toHaveLength(1);
   expect(asks[0]).toContain(`--channel ${CHAN}`);
-});
-
-// ── 4. the filed line ─────────────────────────────────────────────────────────────────────────
-
-test("a wave of filings stamps ONE subtext line carrying every public ref, in filing order", async () => {
-  const { concierge, posts } = harness();
-  const bus = (concierge as unknown as { onBusRequest: Function }).onBusRequest.bind(concierge);
-  for (const branchRef of ["2.1", "2.2", "2.3"]) {
-    await bus({
-      cmd: "ticket.filed",
-      args: { identifier: `OPS-${branchRef}`, channelId: CHAN, taskRef: "2", branchRef },
-    });
-  }
-  // Buffered, not posted: the line waits for the window so a wave collapses into one receipt.
-  expect(posts).toHaveLength(0);
-
-  await concierge.stop(); // shutdown must flush rather than swallow the receipt
-  expect(posts).toEqual([{ channelId: CHAN, content: "-# filed tickets: 2.1, 2.2, 2.3" }]);
-});
-
-test("filings for different destinations get their own line, and the singular reads singular", async () => {
-  const { concierge, posts } = harness();
-  const bus = (concierge as unknown as { onBusRequest: Function }).onBusRequest.bind(concierge);
-  await bus({ cmd: "ticket.filed", args: { identifier: "OPS-1", channelId: CHAN, taskRef: "1", branchRef: "1.1" } });
-  await bus({ cmd: "ticket.filed", args: { identifier: "OPS-2", channelId: "other", taskRef: "9", branchRef: "9.1" } });
-
-  await concierge.stop();
-  expect(posts).toEqual([
-    { channelId: CHAN, content: "-# filed ticket 1.1" },
-    { channelId: "other", content: "-# filed ticket 9.1" },
-  ]);
-});
-
-test("a filing with no public ref stamps nothing at all", async () => {
-  const { concierge, posts } = harness();
-  const bus = (concierge as unknown as { onBusRequest: Function }).onBusRequest.bind(concierge);
-  // The internal identifier is not something a person can type back at us, so it is never stamped.
-  await bus({ cmd: "ticket.filed", args: { identifier: "OPS-35", channelId: CHAN } });
-  await concierge.stop();
-  expect(posts).toEqual([]);
-});
-
-test("a filing for attached work stamps its line in the thread, not the filing channel", async () => {
-  const { concierge, tasks, posts } = harness();
-  await tasks.createTask({ title: "Build voting", originChannelId: CHAN, initialBranchTitle: "API" });
-  await concierge.onMessage(message({ content: "&1" }));
-  const bus = (concierge as unknown as { onBusRequest: Function }).onBusRequest.bind(concierge);
-  await bus({ cmd: "ticket.filed", args: { identifier: "OPS-1", channelId: CHAN, taskRef: "1", branchRef: "1.1" } });
-
-  await concierge.stop();
-  expect(posts.at(-1)).toEqual({ channelId: THREAD, content: "-# filed ticket 1.1" });
-});
-
-// A task/branch's persisted `--ping` list (issue #10) rides its filed receipt too, so the people
-// asked for at filing time get notified the instant the ticket lands, not just on later updates.
-test("a filed branch's persisted pings are prepended to its filed line and allow-listed on the post", async () => {
-  const { concierge, tasks, posts, postOpts } = harness();
-  const RO = "1151230208783945818";
-  await tasks.createTask({ title: "Build voting", originChannelId: CHAN, initialBranchTitle: "API", pings: [RO] });
-  const bus = (concierge as unknown as { onBusRequest: Function }).onBusRequest.bind(concierge);
-  await bus({ cmd: "ticket.filed", args: { identifier: "OPS-1", channelId: CHAN, taskRef: "1", branchRef: "1.1" } });
-
-  await concierge.stop();
-  expect(posts).toEqual([{ channelId: CHAN, content: `<@${RO}>\n-# filed ticket 1.1` }]);
-  expect(postOpts.at(-1)?.pingUserIds).toEqual([RO]);
-});
-
-test("a filed branch with no pings stamps its line exactly as before, with no ping opts", async () => {
-  const { concierge, tasks, posts, postOpts } = harness();
-  await tasks.createTask({ title: "Build voting", originChannelId: CHAN, initialBranchTitle: "API" });
-  const bus = (concierge as unknown as { onBusRequest: Function }).onBusRequest.bind(concierge);
-  await bus({ cmd: "ticket.filed", args: { identifier: "OPS-1", channelId: CHAN, taskRef: "1", branchRef: "1.1" } });
-
-  await concierge.stop();
-  expect(posts).toEqual([{ channelId: CHAN, content: "-# filed ticket 1.1" }]);
-  expect(postOpts.at(-1)).toBeUndefined();
 });

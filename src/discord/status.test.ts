@@ -5,7 +5,7 @@ import type { StatusDashboardSnapshot } from "../status/types.ts";
 export const fixtureSnapshot: StatusDashboardSnapshot = {
   collectedAt: "2026-07-26T12:00:00.000Z",
   pollIntervalMs: 5_000,
-  versions: { beckett: "6.5.2", bun: "1.3.14", bored: "1.0.0" },
+  versions: { beckett: "6.5.2", bun: "1.3.14" },
   uptime: {
     currentUptimeMs: 3_661_000,
     bootedAt: "2026-07-26T10:58:59.000Z",
@@ -27,10 +27,9 @@ export const fixtureSnapshot: StatusDashboardSnapshot = {
     diskUsed: 50 * 1024 ** 3,
     diskTotal: 100 * 1024 ** 3,
   },
+  runs: { live: 2, queued: 1, parked: 0 },
   health: [
-    { name: "Tracker poll", reachable: true, lastSuccessAt: 1, lastSuccessAgeMs: 1_000, consecutiveFailures: 0 },
-    { name: "Bored API", reachable: true, lastSuccessAt: 1, lastSuccessAgeMs: 15_000, consecutiveFailures: 0, detail: "HTTP 200" },
-    { name: "Bored /health", reachable: false, lastSuccessAt: null, lastSuccessAgeMs: null, consecutiveFailures: 1 },
+    { name: "Run supervisor", reachable: true, lastSuccessAt: 1, lastSuccessAgeMs: 1_000, consecutiveFailures: 0, detail: "2 live · 1 queued · 0 parked" },
   ],
   harnessUsage: [
     { harness: "claude", last24h: { records: 2, turns: 3, tokensIn: 1200, tokensOut: 300, costUsd: 0.02 }, last7d: { records: 4, turns: 8, tokensIn: 3000, tokensOut: 1000, costUsd: 0.05 } },
@@ -46,21 +45,22 @@ test("pure status renderer exposes every dashboard panel from a fixture snapshot
   const embed = renderStatusDashboardEmbed(fixtureSnapshot);
   expect(embed.title).toBe("Beckett live status");
   expect(embed.fields?.map((field) => field.name)).toEqual([
-    "Uptime", "Downtime", "Versions", "CPU load", "RAM", "Disk", "Core API health", "Harness usage", "ccusage spend", "Subscription limits",
+    "Uptime", "Downtime", "Versions", "CPU load", "RAM", "Disk", "Runs", "Core health", "Harness usage", "ccusage spend", "Subscription limits",
   ]);
   expect(embed.fields?.[1]?.value).toContain("No downtime recorded since 2026-07-26");
-  expect(embed.fields?.[6]?.value).toContain("Tracker poll");
-  expect(embed.fields?.[7]?.value).toContain("24h:");
-  expect(embed.fields?.[7]?.value).toContain("7d:");
-  expect(embed.fields?.[8]?.value).toContain("Session: $2.50");
-  expect(embed.fields?.[8]?.value).toContain("Today: $6.75");
-  expect(embed.fields?.[9]?.value).toContain("Claude Max");
-  expect(embed.fields?.[9]?.value).toContain("STALE");
+  expect(embed.fields?.[6]?.value).toBe("2 live · 1 queued · 0 parked");
+  expect(embed.fields?.[7]?.value).toContain("Run supervisor");
+  expect(embed.fields?.[8]?.value).toContain("24h:");
+  expect(embed.fields?.[8]?.value).toContain("7d:");
+  expect(embed.fields?.[9]?.value).toContain("Session: $2.50");
+  expect(embed.fields?.[9]?.value).toContain("Today: $6.75");
+  expect(embed.fields?.[10]?.value).toContain("Claude Max");
+  expect(embed.fields?.[10]?.value).toContain("STALE");
 });
 
 test("unavailable ccusage spend renders plainly instead of blank or throwing", () => {
   const embed = renderStatusDashboardEmbed({ ...fixtureSnapshot, ccusage: { available: false, sessionCostUsd: null, dailyCostUsd: null, observedAt: null } });
-  expect(embed.fields?.[8]).toEqual({ name: "ccusage spend", value: "unavailable", inline: true });
+  expect(embed.fields?.[9]).toEqual({ name: "ccusage spend", value: "unavailable", inline: true });
 });
 
 test("health yellow has the concrete stale-but-reachable meaning", () => {

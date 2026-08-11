@@ -2,6 +2,52 @@
 
 ## Unreleased
 
+## v7.0.0-rc.1
+
+### Tickets are gone; work is a run
+
+Real work used to cost four moves: allocate a task, start a branch, translate it into a ticket on
+an external tracker, and wait up to five seconds for a poller to notice. v7 deletes that whole
+apparatus. The concierge makes **one call**:
+
+```
+beckett task deploy --prompt "<the ask, faithfully, with every constraint>" --channel <id> [--repo <slug>] [--ultracode]
+```
+
+That writes a **Run** to `~/.beckett/runs.json` and pings the daemon. The **RunSupervisor** does
+the rest — provisions the project repo, cuts a worktree and a branch, writes a `spec.md` scaffold,
+and spawns the implement worker. The worker's first act is turning the prompt into a checklist in
+that `spec.md`; a **spec-gate Stop hook** refuses to let it finish with items unchecked or the
+placeholder still in place. That checklist is what the fresh reviewer then grinds the diff
+against, and rework is a bounded loop before the run parks for a human.
+
+- **The prompt is the brief.** Nothing else reaches the worker, so the concierge's doctrine now
+  turns on carrying the person's actual words and constraints instead of a summary of them.
+- **`--ultracode`** puts a multifaceted build (several subsystems, a migration, "audit
+  everything") on the deepest seat with `workflowSizeGuideline: large`, so a big ask stays one
+  branch, one review, one PR instead of being split into four runs that nobody sequences.
+- **Status is a conversation, not a log read.** Workers spawn with `--name beckett-run-<slug>`
+  and accept cross-session messages, so "how's that going?" becomes `beckett task ask <ref>` plus
+  a direct message to the live worker, relayed in Beckett's own voice. No transcript ever reaches
+  a channel.
+- **Steering binds, or it errors.** `beckett task steer <run-id|slug> "<note>"` hands the note to
+  the supervisor and reports which happened — `delivered` (the live worker was nudged) or
+  `buffered` (it rides the next stage's brief). A run that has parked, failed, or finished is
+  refused by name, because nothing re-staffs one: the answer there is a fresh deploy carrying what
+  was learned, on a branch that kept every commit. A steer that never reached the daemon exits
+  non-zero rather than letting the concierge tell a channel it landed.
+- **The receipt is the run card**, posted by the machinery and edited in place as the work moves.
+  The `-# filed ticket N` grey line is gone, and so is every instruction to print a reference.
+- **Removed:** the `bored` tracker and its HTTP client, the poller, the 4,174-line dispatcher,
+  ticket CLI verbs, `beckett plan`'s DAG filing, the INT design board, and the `basm`/`plan`
+  skills. The quick lane, browser lane, task registry (`#N` / `#N.x`), spend ledger, journals, and
+  free-time all survive, re-keyed onto run ids.
+
+Doctrine, playbooks and skills were rewritten for the ticketless world in the same release:
+`how-to-start-a-task.md` → `how-to-deploy-work.md`, `finishing-a-ticket.md` → `landing-a-run.md`,
+`splitting-work.md` retired into "one run, not five", and `progress-questions.md` rebuilt around
+asking the worker directly.
+
 ## v6.24.3 (2026-08-05)
 
 ### The browser lane stops lying to pages about storage (#7)

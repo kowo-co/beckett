@@ -1,5 +1,5 @@
 /**
- * Zero-token progress cards (progress.cards_as_code): one self-editing status message per active
+ * Zero-token progress cards (`[runs] cards`): one self-editing status message per active
  * ticket, in the channel that filed it.
  *
  * {@link reduceProgressCard} decides WHAT the card says and {@link renderProgressCard} how it
@@ -62,7 +62,7 @@ export function reduceProgressCard(
   if (!verdict) return null;
   const parsed = Date.parse(event.ts);
   return {
-    ref: event.ticketRef || prev?.ref || event.ticketId,
+    ref: event.runRef || prev?.ref || event.runId,
     startedAt: prev?.startedAt ?? (Number.isFinite(parsed) ? parsed : nowMs),
     ...verdict,
   };
@@ -79,6 +79,22 @@ function verdictFor(event: DispatchEvent): Verdict | null {
   const detail = clip(event.error || event.message);
   const gerund = STAGE_GERUND[base] ?? base.replace(/[-_]/g, " ");
   const noun = STAGE_NOUN[base] ?? base.replace(/[-_]/g, " ");
+
+  // The v7 run engine's deploy receipt (architecture.md "Run cards = the deploy receipt"): the
+  // supervisor fires this the instant `beckett task deploy` admits a run — before a worktree
+  // exists or a worker spawns — so a card appears within seconds of the CLI call.
+  if (base === "run" && qualifier === "deploy") {
+    return event.outcome === "started" ? { phase: "queued", detail: "", alert: false, terminal: false } : null;
+  }
+
+  // A run reaching `done` (bare stage, run/supervisor.ts's own vocabulary — distinct from the
+  // ticket dispatcher's `state:done`). The publish path traces the shipped PR/push URL as the
+  // message right before this fires, so it reads as the receipt's final line.
+  if (base === "done" && !qualifier) {
+    return event.outcome === "passed"
+      ? { phase: "shipped", detail: clip(event.message), alert: false, terminal: true }
+      : null;
+  }
 
   if (qualifier === "staff") {
     if (event.outcome === "held") {
@@ -147,17 +163,32 @@ function verdictFor(event: DispatchEvent): Verdict | null {
 /** Discord's atomic message cap is 2000; stay clear of it so a long detail can never drop a card. */
 const MAX_CARD_CHARS = 1900;
 
-/** One glanceable card: marker, ref, phase, elapsed — and the detail line only when there is one. */
-export function renderProgressCard(state: ProgressCardState, nowMs: number): string {
+/** A run's live `## Checklist` progress (`../run/spec-file.ts`'s codec, read fs-free here). */
+export interface CardChecklist {
+  done: number;
+  total: number;
+}
+
+/**
+ * One glanceable card: marker, ref, phase, elapsed — plus the run's checklist progress when a
+ * `specReader` resolved one, and the detail line last. With a checklist, everything folds onto
+ * one line (`… 12m — 3/7 checked · <detail>`); without one, detail falls back to its own line
+ * (unchanged from before run cards existed) so ticket cards render exactly as they always have.
+ */
+export function renderProgressCard(state: ProgressCardState, nowMs: number, checklist?: CardChecklist | null): string {
   const marker = markerFor(state);
-  const lines = [`${marker} **${state.ref}** · ${state.phase} · ${elapsedWord(nowMs - state.startedAt)}`];
-  if (state.detail) lines.push(`— ${state.detail}`);
-  const text = lines.join("\n");
+  let text = `${marker} **${state.ref}** · ${state.phase} · ${elapsedWord(nowMs - state.startedAt)}`;
+  if (checklist) {
+    text += ` — ${checklist.done}/${checklist.total} checked`;
+    if (state.detail) text += ` · ${state.detail}`;
+  } else if (state.detail) {
+    text += `\n— ${state.detail}`;
+  }
   return text.length > MAX_CARD_CHARS ? `${text.slice(0, MAX_CARD_CHARS - 1)}…` : text;
 }
 
 function markerFor(state: ProgressCardState): string {
-  if (state.terminal && state.phase === "done") return "✓";
+  if (state.terminal && (state.phase === "done" || state.phase === "shipped")) return "✓";
   if (state.terminal && state.phase === "cancelled") return "⛔";
   if (state.terminal || state.alert) return "⚠";
   return "▸";
@@ -188,6 +219,14 @@ export interface ProgressCardServiceOptions {
   statePath: string;
   /** Where a ticket's card lives; null = this ticket gets no card. */
   resolveChannel: (event: DispatchEvent) => string | null;
+  /**
+   * A run's live `## Checklist` progress, keyed by `DispatchEvent.runId` —
+   * injected so this module stays fs-free in tests. Production wires `parseSpecChecklist` over
+   * the run's workspace (`../run/supervisor.ts`'s `runSpecReader`). Returns null when the run has
+   * no workspace yet, no spec.md, or isn't a run at all (e.g. a ticket-dispatcher event) — the
+   * card then renders exactly as it did before checklists existed.
+   */
+  specReader?: (runId: string) => CardChecklist | null;
   logger?: Logger;
   now?: () => number;
   /** Floor between consecutive edits of one card. Default 15_000. */
@@ -244,7 +283,7 @@ export class ProgressCardService {
    */
   observe(event: DispatchEvent): Promise<void> {
     try {
-      const key = event.ticketId || event.ticketRef;
+      const key = event.runId || event.runRef;
       if (!key) return Promise.resolve();
       const existing = this.records.get(key);
       const state = reduceProgressCard(existing?.state ?? null, event, this.now());
@@ -267,7 +306,7 @@ export class ProgressCardService {
       }, wait);
       return Promise.resolve();
     } catch (error) {
-      this.logger.warn("progress card observe failed", { ticket: event.ticketRef, error: String(error) });
+      this.logger.warn("progress card observe failed", { run: event.runRef, error: String(error) });
       return Promise.resolve();
     }
   }
@@ -317,7 +356,15 @@ export class ProgressCardService {
   private async deliver(key: string): Promise<void> {
     const record = this.records.get(key);
     if (!record) return;
-    const text = renderProgressCard(record.state, this.now());
+    // The deploy-instant card (run:deploy admission) fires before a worktree — and so a
+    // spec.md — exists, so specReader has nothing to read yet. Synthesize the "0/0" the deploy
+    // receipt promises rather than silently falling back to no checklist segment for this one
+    // event; every event after it (once the workspace's spec.md scaffold is written) reads the
+    // real progress off specReader as normal.
+    const checklist =
+      this.opts.specReader?.(record.lastEvent.runId) ??
+      (record.lastEvent.stage === "run:deploy" ? { done: 0, total: 0 } : null);
+    const text = renderProgressCard(record.state, this.now(), checklist);
     record.lastDeliveredAt = this.now();
     try {
       if (record.anchor) {
@@ -438,4 +485,18 @@ export class ProgressCardService {
 
 export function createProgressCardService(opts: ProgressCardServiceOptions): ProgressCardService {
   return new ProgressCardService(opts);
+}
+
+// =======================================================================================
+// Sink gating (boot wiring)
+// =======================================================================================
+//
+// `runs.cards` gates the run engine's sink into the ONE card service the daemon builds at boot
+// (`src/shell/main.ts`). Pulled out as a pure predicate (rather than an inlined `if` at the call
+// site) so a regression that drops the flag check — e.g. reverting to a bare `service &&`
+// null-check — fails a fast unit test instead of only showing up as a silent behavior change.
+
+/** Should the run engine's dispatchLiveSink forward this event to the card service? */
+export function shouldObserveRunCard(service: unknown, runCardsEnabled: boolean): boolean {
+  return Boolean(service) && runCardsEnabled;
 }

@@ -4,7 +4,7 @@
  * OPS-124 — watches the PRs Beckett opened on the kowo-co org and turns "what changed on my
  * PR" into a stream of material {@link PrPollEvent}s the Concierge relays in voice ("ro left 2
  * comments on #96", "CI failed on the memory branch", "#96 merged"). It mirrors the tracker poller
- * (`src/tracker/poll.ts`): an in-memory snapshot per PR, diffed against a fresh read each tick, with
+ * an in-memory snapshot per PR, diffed against a fresh read each tick, with
  * the diff persisted so a daemon restart never re-fires an old notification (the "notify re-fire
  * loop" hazard).
  *
@@ -56,7 +56,8 @@ interface PrState {
   number: number;
   url: string;
   title: string;
-  ticket?: string;
+  /** The run this PR carries (`run-20260810-oauth`), when it came from one. */
+  runId?: string;
   channel?: string;
   addedAt: string;
   // ── snapshot (updated every successful read) ──
@@ -84,7 +85,8 @@ export interface WatchRequest {
   number: number;
   url: string;
   title: string;
-  ticket?: string;
+  /** The run this PR carries, when it came from one. */
+  runId?: string;
   channel?: string;
   /**
    * The PR author's login, when the caller knows it. It exists only for the defensive check in
@@ -237,7 +239,7 @@ export class GitHubPrPoller {
       // Refresh routing only — a channel may have been unknown at first open, or the title edited.
       existing.url = req.url || existing.url;
       existing.title = req.title || existing.title;
-      if (req.ticket) existing.ticket = req.ticket;
+      if (req.runId) existing.runId = req.runId;
       if (req.channel) existing.channel = req.channel;
       this.persist();
       return;
@@ -247,7 +249,7 @@ export class GitHubPrPoller {
       number: req.number,
       url: req.url,
       title: req.title,
-      ticket: req.ticket,
+      runId: req.runId,
       channel: req.channel,
       addedAt: new Date(this.now()).toISOString(),
       seeded: false,
@@ -390,7 +392,7 @@ export class GitHubPrPoller {
       number: entry.number,
       url: s.url || entry.url,
       title: s.title || entry.title,
-      ticket: entry.ticket,
+      runId: entry.runId,
       channel: entry.channel,
     };
 
@@ -535,7 +537,7 @@ export class GitHubPrPoller {
   private load(): void {
     if (!this.statePath || !existsSync(this.statePath)) return;
     try {
-      const raw = JSON.parse(readFileSync(this.statePath, "utf8")) as Record<string, PrState>;
+      const raw = JSON.parse(readFileSync(this.statePath, "utf8")) as Record<string, PrState & { ticket?: string }>;
       for (const [key, entry] of Object.entries(raw)) {
         if (entry && typeof entry.repo === "string" && typeof entry.number === "number") {
           // Terminal entries that were persisted but never pruned (a crash before the next tick)
@@ -549,6 +551,10 @@ export class GitHubPrPoller {
             // streak counter, so starting a reloaded entry at 0 is correct — a restart mid-outage
             // simply re-earns the streak against a live repo (and clears instantly if it recovered).
             hardFailures: typeof entry.hardFailures === "number" ? entry.hardFailures : 0,
+            // Rows persisted before the ticket rip-out carry `ticket` (a tracker identifier) where
+            // `runId` now sits. It is still the routing handle the concierge looks the work up by,
+            // so carry it across rather than dropping a live PR's origin on one restart.
+            ...(entry.runId === undefined && typeof entry.ticket === "string" ? { runId: entry.ticket } : {}),
           });
         }
       }

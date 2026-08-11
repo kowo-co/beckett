@@ -43,9 +43,9 @@ function harness(dir: string) {
     accept: {
       proposalsDir: dir,
       now: () => NIGHT,
-      fileTicket: async (input: { title: string; body: string; criteria: string[] }) => {
+      deployRun: async (input: { title: string; body: string; criteria: string[] }) => {
         filed.push(input);
-        return { identifier: "OPS-42", id: "uuid-42", url: "http://tracker/OPS-42" };
+        return { runId: "run-20260810-doctrine", url: "https://github.com/kowo-co/beckett/pull/42" };
       },
       createTaskBranch: async (input: { title: string; body: string }) => {
         branched.push(input);
@@ -67,17 +67,17 @@ function harness(dir: string) {
 
 test("every kind routes to a normal front door — there is no third destination", () => {
   expect(Object.keys(ACCEPT_ROUTE).sort()).toEqual([...PROPOSAL_KINDS].sort());
-  expect(new Set(Object.values(ACCEPT_ROUTE))).toEqual(new Set(["ticket", "task"]));
+  expect(new Set(Object.values(ACCEPT_ROUTE))).toEqual(new Set(["run", "task"]));
 });
 
-test("accepting a doctrine change FILES A TICKET and stamps what it became", async () => {
+test("accepting a doctrine change DEPLOYS A RUN and stamps what it became", async () => {
   const dir = sandbox();
   const h = harness(dir);
   const p = createProposal(dir, BASE);
   const result = await acceptProposal(h.accept, p.id);
 
-  expect(result.route).toBe("ticket");
-  expect(result.became).toBe("ticket:OPS-42");
+  expect(result.route).toBe("run");
+  expect(result.became).toBe("run:run-20260810-doctrine");
   expect(h.branched).toEqual([]);
   expect(h.filed.length).toBe(1);
   expect(h.filed[0]!.title).toBe(`doctrine-change: ${BASE.claim}`);
@@ -89,19 +89,19 @@ test("accepting a doctrine change FILES A TICKET and stamps what it became", asy
 
   const stored = readProposal(dir, p.id)!;
   expect(stored.status).toBe("accepted");
-  expect(stored.became).toBe("ticket:OPS-42");
+  expect(stored.became).toBe("run:run-20260810-doctrine");
   expect(stored.decided).toBe(NIGHT.toISOString());
   expect(listProposals(dir, { now: NIGHT })).toEqual([]);
 });
 
-test("a persona change files a ticket too; a ticket or memory correction becomes a task branch", async () => {
+test("a persona change deploys a run too; a ticket or memory correction becomes a task branch", async () => {
   const dir = sandbox();
   const h = harness(dir);
   const persona = createProposal(dir, { ...BASE, kind: "persona-change", claim: "sound less breathless at night" });
   const spike = createProposal(dir, { ...BASE, kind: "ticket", claim: "spike the retry idea" });
   const correction = createProposal(dir, { ...BASE, kind: "memory-correction", claim: "jason moved off pacific time" });
 
-  expect((await acceptProposal(h.accept, persona.id)).route).toBe("ticket");
+  expect((await acceptProposal(h.accept, persona.id)).route).toBe("run");
   expect((await acceptProposal(h.accept, spike.id)).became).toBe("task:#12.1");
   expect((await acceptProposal(h.accept, correction.id)).became).toBe("task:#12.1");
   expect(h.filed.map((f) => f.title)).toEqual(["persona-change: sound less breathless at night"]);
@@ -114,17 +114,17 @@ test("a failed route leaves the proposal open rather than claiming it became som
   const deps = {
     proposalsDir: dir,
     now: () => NIGHT,
-    fileTicket: async () => {
-      throw new Error("tracker is down");
+    deployRun: async () => {
+      throw new Error("the run ledger is unwritable");
     },
     createTaskBranch: async () => ({ taskRef: "#1", branchRef: "#1.1" }),
   };
-  await expect(acceptProposal(deps, p.id)).rejects.toThrow(/tracker is down/);
+  await expect(acceptProposal(deps, p.id)).rejects.toThrow(/the run ledger is unwritable/);
   expect(readProposal(dir, p.id)!.status).toBe("open");
 
   // A front door that answers with nothing is the same failure, not a silent accept.
-  const empty = { ...deps, fileTicket: async () => ({ identifier: "  " }) };
-  await expect(acceptProposal(empty, p.id)).rejects.toThrow(/no identifier/);
+  const empty = { ...deps, deployRun: async () => ({ runId: "  " }) };
+  await expect(acceptProposal(empty, p.id)).rejects.toThrow(/no run id/);
   expect(readProposal(dir, p.id)!.status).toBe("open");
 });
 
@@ -189,7 +189,7 @@ test("nothing is decided twice", async () => {
   const h = harness(dir);
   const p = createProposal(dir, BASE);
   await acceptProposal(h.accept, p.id);
-  await expect(acceptProposal(h.accept, p.id)).rejects.toThrow(/already accepted \(ticket:OPS-42\)/);
+  await expect(acceptProposal(h.accept, p.id)).rejects.toThrow(/already accepted \(run:run-20260810-doctrine\)/);
   await expect(rejectProposal(h.reject, p.id, "changed my mind")).rejects.toThrow(/already accepted/);
   expect(h.filed.length).toBe(1);
 });

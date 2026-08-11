@@ -96,7 +96,7 @@ test("DM windows are never read — not rendered, not even loaded (the in-code g
   expect(recentCalls).toEqual(["guild-1"]);
 });
 
-test("worker journals and ticket transitions are windowed to the last 24h", () => {
+test("worker journals and run transitions are windowed to the last 24h", () => {
   const dir = sandbox();
   const journalDir = join(dir, "journal");
   mkdirSync(journalDir, { recursive: true });
@@ -114,8 +114,8 @@ test("worker journals and ticket transitions are windowed to the last 24h", () =
   mkdirSync(join(dir, "events"), { recursive: true });
   appendFileSync(
     join(dir, "events", "dispatch.jsonl"),
-    JSON.stringify({ ts: recentIso, ticketId: "#31", ticketRef: "#31.1", branchRef: "b", stage: "state:in_review", outcome: "info", elapsedMs: 1, message: "implement → review" }) + "\n" +
-    JSON.stringify({ ts: ancientIso, ticketId: "#2", ticketRef: "#2.1", branchRef: "b", stage: "state:done", outcome: "info", elapsedMs: 1, message: "OLD-TRANSITION" }) + "\n",
+    JSON.stringify({ ts: recentIso, runId: "#31", runRef: "#31.1", branchRef: "b", stage: "state:in_review", outcome: "info", elapsedMs: 1, message: "implement → review" }) + "\n" +
+    JSON.stringify({ ts: ancientIso, runId: "#2", runRef: "#2.1", branchRef: "b", stage: "state:done", outcome: "info", elapsedMs: 1, message: "OLD-TRANSITION" }) + "\n",
   );
 
   const inputs = assembleDreamInputs(depsIn(dir));
@@ -128,7 +128,7 @@ test("worker journals and ticket transitions are windowed to the last 24h", () =
   const transitions = inputs.sections.find((s) => s.key === "transitions")!;
   expect(transitions.text).toContain("#31.1 state:in_review");
   expect(transitions.text).not.toContain("OLD-TRANSITION");
-  expect(transitions.sourceIds).toEqual(["ticket:#31.1"]);
+  expect(transitions.sourceIds).toEqual(["run:#31.1"]);
 });
 
 test("open loops and fresh calibration records ride in with stable source ids", async () => {

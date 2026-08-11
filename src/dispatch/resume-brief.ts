@@ -21,7 +21,7 @@
  * text.
  */
 
-import type { Ticket } from "../tracker/types.ts";
+import type { WorkItem } from "../run/work-item.ts";
 
 /**
  * The steering block folded into a prompt when comments arrived while no worker was live
@@ -41,7 +41,7 @@ export function steeringBlock(steering: string[] | undefined): string {
  * re-deriving where it started. `steering` carries any comments buffered while no worker was live.
  */
 export function buildResumeBrief(
-  ticket: Ticket,
+  item: WorkItem,
   stage: string,
   baseRef: string,
   steering?: string[],
@@ -53,8 +53,8 @@ export function buildResumeBrief(
       ? `Your review/diff base for this ticket is \`${baseRef}\`. `
       : "";
   return (
-    `A daemon restart interrupted your previous session on ticket [${ticket.identifier}] ` +
-    `${ticket.title}. This session RESUMES that one — your prior reasoning and context are restored ` +
+    `A daemon restart interrupted your previous session on [${item.identifier}] ` +
+    `${item.title}. This session RESUMES that one — your prior reasoning and context are restored ` +
     `above (the accumulated transcript), and any work-in-progress was checkpointed to git as WIP ` +
     `commits. You are mid-**${stage}**. ${baseNote}Re-anchor in git before continuing: ` +
     `\`git log --oneline\` shows your checkpoint trail and ${diffCmd} shows the whole contribution ` +

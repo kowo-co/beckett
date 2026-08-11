@@ -69,25 +69,27 @@ fi
 # is left behind (issue #147) — so the changelog and version can never drift. MAJOR is owner-only — it never
 # comes from the classifier, only an explicit override. The suggestion is CONFIRMABLE: run
 # interactively and beckett prompts; or pre-decide non-interactively with
-#   BECKETT_BUMP=minor|patch|major|yes ./deploy/deploy-prod.sh
-# ("yes" accepts the auto suggestion). The bump commit must reach origin/main before prod pulls,
+#   BECKETT_BUMP=minor|patch|major|yes|set:X.Y.Z ./deploy/deploy-prod.sh
+# ("yes" accepts the auto suggestion; "set:X.Y.Z" pins an exact version — pre-releases like
+# set:7.0.0-rc.1 included). The bump commit must reach origin/main before prod pulls,
 # so we sync main, bump, and land it through a PR here.
 echo "== computing version bump since last deploy =="
 git fetch origin --tags --prune
 git checkout main
 git pull --ff-only origin main
 BASE_SHA="$(git rev-parse origin/main)"
-BUMP_FLAG=""
+BUMP_ARGS=()
 case "${BECKETT_BUMP:-}" in
-  minor) BUMP_FLAG="--minor" ;;
-  patch) BUMP_FLAG="--patch" ;;
-  major) BUMP_FLAG="--major" ;;
-  yes)   BUMP_FLAG="--yes" ;;
+  minor) BUMP_ARGS=(--minor) ;;
+  patch) BUMP_ARGS=(--patch) ;;
+  major) BUMP_ARGS=(--major) ;;
+  yes)   BUMP_ARGS=(--yes) ;;
+  set:*) BUMP_ARGS=(--set "${BECKETT_BUMP#set:}") ;;
   "")    : ;;  # interactive: beckett prompts for confirm/override
-  *)     echo "FATAL: BECKETT_BUMP must be one of minor|patch|major|yes" >&2; exit 1 ;;
+  *)     echo "FATAL: BECKETT_BUMP must be one of minor|patch|major|yes|set:X.Y.Z" >&2; exit 1 ;;
 esac
-# ${VAR:+"$VAR"} → nothing when empty (safe under set -u, portable to bash 3.2 on the Mac).
-if ! bun run beckett version bump ${BUMP_FLAG:+"$BUMP_FLAG"}; then
+# ${VAR[@]+...} → nothing when empty (safe under set -u, portable to bash 3.2 on the Mac).
+if ! bun run beckett version bump ${BUMP_ARGS[@]+"${BUMP_ARGS[@]}"}; then
   echo "FATAL: version bump aborted — not deploying" >&2
   exit 1
 fi
@@ -158,6 +160,11 @@ fi
 git fetch origin
 git checkout main
 git pull --ff-only origin main
+# Global model-selection doctrine for every claude session on this account (workers, quick,
+# free-time, concierge): the repo file is the source of truth, this keeps the installed copy in
+# sync on every deploy. Idempotent — a plain overwrite, safe to re-run.
+mkdir -p "$HOME/.claude"
+cp ~/beckett/deploy/claude-global.md "$HOME/.claude/CLAUDE.md"
 bun install --frozen-lockfile
 # BetterWright's documented setup provisions its managed runtime. Since 1.7.x a bare
 # `betterwright setup` installs three legs: the Obscura resident DOM engine
