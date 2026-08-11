@@ -47,7 +47,7 @@ const LIVE_STATES: ReadonlySet<RunState> = new Set(["queued", "implementing", "r
 const HarnessSpecSchema = z.object({
   harness: z.string().min(1),
   model: z.string().optional(),
-  effort: z.enum(["low", "medium", "high", "xhigh"]).optional(),
+  effort: z.enum(["low", "medium", "high", "xhigh", "ultracode"]).optional(),
   reviewTier: z.enum(["self", "fresh"]).optional(),
 });
 
