@@ -44,6 +44,8 @@ import { createAgentRunner } from "../agent/invoke.ts";
 import { AGENT_HARNESSES, AGENT_EFFORTS, type AgentDefinition } from "../agent/types.ts";
 import { startTaskBranch } from "./task-start.ts";
 import { runTaskDeploy } from "./task-deploy.ts";
+import { runTaskAsk } from "./task-ask.ts";
+import { supportsNameFlag } from "../drivers/claude.ts";
 import { RunStore } from "../run/store.ts";
 import { parseSpecChecklist } from "../run/spec-file.ts";
 import { formatDispatchTrace, readDispatchEvents } from "../dispatch/events.ts";
@@ -965,6 +967,30 @@ export async function runTask(argv: string[]): Promise<void> {
     await runTaskDeploy(rest, { store: runStore(), notifyBus });
   }
 
+  // v7 status relay (W2B): resolve a run to the cross-session address of its LIVE worker, plus the
+  // material to answer from records if that worker doesn't reply. The concierge does the messaging
+  // itself (its own SendMessage tool) — this is the lookup, never a sender.
+  if (sub === "ask") {
+    runTaskAsk(rest, {
+      store: runStore(),
+      readChecklist: readRunChecklist,
+      // The ONE cached `--name` probe the spawner and the concierge session already share, so the
+      // envelope can say whether the live worker is actually reachable (see `addressable`).
+      supportsSessionNames: () => supportsNameFlag(config.harness.claude.bin),
+      readJournalTail: (runId, lines) => {
+        const body = readJournal(paths.journalDir, runId, lines);
+        if (!body) return [];
+        return body
+          .split("\n")
+          .filter((line) => line.trim().length > 0)
+          // `readJournal` prefixes a "… N earlier lines elided" header when it truncates. That is
+          // the READER's framing, not run activity — dropping it keeps journalTail a list of things
+          // the worker actually did, so nothing can be quoted back as one.
+          .filter((line) => !line.startsWith("… ") || !line.includes("elided"));
+      },
+    });
+  }
+
   if (sub === "show") {
     const ref = _[0];
     if (!ref) fail("usage: beckett task show <#N|#N.x>");
@@ -1036,7 +1062,7 @@ export async function runTask(argv: string[]): Promise<void> {
     out([...taskRows, ...runRows]);
   }
 
-  fail("usage: beckett task create|branch|start|deploy|show|list <...>");
+  fail("usage: beckett task create|branch|start|deploy|ask|show|list <...>");
 }
 
 // ── ticket (in-process: the tracker client — the Concierge's door to the queue) ───────────

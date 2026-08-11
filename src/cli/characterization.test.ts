@@ -298,6 +298,8 @@ const CASES: Case[] = [
   { name: "task: show without a ref prints usage", argv: ["task", "show"] },
   { name: "task: show of an unknown task fails", argv: ["task", "show", "#1"] },
   { name: "task: list on an empty store", argv: ["task", "list"] },
+  { name: "task: ask without a run reference prints usage", argv: ["task", "ask"] },
+  { name: "task: ask about an unknown run fails", argv: ["task", "ask", "ghost-run"] },
   { name: "task: unknown sub prints usage", argv: ["task", "bogus"] },
 
   // ── ticket (validation layer only — everything past it needs the tracker) ───────────────

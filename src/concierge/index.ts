@@ -413,11 +413,30 @@ const DEFAULT_ROTATE_AT_TOKENS = 160_000;
 /** Safety fallback for a channel that never becomes idle; still rotate only after releasing its gate slot. */
 const FORCED_ROTATE_AT_TOKENS = 190_000;
 
+/** Prefix every concierge pool scope's cross-session address shares (Claude Code ≥2.1.224, `--name`). */
+export const CONCIERGE_SESSION_NAME_PREFIX = "beckett-concierge";
+
 /**
- * Cross-session address every ConciergeSession pool scope launches under (Claude Code ≥2.1.224,
- * `--name`) — the fixed name a live worker's SendMessage targets for a status question.
+ * The cross-session address ONE pool scope launches under. W2A shipped a FIXED
+ * `beckett-concierge` for every scope, which is an address collision the moment two pooled
+ * sessions are live at once (the default pool runs up to 6 plus SYSTEM_SCOPE): two children
+ * registering the same name, and a worker's status reply landing on whichever won.
+ *
+ * So the name carries the scope: the last 6 characters of the scope key — a Discord channel id's
+ * tail (`beckett-concierge-482913`), or the scope word itself for the short internal scopes
+ * (`system`, `global`). Six is enough to separate the handful of scopes a pool holds while keeping
+ * the name short and greppable.
+ *
+ * Nothing else has to learn these names: a worker answers a status ping by replying to the SENDER
+ * of the message it received (its reply address), never to a hardcoded address, and the concierge
+ * addresses workers by `run.sessionName`. This name only has to be UNIQUE and recognisable.
  */
-const CONCIERGE_SESSION_NAME = "beckett-concierge";
+export function conciergeSessionName(scope: string): string {
+  const key = scope.trim() || GLOBAL_SCOPE;
+  // `--name` wants a plain token: keep it to characters that can't need quoting anywhere.
+  const suffix = key.replace(/[^A-Za-z0-9_-]/g, "").slice(-6) || GLOBAL_SCOPE;
+  return `${CONCIERGE_SESSION_NAME_PREFIX}-${suffix}`;
+}
 
 /** Small, fast seat for a best-effort handoff; never spend an Opus chat turn on bookkeeping. */
 const HANDOFF_MODEL = "claude-haiku-4-5";
@@ -1036,6 +1055,12 @@ export interface ConciergeSessionOptions {
    * itself has no route back to the Discord path, so it only reports.
    */
   onOrphanedInjection?: (messageId: string) => void;
+  /**
+   * Fired once per UNSOLICITED turn — a `result` with no ask waiting on it, i.e. a cross-session
+   * peer message that woke this session (see {@link ConciergeSession.noteUnsolicitedResult}). The
+   * owner uses it to keep the pool's idle bookkeeping honest; the session itself only reports.
+   */
+  onPeerTurn?: () => void;
 }
 
 /**
@@ -1047,6 +1072,8 @@ export interface ConciergeSessionOptions {
 export class ConciergeSession {
   private readonly config: Config;
   private readonly log: Logger;
+  /** `concierge.peer` — cross-session (peer) traffic only; see {@link noteUnsolicitedResult}. */
+  private readonly peerLog: Logger;
   private readonly cwd: string;
   /** Test-only override: when set, used verbatim as the system prompt (skips file composition). */
   private readonly staticPrompt: string | undefined;
@@ -1116,6 +1143,32 @@ export class ConciergeSession {
   private readonly onCrashLoop?: (info: { count: number; code: number }) => void;
   /** Reports a mid-flow message no turn ever answered, so the owner can re-run it (see options). */
   private readonly onOrphanedInjection?: (messageId: string) => void;
+  /** Reports an unsolicited (peer-message) turn, so the owner can keep pool idle bookkeeping honest. */
+  private readonly onPeerTurn?: () => void;
+  /** Unsolicited turns this session has absorbed — diagnostics only (`beckett status`). */
+  private peerTurns = 0;
+  /**
+   * TRUE while a turn NO ask() owns is executing on this child — an unsolicited (peer) turn that a
+   * cross-session message started (W2A/W2B). Raised by the first liveness event seen with no
+   * pending turn ({@link notePeerTurnStart}), lowered when that turn's `result` is attributed to it
+   * ({@link noteUnsolicitedResult}) or when the child goes away.
+   *
+   * It exists because "no pending turn" alone is NOT enough to recognise an unsolicited result. A
+   * peer turn runs for tens of seconds (the model reads a run, posts a `beckett discord reply`), so
+   * a human message landing in that window would arm `pending` FIRST and then collect the PEER
+   * turn's result — delivering peer prose under the human's mention claim, and swallowing the
+   * human's own answer as "unsolicited" when it finally arrived. With this flag the two are told
+   * apart by what the child is actually doing, not by arrival order.
+   */
+  private peerTurnLive = false;
+  /**
+   * The user line an ask() is holding back because {@link peerTurnLive} was already up when it
+   * started. Writing it immediately would hand the human's message to the peer turn as a mid-flow
+   * injection (the input-format contract: extra user lines land at the next turn BOUNDARY), so it
+   * waits for that boundary here and {@link flushDeferredUserLine} writes it the moment the peer
+   * turn settles. Null = nothing held (the normal case: the line went out in {@link driveTurn}).
+   */
+  private deferredTurn: { outbound: TurnMessage } | null = null;
 
   // ── turn bookkeeping (issue #24) ─────────────────────────────────────────────────────────
   /** Caller-supplied metadata of the CURRENTLY EXECUTING turn (reply-claim correlation). */
@@ -1155,12 +1208,16 @@ export class ConciergeSession {
   constructor(opts: ConciergeSessionOptions) {
     this.config = opts.config;
     this.log = (opts.logger ?? rootLog).child("concierge.session");
+    // Peer (cross-session) traffic gets its own component so an operator can grep the status
+    // relay without wading through every turn this session ran.
+    this.peerLog = (opts.logger ?? rootLog).child("concierge.peer");
     this.cwd = opts.cwd ?? defaultRepoRoot();
     this.staticPrompt = opts.systemPrompt;
     this.model = opts.config.concierge.model;
     this.rotateAtTokens = opts.config.concierge.rotate_at_tokens ?? DEFAULT_ROTATE_AT_TOKENS;
     this.onCrashLoop = opts.onCrashLoop;
     this.onOrphanedInjection = opts.onOrphanedInjection;
+    this.onPeerTurn = opts.onPeerTurn;
     this.scope = opts.scope?.trim() || GLOBAL_SCOPE;
     this.gate = opts.gate ?? null;
     this.handoffWindow = opts.handoffWindow ?? (() => "");
@@ -1367,6 +1424,10 @@ export class ConciergeSession {
   injectIntoLiveTurn(text: string, messageId?: string): "injected" | "no-live-turn" | "capped" {
     const p = this.pending;
     if (!p || !this.child) return "no-live-turn";
+    // The turn on the floor is an UNSOLICITED peer turn, not this pending one (W2B): injecting here
+    // would hand the person's message to a turn that is answering a worker, and it would land ahead
+    // of the pending turn's own still-held line. Treat it as no live turn — the caller queues.
+    if (this.peerTurnLive) return "no-live-turn";
     if (this.liveTurnInjections >= MAX_LIVE_TURN_INJECTIONS) return "capped";
     try {
       this.writeUserLine(text);
@@ -1441,6 +1502,8 @@ export class ConciergeSession {
     // A shutdown is the one exit that must not re-run anything: the owed-mention ledger already
     // holds every injected message (claimed at injection time), so boot replay is the recovery.
     this.injectedRecords = [];
+    this.peerTurnLive = false;
+    this.deferredTurn = null;
     if (this.pending) {
       this.clearPendingTimers(this.pending);
       this.pending.reject(new Error("concierge session stopped"));
@@ -1517,6 +1580,18 @@ export class ConciergeSession {
       // Armed once, here, and never reset: this one IS a wall clock, deliberately (issue #150).
       const ceilingTimer = setTimeout(() => this.onCeilingTimeout(ceilingTimer), TURN_ABSOLUTE_CEILING_MS);
       this.pending = { parts: [], resolve, reject, timer, ceilingTimer, timedOut: false };
+      // A peer turn is ALREADY executing on this child (W2B): hold this line back until its
+      // `result` has been attributed to it, or the human's message becomes a mid-flow injection
+      // into a turn that answers a worker, not them. See {@link deferredTurn}. The timers are
+      // deliberately armed anyway — a peer turn that never finishes must not hang this ask.
+      if (this.peerTurnLive) {
+        this.deferredTurn = { outbound };
+        this.peerLog.info("holding a turn's user line until the live peer turn settles", {
+          sessionId: this.sessionId,
+          scope: this.scope,
+        });
+        return;
+      }
       try {
         this.writeUserLine(outbound);
       } catch (err) {
@@ -1600,6 +1675,10 @@ export class ConciergeSession {
   private recycleChild(reason: string): void {
     const old = this.child;
     this.child = null;
+    // Whatever that process was doing — including an unsolicited peer turn — dies with it, and a
+    // user line held for a turn that is already settled must never be written to its successor.
+    this.peerTurnLive = false;
+    this.deferredTurn = null;
     if (!old) return;
     this.log.warn("recycling concierge child process", { reason, sessionId: this.sessionId });
     try {
@@ -1614,6 +1693,11 @@ export class ConciergeSession {
     const args = this.buildArgs(isResume);
     this.initSeen = false;
     this.lastLaunchWasResume = isResume;
+    // A brand-new process is running nothing, least of all somebody else's peer turn. Clearing here
+    // (as well as in recycleChild) is what stops a flag stranded by a mid-turn death from making
+    // every later ask hold its line forever — driveTurn relaunches through here first.
+    this.peerTurnLive = false;
+    this.deferredTurn = null;
 
     this.log.info("spawning concierge claude session", {
       bin,
@@ -1668,15 +1752,15 @@ export class ConciergeSession {
       this.model,
     ];
     // Cross-session address (Claude Code ≥2.1.224): lets a live worker (or another concierge
-    // scope) reach the chat seat via SendMessage for status questions (ctx-docs.md). Fixed name
-    // — every ConciergeSession pool scope answers to it, mirroring the worker driver's --name.
+    // scope) reach the chat seat via SendMessage for status questions (ctx-docs.md). PER-SCOPE —
+    // see {@link conciergeSessionName}; a shared fixed name collides across pooled sessions.
     // Gated on the SAME cached --help probe the worker driver uses (issue #54's KILL-vs-FAIL
     // distinction applies here too): on a claude binary older than 2.1.224 (e.g. a pinned
     // /usr/bin/claude wrapper — see deploy/config.toml.example), an unconditional --name/--settings
     // would exit immediately on the unknown flag and crash-loop the whole chat lane. Fail open —
     // same as the worker driver — never fail closed over a missing flag.
     if (supportsNameFlag(this.config.harness.claude.bin, this.log)) {
-      args.push("--name", CONCIERGE_SESSION_NAME, "--settings", this.conciergeSettingsPath());
+      args.push("--name", conciergeSessionName(this.scope), "--settings", this.conciergeSettingsPath());
     }
     // Reasoning effort for the chat seat (issue #25) — a config knob; empty = CLI default.
     const effort = this.config.concierge.effort?.trim();
@@ -1768,6 +1852,9 @@ export class ConciergeSession {
       return;
     }
     this.child = null;
+    // No process, no live turn of any kind — and nothing held for one (see {@link deferredTurn}).
+    this.peerTurnLive = false;
+    this.deferredTurn = null;
     if (this.stopped) return;
     this.log.warn("concierge claude process exited", { code, sessionId: this.sessionId });
 
@@ -1875,7 +1962,12 @@ export class ConciergeSession {
     try {
       // Evidence of life restarts the silence clock BEFORE the line is interpreted (issue #150) —
       // a turn is judged on whether the child is still working, never on how long it has run.
-      if (this.pending && isLivenessEvent(obj)) this.noteTurnLiveness();
+      if (isLivenessEvent(obj)) {
+        if (this.pending) this.noteTurnLiveness();
+        // Work with NO ask waiting on it is an unsolicited turn already under way (W2B). Recognise
+        // it HERE, before any ask() can arrive and mistake its result for its own.
+        else this.notePeerTurnStart();
+      }
       switch (obj.type) {
         case "system":
           if (obj.subtype === "init") this.onInit();
@@ -1903,7 +1995,10 @@ export class ConciergeSession {
   }
 
   private onAssistant(obj: Record<string, unknown>): void {
-    if (!this.pending) return;
+    // No pending turn, or a PEER turn holding the floor: these blocks belong to nobody's ask. A
+    // deferred ask must not inherit the peer turn's text parts, tool-use flag or last-activity
+    // crumb — that turn's work is not its work (W2B).
+    if (!this.pending || this.peerTurnLive) return;
     const message = obj.message as Record<string, unknown> | undefined;
     const content = message?.content;
     if (!Array.isArray(content)) return;
@@ -2051,13 +2146,19 @@ export class ConciergeSession {
   private onResult(result: Record<string, unknown>): void {
     const p = this.pending;
     const output = parseDiscordTurnOutput(result.structured_output);
+    // WHOSE result is this? Not "whoever is pending" — an unsolicited (peer) turn that was already
+    // running when an ask arrived would collect that ask's promise (W2B). A frame is the pending
+    // turn's ONLY if the pending turn's user line actually reached the child before it, which is
+    // exactly what {@link peerTurnLive} tracks. (With no pending turn at all it is unsolicited by
+    // definition — the original W2B case.)
+    const peerOwnsResult = this.peerTurnLive;
     // A bare result (no valid delivery output) on a session that never emitted `init` is NOT a
     // deliberate pass — it's the harness reporting a dead/unresumable turn just before the process
     // exits (issue #98). Distinguish it from the legit "model chose to stay silent" case: leave the
     // pending turn INTACT (do not resolve, do not reset the crash counter) so the imminent onExit
     // mints a fresh seeded session and re-drives this exact turn. Resolving as a silent pass here
     // was the lost-message bug — a person's @mention answered by nothing.
-    if (p && !output && !this.initSeen) {
+    if (p && !peerOwnsResult && !output && !this.initSeen) {
       this.log.warn("concierge result on an uninitialized session — lost turn, deferring to relaunch retry", {
         assistantTextBlocks: p.parts.length,
         subtype: typeof result.subtype === "string" ? result.subtype : undefined,
@@ -2071,7 +2172,7 @@ export class ConciergeSession {
     // discarded exactly as before (assistant text never posts), but each message it swallowed is
     // handed back for a real turn instead of disappearing.
     if (this.injectedRecords.length > 0) {
-      const orphans = orphanedInjectionIds(this.injectedRecords, p !== null);
+      const orphans = orphanedInjectionIds(this.injectedRecords, p !== null && !peerOwnsResult);
       this.injectedRecords = [];
       for (const messageId of orphans) {
         this.log.debug("requeueing a mid-flow message no turn ever absorbed", {
@@ -2081,7 +2182,12 @@ export class ConciergeSession {
         this.onOrphanedInjection?.(messageId);
       }
     }
-    if (!p) return;
+    if (!p || peerOwnsResult) {
+      this.noteUnsolicitedResult(output);
+      // The floor is free again: a turn that has been holding its user line can finally speak.
+      this.flushDeferredUserLine();
+      return;
+    }
     this.clearPendingTimers(p);
     if (this.liveTurnFilingShaped && filingTurnBudgetExceeded(Date.now() - this.turnStartedAt)) {
       this.log.warn("filing-shaped turn exceeded its shape budget", {
@@ -2131,6 +2237,105 @@ export class ConciergeSession {
         ? { decision: "send", message: `${LATE_TURN_FRAME}\n\n${output.message}` }
         : output,
     );
+  }
+
+  /**
+   * The first evidence that an UNSOLICITED turn is executing: a liveness event (assistant text, a
+   * `tool_use`, a `tool_result` echo) seen while NO ask() is pending. Only a turn can produce
+   * those, and no turn of ours is running, so a peer message started one — raise the flag that
+   * makes {@link onResult} attribute the coming `result` to it rather than to whichever ask
+   * happens to arrive in the meantime.
+   *
+   * Idempotent: a turn emits many liveness events and this only cares about the first.
+   */
+  private notePeerTurnStart(): void {
+    if (this.peerTurnLive) return;
+    this.peerTurnLive = true;
+    this.peerLog.info("an unsolicited (peer) turn started on this session", {
+      sessionId: this.sessionId,
+      scope: this.scope,
+      sessionName: conciergeSessionName(this.scope),
+    });
+  }
+
+  /**
+   * Write the user line an ask() held back while a peer turn owned the floor ({@link deferredTurn}),
+   * now that the peer turn's `result` has settled. No-op when nothing is held or the waiting turn
+   * has since been reaped/cancelled/rejected.
+   *
+   * The silence clock is restarted here on purpose: the held turn's work starts NOW, and charging
+   * it for the peer turn's runtime would frame a perfectly prompt answer as a late one.
+   */
+  private flushDeferredUserLine(): void {
+    const held = this.deferredTurn;
+    if (!held) return;
+    this.deferredTurn = null;
+    const p = this.pending;
+    if (!p) return; // the waiting turn is already gone (reaped, cancelled, child died)
+    try {
+      this.writeUserLine(held.outbound);
+      this.noteTurnLiveness();
+      this.peerLog.info("released a held turn's user line — the peer turn is done", {
+        sessionId: this.sessionId,
+        scope: this.scope,
+      });
+    } catch (err) {
+      this.clearPendingTimers(p);
+      this.pending = null;
+      p.reject(err instanceof Error ? err : new Error(String(err)));
+    }
+  }
+
+  /**
+   * A `result` frame that belongs to an UNSOLICITED turn (W2B) — either no ask() is waiting at all,
+   * or one is waiting but a peer turn had the floor first ({@link peerTurnLive}).
+   *
+   * Since W2A the session is addressable (`--name`) and accepts cross-session inbound
+   * (`crossSessionInbound: "accept"`), so an idle child starts a turn of its OWN when a peer
+   * message lands — typically a live worker answering "how's it going?" (ctx-docs.md
+   * §Cross-session messaging). That turn ends in a `result` no ask() authored, which is
+   * the shape this method exists to make safe:
+   *
+   *  - Its delivery decision is NEVER acted on. `decision:"send"` here has no trustworthy channel
+   *    binding — `currentMeta` belongs to no one, and the last mention this session answered is
+   *    not who the peer wrote about — so posting it would be a message to an arbitrary channel.
+   *    Doctrine (W3B) tells the model to relay peer news with `beckett discord reply --channel <id>`
+   *    and then return `{decision:"pass"}`; this is the backstop for when it doesn't.
+   *  - Bookkeeping is untouched: no pending turn is cleared (a turn waiting behind this one keeps
+   *    its promise and its timers and gets its line written by {@link flushDeferredUserLine}),
+   *    `turnQueue`/`pumping` (and therefore {@link queueDepth}) never saw this turn, and the next
+   *    real ask() runs normally on the same warm transcript.
+   *  - The pool's idle timer is told the scope was busy ({@link onPeerTurn}), so a peer
+   *    conversation doesn't get its child recycled out from under it as "long idle".
+   *
+   * KNOWN LIMIT: this recognises ONE unsolicited turn at a time, which is the shape the relay
+   * actually produces (a peer message wakes an otherwise-idle session). If a SECOND peer message
+   * were queued behind the first, its turn would start after the held line was written and there is
+   * no signal in the stream that distinguishes it from the held turn's own work — correlating a
+   * `result` to the exact input that caused it needs a turn/uuid field the harness does not emit.
+   */
+  private noteUnsolicitedResult(output: DiscordTurnOutput | null): void {
+    // The peer turn is over — the floor is free for a real ask again.
+    this.peerTurnLive = false;
+    this.peerTurns += 1;
+    const suppressed = output?.decision === "send";
+    this.peerLog.info("unsolicited concierge turn (cross-session peer message) — not delivered", {
+      sessionId: this.sessionId,
+      scope: this.scope,
+      sessionName: conciergeSessionName(this.scope),
+      decision: output?.decision ?? "none",
+      // Length only: peer prose is never logged verbatim (it can quote a private channel).
+      messageChars: output?.message ? output.message.length : 0,
+      suppressedSend: suppressed,
+      peerTurns: this.peerTurns,
+    });
+    if (suppressed) {
+      this.peerLog.warn("peer turn asked to SEND with no channel binding — suppressed", {
+        sessionId: this.sessionId,
+        scope: this.scope,
+      });
+    }
+    this.onPeerTurn?.();
   }
 
   /**
@@ -2319,6 +2524,8 @@ export class ConciergeSession {
       queueDepth: this.queueDepth(),
       consecutiveCrashes: this.consecutiveCrashes,
       liveChild: this.hasLiveChild(),
+      sessionName: conciergeSessionName(this.scope),
+      peerTurns: this.peerTurns,
     };
   }
 
@@ -2872,6 +3079,10 @@ export class Concierge {
           // A mid-flow message whose turn never absorbed it (it raced the result) gets its own
           // turn rather than dying with the discarded orphan result.
           onOrphanedInjection: (messageId) => this.requeueOrphanedInjection(messageId),
+          // A cross-session peer turn (a worker answering a status ping) is real activity on this
+          // scope; without this the pool's idle sweep only ever sees ask() traffic and can recycle
+          // the child a peer conversation is still using.
+          onPeerTurn: () => this.pool.notePeerActivity(scope),
           // Crash-loop alarm (issue #24): a repeating child crash (bad auth/config) pings the ops
           // channel instead of surfacing only as per-message "something broke" replies.
           onCrashLoop: (info) => {
