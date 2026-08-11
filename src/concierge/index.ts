@@ -5916,6 +5916,16 @@ export class Concierge {
     carriedTexts: string[],
     amended: boolean,
   ): Promise<void> {
+    const turnStartedAt = Date.now();
+    // The ops-log mirror's turn-lifecycle table keys off this exact (component, msg) pair (#231):
+    // it is what lets the 60s "still working" heartbeat exist at all, and what would have answered
+    // "is Beckett actually doing anything?" during the incident that prompted it.
+    this.log.info("turn start", {
+      channelId: m.channelId,
+      channelName: m.channelName,
+      userId: m.userId,
+      author: m.authorDisplayName,
+    });
     let keepTyping = true;
     const typing = setInterval(() => {
       if (keepTyping) void this.gateway.sendTyping(m.channelId);
@@ -6004,10 +6014,20 @@ export class Concierge {
       // same turn absorbed and answered in the same breath.
       this.owed.settle(m.messageId);
       for (const injectedId of absorbedInjections) this.owed.settle(injectedId);
+      this.log.info("turn done", {
+        channelId: m.channelId,
+        elapsedMs: Date.now() - turnStartedAt,
+        decision: mention.superseded ? "superseded" : output.decision,
+      });
     } catch (err) {
       keepTyping = false;
       clearInterval(typing);
-      this.log.error("concierge turn failed", { messageId: m.messageId, err: String(err) });
+      this.log.error("turn failed", {
+        channelId: m.channelId,
+        messageId: m.messageId,
+        elapsedMs: Date.now() - turnStartedAt,
+        err: String(err),
+      });
       if (this.stopping) {
         // THE restart-window case (issue #3), and the one exit that must not settle: the daemon is
         // going down, this turn died with it, and anything we post now is racing a closing gateway.

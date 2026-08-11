@@ -1651,6 +1651,39 @@ exports[`cli: task: steer of an unknown run fails 1`] = `
 }
 `;
 
+exports[`cli: task: cancel without a reference prints usage 1`] = `
+{
+  "exit": 1,
+  "stderr": 
+"error: usage: beckett task cancel <run-id|slug|#N.x> [--reason <text>]
+"
+,
+  "stdout": "",
+}
+`;
+
+exports[`cli: task: cancel of an unknown run fails 1`] = `
+{
+  "exit": 1,
+  "stderr": 
+"error: no such run: ghost-run
+"
+,
+  "stdout": "",
+}
+`;
+
+exports[`cli: task: cancel of an unknown branch fails 1`] = `
+{
+  "exit": 1,
+  "stderr": 
+"error: no such branch: #9.1
+"
+,
+  "stdout": "",
+}
+`;
+
 exports[`cli: preset: ls seeds and lists the presets file 1`] = `
 {
   "exit": 0,
@@ -1959,6 +1992,12 @@ channel_id = ""
 
 [social]
 chill = true
+
+[ops_log]
+enabled = false
+channel_id = ""
+level = "info"
+include_debug_components = []
 "
 ,
 }
@@ -2105,39 +2144,6 @@ exports[`cli: persona: daemon down fails on the bus 1`] = `
   "exit": 1,
   "stderr": 
 "error: shell not running (socket <BECKETT_DIR>/control.sock): <CONNECT_ERROR>
-"
-,
-  "stdout": "",
-}
-`;
-
-exports[`cli: task: cancel without a reference prints usage 1`] = `
-{
-  "exit": 1,
-  "stderr": 
-"error: usage: beckett task cancel <run-id|slug|#N.x> [--reason <text>]
-"
-,
-  "stdout": "",
-}
-`;
-
-exports[`cli: task: cancel of an unknown run fails 1`] = `
-{
-  "exit": 1,
-  "stderr": 
-"error: no such run: ghost-run
-"
-,
-  "stdout": "",
-}
-`;
-
-exports[`cli: task: cancel of an unknown branch fails 1`] = `
-{
-  "exit": 1,
-  "stderr": 
-"error: no such branch: #9.1
 "
 ,
   "stdout": "",

@@ -1162,6 +1162,19 @@ export interface Config {
      *  true; chilltext already fails open, so false is purely a taste toggle. */
     chill: boolean;
   };
+  /** Discord ops-log mirror (issue #231): legible one-line renderings of daemon log events,
+   *  batched into one channel, plus a turn-in-flight heartbeat. `src/ops-log/`. */
+  ops_log: {
+    /** Master switch. Default false — the DEPLOY config (not this repo's example) turns it on. */
+    enabled: boolean;
+    /** Discord channel id the mirror posts into. Empty means inactive even if enabled=true. */
+    channel_id: string;
+    /** Minimum level mirrored to Discord — independent of BECKETT_LOG_LEVEL, which gates stderr. */
+    level: LogLevel;
+    /** Components admitted at ANY level even below `level` — an opt-in allowlist for one noisy
+     *  component's debug chatter without dropping the global level for everything else. */
+    include_debug_components: string[];
+  };
 }
 
 // =======================================================================================
