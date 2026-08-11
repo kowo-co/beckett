@@ -56,6 +56,7 @@ import {
 } from "./activity.ts";
 import { log } from "../log.ts";
 import { projectSlug } from "./cast.ts";
+import { classifyDiffSurface, reviewDepthLine } from "./review-depth.ts";
 import { sweepLedgeredWorker } from "../drivers/proc.ts";
 import {
   commitWorktree,
@@ -699,6 +700,18 @@ export class RunSupervisor {
           run: run.id,
           error: (err as Error).message,
         });
+      }
+      // 6b. Review DEPTH (issue #234): that same pre-read diff is the only carrier of "what
+      //     surface changed" at cast time — its `diff --git` headers ARE the changed-file list —
+      //     so classify it here and journal the choice. The review prompt re-derives the identical
+      //     classification from the identical diff (`dispatch/stages.ts`), keeping the supervisor
+      //     pure: the link check the content tier orders is an instruction to the review worker,
+      //     never a fetch from the daemon.
+      const surface = classifyDiffSurface(reviewDiff);
+      const depthLine = reviewDepthLine(surface);
+      if (depthLine) {
+        this.logger.info("review depth chosen", { run: run.id, depth: surface.depth, files: surface.files.length });
+        this.trace(current, "review:depth", "info", depthLine);
       }
     }
 
