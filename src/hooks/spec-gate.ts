@@ -11,9 +11,14 @@
  * stop. The gate exists to catch a worker skipping its own plan, not to strand a run behind
  * a hook bug. Registered through {@link specGateSpec} into the worker's `--settings` file,
  * exactly like the scope-guard.
+ *
+ * INTEGRATION NOTE (wave A): this file is lane W1A's, carried here only so the supervisor
+ * compiles and its Stop-hook wiring is testable. W1A's gate BEHAVIOR wins at integration —
+ * block on a missing spec.md, and a 3-strikes sidecar counter instead of `stop_hook_active`.
+ * The supervisor depends on exactly one thing: `specGateSpec(scriptPath, workspaceRoot)`.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 import type { HookSpec } from "./registry.ts";
 import { parseSpecChecklist, uncheckedItems } from "../run/spec-file.ts";
 
@@ -62,11 +67,12 @@ export function evaluateSpecGate(specPath: string): SpecGateDecision {
 }
 
 /**
- * Register the gate for one worker. `specPath` is baked into the command so the hook is
- * self-contained (no env dependency) — same posture as `scopeGuardSpec`.
+ * Register the gate for one worker. The spec path is baked into the command so the hook is
+ * self-contained (no env dependency) — same signature and posture as `scopeGuardSpec`, whose
+ * second argument is likewise the worker's workspace root.
  */
 export function specGateSpec(specGateScriptPath: string, workspace: string): HookSpec {
-  const specPath = isAbsolute(workspace) ? join(workspace, "spec.md") : workspace;
+  const specPath = join(workspace, "spec.md");
   return {
     event: "Stop",
     command: `bun ${JSON.stringify(specGateScriptPath)} --spec ${JSON.stringify(specPath)}`,

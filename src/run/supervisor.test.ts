@@ -109,10 +109,12 @@ mock.module("../dispatch/spawn.ts", () => ({
   spawnTicketWorker: fakeSpawn,
 }));
 
-const { RunSupervisor } = await import("./supervisor.ts");
+const { RunSupervisor, runProjectSlug } = await import("./supervisor.ts");
+const { resolveSelfProjectOwner } = await import("../github/owner.ts");
 
 // ── injected git fakes ──────────────────────────────────────────────────────────────────────
 let commitCalls: { workspace: string; message: string }[] = [];
+let ensureCalls: { repoRoot: string; slug: string; owner: string }[] = [];
 let commitResult = { committed: true, sha: "commit000" };
 const gitFakes: Partial<RunGitOps> = {
   commitWorktree: async (workspace: string, message: string) => {
@@ -121,7 +123,9 @@ const gitFakes: Partial<RunGitOps> = {
   },
   headSha: async () => "base000",
   hasDiffSince: async () => true,
-  ensureProjectRepo: async () => {},
+  ensureProjectRepo: async (repoRoot: string, slug: string, owner: string) => {
+    ensureCalls.push({ repoRoot, slug, owner });
+  },
   readDiff: async () => "diff --git a/x.ts b/x.ts\n+added",
   createWorktree: async (opts) => {
     mkdirSync(opts.workspace, { recursive: true });
@@ -173,7 +177,8 @@ function makeRun(over: Partial<Run> = {}): Run {
     taskRef: null,
     ultracode: over.ultracode ?? false,
     cast: over.cast ?? null,
-    repo: over.repo ?? "gateway",
+    // `repo: null` is a MEANINGFUL value (beckett itself), so it must survive the override merge.
+    repo: over.repo === undefined ? "gateway" : over.repo,
     state: over.state ?? "queued",
     createdAt: over.createdAt ?? "2026-08-10T00:00:00.000Z",
     updatedAt: over.updatedAt ?? "2026-08-10T00:00:00.000Z",
@@ -217,7 +222,9 @@ function newSupervisor(
     store,
     config: opts.config ?? cfg(),
     gitOps: gitFakes,
-    resolveRepoRoot: (run) => join(repos, run.repo ?? run.id),
+    // The same resolver shape production wires (`shell/main.ts`): one slug rule for the repo root
+    // and the publish target, so `repo: null` lands in beckett's own checkout here too.
+    resolveRepoRoot: (run) => join(repos, runProjectSlug(run)),
     ...(opts.publish
       ? {
           publishRepo: async (a: any) => {
@@ -241,6 +248,7 @@ beforeEach(() => {
   counter = 0;
   spawnThrows = null;
   commitCalls = [];
+  ensureCalls = [];
   commitResult = { committed: true, sha: "commit000" };
 });
 
@@ -297,6 +305,20 @@ describe("admission", () => {
     expect(spawnCalls[0]!.settingsExtra).toMatchObject({ crossSessionInbound: "accept" });
   });
 
+  test("the harness session id is persisted onto the run, per stage", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = store.create(makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    // `sessionIds` is a Run-contract field: the in-process ledger is cleared on recovery, so this
+    // is the only place a sibling reader can learn which session did which stage.
+    expect(store.get(run.id)!.sessionIds).toEqual({ implement: "sess-1" });
+
+    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    await settle();
+    expect(store.get(run.id)!.sessionIds).toEqual({ implement: "sess-1", review: "sess-2" });
+  });
+
   test("max_live caps live runs and queues the rest FIFO", async () => {
     const { supervisor, store } = newSupervisor({ config: cfg({ runs: { max_live: 1, review_cycles_max: 2, budget_usd_per_run: 0 } }) });
     const a = store.create(makeRun({ slug: "a" }));
@@ -318,6 +340,35 @@ describe("admission", () => {
     await settle();
     expect(store.get(a.id)!.state).toBe("done");
     expect(spawnCalls.map((c) => c.ticketId)).toContain(b.id);
+  });
+});
+
+describe("the repo a run works in", () => {
+  test("`repo: null` is BECKETT ITSELF, never a fresh empty repo named after the run", async () => {
+    const { supervisor, store, repos, publishCalls } = newSupervisor({ publish: true });
+    const run = store.create(makeRun({ slug: "voice", repo: null }));
+    await supervisor.admit(run.id);
+    await tick();
+    expect(ensureCalls).toHaveLength(1);
+    expect(ensureCalls[0]!.slug).toBe("beckett");
+    expect(ensureCalls[0]!.repoRoot).toBe(join(repos, "beckett"));
+    // …and under the self-project's own owner, or the clone would miss and `git init` a void.
+    expect(ensureCalls[0]!.owner).toBe(resolveSelfProjectOwner());
+
+    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    await settle();
+    created[1]!.finish("success", "pass", doneSignal("complete"));
+    await settle();
+    expect(publishCalls[0]!.slug).toBe("beckett");
+  });
+
+  test("a named project still resolves to its own repo", async () => {
+    const { supervisor, store, repos } = newSupervisor();
+    const run = store.create(makeRun({ repo: "gateway" }));
+    await supervisor.admit(run.id);
+    await tick();
+    expect(ensureCalls[0]!.slug).toBe("gateway");
+    expect(ensureCalls[0]!.repoRoot).toBe(join(repos, "gateway"));
   });
 });
 
@@ -380,6 +431,100 @@ describe("stage flow", () => {
     expect(rows[0].purpose).toBe("done");
   });
 
+  test("the watchdog pass drains the durable publish outbox (retries run without a restart)", async () => {
+    const dir = scratch();
+    const outbox = join(dir, "run-publish-outbox.jsonl");
+    let failNext = true;
+    const { supervisor, store, publishCalls } = newSupervisor({
+      publishOutboxPath: outbox,
+      publish: async () => {
+        if (failNext) throw new Error("fetch failed");
+        return { url: "https://github.com/o/gateway", kind: "pr" as const, prUrl: "https://github.com/o/gateway/pull/7" };
+      },
+    });
+    const run = store.create(makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    await settle();
+    created[1]!.finish("success", "pass", doneSignal("complete"));
+    await settle();
+    expect(store.get(run.id)!.state).toBe("publishing");
+    expect(publishCalls).toHaveLength(1);
+
+    // GitHub recovers, and the row comes due. No daemon restart happens — the running supervisor's
+    // own watchdog tick is the only thing that can move this run, which is the whole point.
+    failNext = false;
+    const rows = readFileSync(outbox, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    writeFileSync(outbox, `${JSON.stringify({ ...rows[0], nextAttemptAt: 1 })}\n`);
+    await supervisor.reconcileStaffing(10_000_000);
+    await settle();
+    expect(store.get(run.id)!.state).toBe("done");
+    expect(store.get(run.id)!.prUrl).toBe("https://github.com/o/gateway/pull/7");
+    expect(publishCalls).toHaveLength(2);
+    expect(readFileSync(outbox, "utf8").trim()).toBe("");
+  });
+
+  test("a daemon that died mid-publish re-attempts on boot instead of wedging forever", async () => {
+    const dir = scratch();
+    const outbox = join(dir, "run-publish-outbox.jsonl");
+    const storePath = join(dir, "runs.json");
+    const seed = new RunStore(storePath);
+    // Exactly the crash window: state moved to `publishing`, the attempt was in flight, and no
+    // outbox row was ever written because the attempt never returned a failure.
+    const run = seed.create(makeRun({ state: "publishing" }));
+    seed.update(run.id, { workspace: join(dir, "wt") });
+    const { supervisor, store, publishCalls } = newSupervisor({
+      publish: true,
+      publishOutboxPath: outbox,
+      store: new RunStore(storePath),
+    });
+    await supervisor.start();
+    await settle();
+    supervisor.stop();
+    expect(publishCalls).toHaveLength(1);
+    expect(publishCalls[0]!.ticket).toBe(run.id);
+    expect(store.get(run.id)!.state).toBe("done");
+    // The re-attempt invents no commit message: the reviewer's summary did not survive the crash.
+    expect(publishCalls[0]!.commitMessage).toBeUndefined();
+    // And no worker is staffed for a publishing run — recovery is the publish path, not a respawn.
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  test("boot leaves a publishing run that already owns an outbox row to the normal drain", async () => {
+    const dir = scratch();
+    const outbox = join(dir, "run-publish-outbox.jsonl");
+    const storePath = join(dir, "runs.json");
+    const seed = new RunStore(storePath);
+    const run = seed.create(makeRun({ state: "publishing" }));
+    // A row scheduled well into the future: boot must not spend its retry early.
+    writeFileSync(
+      outbox,
+      `${JSON.stringify({
+        id: "op-1",
+        ticket: { id: run.id, identifier: run.id },
+        slug: "gateway",
+        repoRoot: join(dir, "wt"),
+        messagePrefix: "Review passed → **done**.",
+        summary: "pass",
+        purpose: "done",
+        attempt: 1,
+        nextAttemptAt: Date.now() + 60_000,
+        createdAt: new Date().toISOString(),
+      })}\n`,
+    );
+    const { supervisor, store, publishCalls } = newSupervisor({
+      publish: true,
+      publishOutboxPath: outbox,
+      store: new RunStore(storePath),
+    });
+    await supervisor.start();
+    await settle();
+    supervisor.stop();
+    expect(publishCalls).toHaveLength(0);
+    expect(store.get(run.id)!.state).toBe("publishing");
+  });
+
   test("an implement worker that reports blocked parks the run with its WIP committed", async () => {
     const { supervisor, store } = newSupervisor();
     const run = store.create(makeRun());
@@ -421,6 +566,32 @@ describe("rework bounds", () => {
     expect(parked.state).toBe("parked");
     expect(parked.reviewCycles).toBe(2);
     expect(parked.error).toContain("rework cycle 2/2");
+  });
+
+  test("review notes survive a failed rework spawn instead of vanishing with it", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = store.create(makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    await settle();
+
+    // The rework spawn dies (harness hiccup). Its steering was already consumed and persisted-as-
+    // removed, so without a give-back the re-staffed worker would run with no idea what to fix.
+    spawnThrows = new Error("harness binary missing");
+    created[1]!.finish("success", "missing error handling", doneSignal("blocked", "missing error handling"));
+    await settle();
+    expect(spawnCalls[2]!.stage).toBe("implement");
+    expect(spawnCalls[2]!.steering?.join("\n")).toContain("missing error handling");
+    expect(store.get(run.id)!.state).toBe("implementing");
+    expect(store.get(run.id)!.error).toContain("harness binary missing");
+
+    spawnThrows = null;
+    await supervisor.admit(run.id);
+    await settle();
+    const restaffed = spawnCalls[spawnCalls.length - 1]!;
+    expect(restaffed.stage).toBe("implement");
+    expect(restaffed.steering?.join("\n")).toContain("missing error handling");
   });
 
   test("a reviewer with no schema-valid verdict parks rather than guessing", async () => {

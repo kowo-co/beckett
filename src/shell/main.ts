@@ -39,7 +39,7 @@ import { boredBaseUrl } from "../bored/client.ts";
 import { createTrackerPoller, type TrackerPoller } from "../tracker/poll.ts";
 import { BECKETT_COMMENT_MARKER, createDispatcher, type Dispatcher } from "../dispatch/dispatcher.ts";
 import { RunStore } from "../run/store.ts";
-import { createRunSupervisor, type RunSupervisor } from "../run/supervisor.ts";
+import { createRunSupervisor, runProjectSlug, type RunSupervisor } from "../run/supervisor.ts";
 import { createStagesExtension, stageViewOf } from "../dispatch/stages.ts";
 import { createProgressCardService, type ProgressCardService } from "../progress/cards.ts";
 import { createGitHubPrPoller, type GitHubPrPoller } from "../github/poll.ts";
@@ -606,7 +606,11 @@ async function boot(): Promise<BootedSystem> {
     store: runStore,
     config,
     stages: stageViewOf(extensions),
-    resolveRepoRoot: (run) => join(PROJECTS_ROOT, projectSlug(run.repo || run.id)),
+    // `run.repo === null` is BECKETT ITSELF, not a per-run sandbox: the flagship default
+    // (`beckett task deploy "…"` with no --repo) must land in Beckett's own checkout. The slug
+    // resolver is shared with the supervisor so the repo root and the publish target can never
+    // point at two different repositories.
+    resolveRepoRoot: (run) => join(PROJECTS_ROOT, runProjectSlug(run)),
     publishRepo,
     progress: concierge.progressSink(),
     dispatchEventsPath: join(paths.eventsDir, "dispatch.jsonl"),

@@ -66,6 +66,7 @@ import {
   type PublishOperation,
 } from "../dispatch/publish-outbox.ts";
 import { appendSpendRecord, readSpendLedger, spendForTicket, type SpendOutcome } from "../spend.ts";
+import { resolveProjectOwner, selfProjectSlug } from "../github/owner.ts";
 import { specGateSpec } from "../hooks/spec-gate.ts";
 import { parseSpecChecklist, renderSpecScaffold, type ParsedChecklist } from "./spec-file.ts";
 import { runAsTicket } from "./adapter.ts";
@@ -178,10 +179,28 @@ type PublishOutcome =
   | { status: "published"; url: string; kind: "pushed" | "pr"; prUrl?: string }
   | { status: "failed"; error: string };
 
+/**
+ * The project slug a run's code lives in.
+ *
+ * `run.repo === null` means BECKETT ITSELF — that is the binding Run contract (`src/run/types.ts`,
+ * architecture.md §"The run model"), and it is the DEFAULT path: `beckett task deploy "…"` with no
+ * `--repo` is a change to Beckett. Falling back to the run id instead (the ticket dispatcher's
+ * per-ticket-sandbox precedent) would `git init` a brand-new empty `~/Projects/run-2026…` and let
+ * the worker implement into a void, so the fallback here is the self-project slug and nothing else.
+ *
+ * Exported because `shell/main.ts` resolves the repo ROOT from the same slug — the two must never
+ * disagree about which checkout a run owns.
+ */
+export function runProjectSlug(run: Pick<Run, "repo">, env: Record<string, string | undefined> = process.env): string {
+  return projectSlug(run.repo?.trim() || selfProjectSlug(env));
+}
+
 /** Watchdog grace: reuse the dispatcher's `[supervise] staffing_watchdog_s` (default 120s). */
 const DEFAULT_WATCHDOG_GRACE_S = 120;
 /** The watchdog tick, mirroring the dispatcher: never slower than half the grace, floor 15s. */
 const WATCHDOG_MIN_INTERVAL_MS = 15_000;
+/** Publish-outbox drain cadence — the shortest retry delay, so a due row waits at most one tick. */
+const PUBLISH_DRAIN_INTERVAL_MS = PUBLISH_RETRY_DELAYS_MS[0];
 
 // =======================================================================================
 // RunSupervisor
@@ -224,6 +243,7 @@ export class RunSupervisor {
 
   private watchdogTimer?: ReturnType<typeof setInterval>;
   private watchdogInFlight = false;
+  private publishDrainTimer?: ReturnType<typeof setInterval>;
   private checkpointTimer?: ReturnType<typeof setInterval>;
   private checkpointInFlight = false;
   private started = false;
@@ -293,9 +313,11 @@ export class RunSupervisor {
     });
     await this.recoverFromCrash();
     await this.replayPublishes();
+    await this.resumeInterruptedPublishes();
     for (const run of this.store.live()) this.admitRun(run);
     this.startCheckpointLoop();
     this.startStaffingWatchdog();
+    this.startPublishDrainLoop();
     this.logger.info("run supervisor started", { live: this.store.live().length });
   }
 
@@ -303,8 +325,10 @@ export class RunSupervisor {
   stop(): void {
     if (this.checkpointTimer) clearInterval(this.checkpointTimer);
     if (this.watchdogTimer) clearInterval(this.watchdogTimer);
+    if (this.publishDrainTimer) clearInterval(this.publishDrainTimer);
     this.checkpointTimer = undefined;
     this.watchdogTimer = undefined;
+    this.publishDrainTimer = undefined;
     this.started = false;
   }
 
@@ -488,7 +512,7 @@ export class RunSupervisor {
   private async doSpawn(run: Run, stage: RunStage, reservation: symbol): Promise<void> {
     const stageStartedAt = Date.now();
     const repoRoot = this.resolveRepoRoot(run);
-    const slug = projectSlug(run.repo || run.id);
+    const slug = runProjectSlug(run);
 
     // 1. The run's own project repo (clone-or-init). A provisioning failure parks rather than
     //    spawning a worker with nowhere to work.
@@ -613,6 +637,10 @@ export class RunSupervisor {
         logger: this.logger,
       });
     } catch (err) {
+      // The steering was CONSUMED above (taken and persisted-as-removed) for a worker that never
+      // existed. Put it back before anything else: on a rework spawn those notes ARE the reviewer's
+      // findings, and the watchdog's re-staff would otherwise re-run implement with no idea why.
+      this.returnSteers(run.id, steering);
       this.trace(run, stage, "failed", "worker could not start", (err as Error).message);
       this.noteSpawnFailure(current, `the ${stage} worker could not start: ${(err as Error).message}`);
       return;
@@ -628,12 +656,20 @@ export class RunSupervisor {
         stage,
         workerId: handle.id,
       });
+      // Same contract as the spawn-failure path: a discarded worker never read these notes, so a
+      // still-live run must get them back. A terminal run keeps none (nothing will ever read them).
+      if (fresh && !RUN_TERMINAL.has(fresh.state)) this.returnSteers(run.id, steering);
       await handle.abort("run no longer active");
       await handle.reap();
       return;
     }
 
     this.workers.set(run.id, handle);
+    // `sessionIds` is a Run-contract field only this lane writes: the crash-resume ledger is
+    // in-process state cleared on recovery, so without this a sibling reader sees `{}` forever.
+    if (handle.sessionId) {
+      this.store.update(run.id, { sessionIds: { ...fresh.sessionIds, [stage]: handle.sessionId } });
+    }
     this.liveLedger.set(run.id, {
       stage,
       workerId: handle.id,
@@ -810,9 +846,14 @@ export class RunSupervisor {
 
   // ── publishing ────────────────────────────────────────────────────────────────────────
 
-  /** GitHub owner for a slug. Kept trivial here; the dispatcher's per-project override is config. */
-  private projectOwner(_slug: string): string {
-    return this.config.identity?.github_user ?? "";
+  /**
+   * GitHub owner for a slug — the dispatcher's resolver verbatim, so the self-project's per-repo
+   * override (`beckett` lives under `kowo-co`, #114) applies to runs too. Getting this wrong on a
+   * `repo: null` run would clone nothing and `git init` an empty checkout, which is exactly the
+   * failure {@link runProjectSlug} exists to prevent.
+   */
+  private projectOwner(slug: string): string {
+    return resolveProjectOwner(slug, this.config);
   }
 
   /**
@@ -830,7 +871,7 @@ export class RunSupervisor {
         const op: PublishOperation = {
           id: randomUUID(),
           ticket: runAsTicket(publishing),
-          slug: projectSlug(publishing.repo || publishing.id),
+          slug: runProjectSlug(publishing),
           repoRoot: publishing.workspace ?? this.resolveRepoRoot(publishing),
           messagePrefix: "Review passed → **done**.",
           summary,
@@ -866,7 +907,7 @@ export class RunSupervisor {
     }
     try {
       const result = await this.publishRepo({
-        slug: projectSlug(run.repo || run.id),
+        slug: runProjectSlug(run),
         repoRoot: run.workspace ?? this.resolveRepoRoot(run),
         description: run.title,
         ticket: run.id,
@@ -927,6 +968,29 @@ export class RunSupervisor {
     });
   }
 
+  /**
+   * Boot repair for the one window the outbox cannot cover: the daemon died BETWEEN
+   * `state = "publishing"` and the failed attempt that would have written the durable row. Such a
+   * run has no outbox row, staffs nothing ({@link stageFor} returns null for `publishing`), and is
+   * skipped by the watchdog — a silent permanent wedge. Re-attempting is safe: `publishRepo` is
+   * idempotent by contract (a re-push of the same branch returns the same PR), and a second failure
+   * lands the run in the outbox where the normal drain owns it.
+   */
+  async resumeInterruptedPublishes(): Promise<number> {
+    let resumed = 0;
+    for (const run of this.store.live()) {
+      if (run.state !== "publishing") continue;
+      if (this.publishOutbox?.has(run.id)) continue; // the row already owns it
+      resumed++;
+      this.logger.warn("run was mid-publish when the daemon stopped — re-attempting", { run: run.id });
+      this.trace(run, "publish", "info", "daemon restarted mid-publish — re-attempting (idempotent)");
+      // No summary: the reviewer's words did not survive the restart, and inventing a commit
+      // message here would put fiction in the history. The publish path handles the empty case.
+      await this.publishRun(run, "");
+    }
+    return resumed;
+  }
+
   // ── steering ──────────────────────────────────────────────────────────────────────────
 
   /**
@@ -954,6 +1018,16 @@ export class RunSupervisor {
     this.persistRuntimeState();
   }
 
+  /**
+   * Give back steering that was consumed for a brief no model ever read. Notes go BACK IN FRONT of
+   * anything buffered since, so the run's next worker sees them in the order they were written.
+   */
+  private returnSteers(runId: string, notes: string[]): void {
+    if (notes.length === 0) return;
+    this.pendingSteers.set(runId, [...notes, ...(this.pendingSteers.get(runId) ?? [])]);
+    this.persistRuntimeState();
+  }
+
   private takeSteers(runId: string): string[] {
     const list = this.pendingSteers.get(runId) ?? [];
     if (list.length === 0) return [];
@@ -975,6 +1049,23 @@ export class RunSupervisor {
       );
     }, intervalMs);
     this.watchdogTimer.unref?.();
+  }
+
+  /**
+   * The publish outbox's own heartbeat. {@link reconcileStaffing} already drains on every watchdog
+   * tick, but that tick is configurable to nothing (`[supervise] staffing_watchdog_s = 0`) and a
+   * durable retry schedule that an unrelated knob can switch off is not durable. Both callers are
+   * safe together: `PublishOutbox.drain` is single-flight in-process, so an overlapping tick is a
+   * no-op rather than a double publish.
+   */
+  startPublishDrainLoop(): void {
+    if (this.publishDrainTimer || !this.publishOutbox) return;
+    this.publishDrainTimer = setInterval(() => {
+      void this.replayPublishes().catch((err) =>
+        this.logger.warn("publish outbox drain failed", { error: (err as Error).message }),
+      );
+    }, PUBLISH_DRAIN_INTERVAL_MS);
+    this.publishDrainTimer.unref?.();
   }
 
   startCheckpointLoop(): void {
@@ -1001,6 +1092,16 @@ export class RunSupervisor {
     const restaffed: string[] = [];
     const parked: string[] = [];
     try {
+      // Drain the durable publish outbox FIRST. The ticket dispatcher got this for free — it drained
+      // on every poll tick — but the run engine has no poller, so without this the 1m/5m/30m retry
+      // schedule would only ever run at daemon boot and a transiently-failed publish would sit in
+      // `publishing` (skipped below via `publishOutbox.has`) until the next restart. An outbox fault
+      // must never block staffing recovery, hence the local catch.
+      try {
+        await this.replayPublishes();
+      } catch (err) {
+        this.logger.warn("publish outbox drain failed (staffing pass continues)", { error: String(err) });
+      }
       const graceMs = (this.config.supervise?.staffing_watchdog_s ?? DEFAULT_WATCHDOG_GRACE_S) * 1000;
       const wedged = new Set<string>();
       for (const run of this.store.live()) {

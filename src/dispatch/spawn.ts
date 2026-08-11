@@ -204,9 +204,9 @@ export interface SpawnWorkerArgs {
    */
   sessionName?: string;
   /**
-   * v7: extra top-level keys merged into the worker's `--settings` file (notably
-   * `crossSessionInbound: "accept"` and `workflowSizeGuideline`). Absent → the settings file is
-   * exactly the rendered hook settings, as before.
+   * v7: extra top-level keys merged UNDER the worker's rendered `--settings` (notably
+   * `crossSessionInbound: "accept"` and `workflowSizeGuideline`) — the rendered keys win, so this
+   * can never clobber the hooks. Absent → the settings file is exactly the rendered hook settings.
    */
   settingsExtra?: Record<string, unknown>;
   /** Extra hooks registered into the worker's `--settings` (v7: the spec-gate Stop hook). */
@@ -348,9 +348,9 @@ export function writeWorkerMeta(
   sharedBrowserHome: string | null,
   /**
    * v7 (optional, absent ⇒ byte-identical output to pre-v7): extra hooks to register (the
-   * spec-gate Stop hook) and extra TOP-LEVEL settings keys to merge over the rendered hooks
-   * (`crossSessionInbound`, `workflowSizeGuideline`). Hooks are never clobbered — a caller's
-   * `hooks` key in `extra` would be ignored in favour of the rendered ones.
+   * spec-gate Stop hook) and extra TOP-LEVEL settings keys merged UNDER the rendered settings
+   * (`crossSessionInbound`, `workflowSizeGuideline`). Rendered keys win, so hooks are never
+   * clobbered — a caller's own `hooks` key in `extra.settings` is ignored in their favour.
    */
   extra: { hooks?: HookSpec[]; settings?: Record<string, unknown> } = {},
 ): { doneSchemaPath: string; settingsPath: string; mcpConfigPath: string } {

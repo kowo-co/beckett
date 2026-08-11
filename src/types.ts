@@ -1225,9 +1225,10 @@ export interface SpawnSpec {
   sessionName?: string;
   /**
    * Extra TOP-LEVEL keys merged into the worker's `--settings` JSON (v7: notably
-   * `"crossSessionInbound": "accept"` and `"workflowSizeGuideline"`). Merged over the rendered
-   * hook settings, so a caller can add settings without the hook renderer growing a vocabulary
-   * for each one. Absent → the settings file is exactly the rendered hooks (pre-v7 behavior).
+   * `"crossSessionInbound": "accept"` and `"workflowSizeGuideline"`), so a caller can add settings
+   * without the hook renderer growing a vocabulary for each one. Merged UNDER the rendered hook
+   * settings — a rendered top-level key (`hooks`) always wins, and no caller can silently disarm
+   * the scope guard. Absent → the settings file is exactly the rendered hooks (pre-v7 behavior).
    */
   settingsExtra?: Record<string, unknown>;
 }
