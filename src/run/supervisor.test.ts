@@ -193,6 +193,7 @@ function makeRun(over: Partial<Run> = {}): Run {
     reviewCycles: over.reviewCycles ?? 0,
     prUrl: null,
     error: null,
+    published: over.published === undefined ? null : over.published,
   };
 }
 
@@ -605,6 +606,104 @@ describe("stage flow", () => {
   });
 });
 
+// #227: the outbox used to park after exactly ONE attempt (an unrecognized error defaulted to
+// "permanent"), logged no reason, and said "retry" on a row that was never going to be retried.
+describe("publish outbox backoff ladder (#227)", () => {
+  test("attempts 1..4 walk the 30s/2m/10m ladder honestly, then park — never immediately", async () => {
+    const dir = scratch();
+    const outbox = join(dir, "run-publish-outbox.jsonl");
+    const { supervisor, store, events } = newSupervisor({
+      publishOutboxPath: outbox,
+      // A message the OLD classifier's transient regex would not have matched — the #227
+      // regression case: this must retry, not park on attempt 1.
+      publish: async () => {
+        throw new Error("gh pr create failed (1): some future gh error text nobody wrote a regex for");
+      },
+    });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    await settle();
+    created[1]!.finish("success", "pass", doneSignal("complete"));
+    await settle();
+
+    const readRow = () => JSON.parse(readFileSync(outbox, "utf8").trim());
+    let row = readRow();
+    expect(row.attempt).toBe(1);
+    expect(row.nextAttemptAt).toBeLessThan(Number.MAX_SAFE_INTEGER); // retried, not parked
+    expect(store.get(run.id)!.state).toBe("publishing");
+
+    // Attempt 2: force the row due, drain, and check the ladder's 2nd rung (~2m).
+    const beforeAttempt2 = Date.now();
+    writeFileSync(outbox, `${JSON.stringify({ ...row, nextAttemptAt: 1 })}\n`);
+    await supervisor.reconcileStaffing();
+    await settle();
+    row = readRow();
+    expect(row.attempt).toBe(2);
+    expect(row.nextAttemptAt - beforeAttempt2).toBeGreaterThan(110_000);
+    expect(row.nextAttemptAt - beforeAttempt2).toBeLessThan(130_000);
+
+    // Attempt 3: the ladder's 3rd rung (~10m).
+    const beforeAttempt3 = Date.now();
+    writeFileSync(outbox, `${JSON.stringify({ ...row, nextAttemptAt: 1 })}\n`);
+    await supervisor.reconcileStaffing();
+    await settle();
+    row = readRow();
+    expect(row.attempt).toBe(3);
+    expect(row.nextAttemptAt - beforeAttempt3).toBeGreaterThan(590_000);
+    expect(row.nextAttemptAt - beforeAttempt3).toBeLessThan(610_000);
+
+    // Attempt 4: the ladder is EXHAUSTED — park, do not invent a 4th delay.
+    writeFileSync(outbox, `${JSON.stringify({ ...row, nextAttemptAt: 1 })}\n`);
+    await supervisor.reconcileStaffing();
+    await settle();
+    row = readRow();
+    expect(row.attempt).toBe(4);
+    expect(row.nextAttemptAt).toBe(Number.MAX_SAFE_INTEGER);
+    // The run stays honestly `publishing` — it is not silently vanished nor falsely marked done.
+    expect(store.get(run.id)!.state).toBe("publishing");
+
+    // Every attempt after the first logged VERBATIM with honest wording — retry while there was a
+    // rung left, "parked for human courier" (never "retry") on the last one.
+    const retryEvents = events.filter((e) => e.stage === "publish-retry");
+    expect(retryEvents).toHaveLength(3);
+    expect(retryEvents[0]!.message).toBe("publish attempt 2 failed — retrying in 2m");
+    expect(retryEvents[1]!.message).toBe("publish attempt 3 failed — retrying in 10m");
+    expect(retryEvents[2]!.message).toBe("parked for human courier");
+    for (const e of retryEvents) {
+      expect(e.error).toBe("gh pr create failed (1): some future gh error text nobody wrote a regex for");
+    }
+  });
+
+  test("a permanent-class error (403) parks for a human courier on attempt 1, honestly logged", async () => {
+    const dir = scratch();
+    const outbox = join(dir, "run-publish-outbox.jsonl");
+    const { supervisor, store, events } = newSupervisor({
+      publishOutboxPath: outbox,
+      publish: async () => {
+        throw new Error("HTTP 403 forbidden");
+      },
+    });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    await settle();
+    created[1]!.finish("success", "pass", doneSignal("complete"));
+    await settle();
+
+    const row = JSON.parse(readFileSync(outbox, "utf8").trim());
+    expect(row.attempt).toBe(1);
+    expect(row.nextAttemptAt).toBe(Number.MAX_SAFE_INTEGER);
+    expect(store.get(run.id)!.state).toBe("publishing");
+
+    const held = events.find((e) => e.stage === "publish" && e.outcome === "held");
+    expect(held?.message).toBe("parked for human courier");
+    expect(held?.error).toBe("HTTP 403 forbidden");
+  });
+});
+
 describe("rework bounds", () => {
   test("review fail reworks with the reviewer's notes, then parks at the cap", async () => {
     const { supervisor, store } = newSupervisor({
@@ -1014,6 +1113,82 @@ describe("cancel", () => {
     await supervisor.cancel(first.id);
     await settle();
     expect(spawnCalls.map((c) => c.itemId)).toEqual([first.id, second.id]);
+  });
+});
+
+// #228: a human takes publishing over by hand after the outbox stops driving it. This is its OWN
+// terminal shape — never `cancel()`'s bookkeeping, which used to be reused here and threw the
+// run's own shipped outcome away (`state: "cancelled", error: "cancelled", prUrl: null`).
+describe("courier handoff (#228)", () => {
+  test("courier() ends a run done with published: {via: courier, prUrl: null} — not cancelled", async () => {
+    const { supervisor, store, events } = newSupervisor();
+    const run = seedRun(store, makeRun({ state: "publishing" }));
+    expect(await supervisor.courier(run.id)).toBe("done");
+    await tick(); // the live sink notifies off a microtask queued inside trace()
+    const updated = store.get(run.id)!;
+    expect(updated.state).toBe("done");
+    expect(updated.error).toBeNull();
+    expect(updated.published).toEqual({ via: "courier", prUrl: null });
+    const doneEvent = events.find((e) => e.stage === "done:courier" && e.outcome === "passed");
+    expect(doneEvent).toBeTruthy();
+  });
+
+  test("courier() drops the run's outbox row — a stale retry must never race the human's push", async () => {
+    const dir = scratch();
+    const outbox = join(dir, "run-publish-outbox.jsonl");
+    const { supervisor, store } = newSupervisor({ publishOutboxPath: outbox });
+    const run = seedRun(store, makeRun({ state: "publishing" }));
+    writeFileSync(
+      outbox,
+      `${JSON.stringify({
+        id: "op-1",
+        item: { id: run.id, identifier: run.id },
+        slug: "gateway",
+        repoRoot: "/x",
+        messagePrefix: "x",
+        summary: "x",
+        purpose: "done",
+        attempt: 2,
+        nextAttemptAt: Date.now() + 60_000,
+        createdAt: new Date().toISOString(),
+      })}\n`,
+    );
+    await supervisor.courier(run.id);
+    expect(readFileSync(outbox, "utf8").trim()).toBe("");
+  });
+
+  test("courier() also works from parked — a run the ladder already gave up on", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(store, makeRun({ state: "parked", error: "parked for human courier" }));
+    expect(await supervisor.courier(run.id)).toBe("done");
+    expect(store.get(run.id)!.state).toBe("done");
+    expect(store.get(run.id)!.error).toBeNull();
+  });
+
+  test("courier() refuses a run that never reached publishing (a caller mistake, not a transition)", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(store, makeRun({ state: "implementing" }));
+    expect(await supervisor.courier(run.id)).toBe("not-eligible");
+    expect(store.get(run.id)!.state).toBe("implementing");
+  });
+
+  test("courier() refuses an already-terminal run and reports an unknown run id honestly", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(store, makeRun({ state: "done" }));
+    expect(await supervisor.courier(run.id)).toBe("already-terminal");
+    expect(await supervisor.courier("run-20260810-nope")).toBe("unknown");
+  });
+
+  test("backfillCourierPrUrl fills the URL and re-traces done:courier for a still-open card", async () => {
+    const { supervisor, store, events } = newSupervisor();
+    const run = seedRun(store, makeRun({ state: "publishing" }));
+    await supervisor.courier(run.id);
+    const updated = await supervisor.backfillCourierPrUrl(run.id, "https://github.com/o/gateway/pull/9");
+    await tick(); // the live sink notifies off a microtask queued inside trace()
+    expect(updated?.published).toEqual({ via: "courier", prUrl: "https://github.com/o/gateway/pull/9" });
+    expect(store.get(run.id)!.prUrl).toBe("https://github.com/o/gateway/pull/9");
+    const backfillEvent = events.filter((e) => e.stage === "done:courier").at(-1);
+    expect(backfillEvent?.message).toBe("https://github.com/o/gateway/pull/9");
   });
 });
 

@@ -53,6 +53,7 @@ function fakeDeps(): TaskDeployDeps & { created: Run[]; busPings: Array<{ cmd: s
         reviewCycles: 0,
         prUrl: null,
         error: null,
+        published: null,
       };
       created.push(run);
       return run;
@@ -210,6 +211,7 @@ test("deployRun: --dry prints the full Run JSON but writes nothing and pings no 
     reviewCycles: 0,
     prUrl: null,
     error: null,
+    published: null,
   });
   expect(deps.created).toEqual([]);
   expect(deps.busPings).toEqual([]);

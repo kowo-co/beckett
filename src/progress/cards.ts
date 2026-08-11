@@ -135,6 +135,15 @@ function verdictFor(event: DispatchEvent): Verdict | null {
       ? { phase: "shipped", detail: clip(event.message), alert: false, terminal: true }
       : null;
   }
+  // A human courier published the run's branch by hand instead of the outbox landing it — its own
+  // honest terminal card (#228), never `cancelled` and never plain "shipped" (which would imply
+  // the outbox did it). `event.message` carries the PR URL once `RunStore.backfillCourierPrUrl`
+  // fills it in; blank until then, matching `published.prUrl: null`.
+  if (base === "done" && qualifier === "courier") {
+    return event.outcome === "passed"
+      ? { phase: "shipped (couriered)", detail: clip(event.message), alert: false, terminal: true }
+      : null;
+  }
 
   if (qualifier === "staff") {
     if (event.outcome === "held") {
@@ -249,7 +258,7 @@ function activityBlurb(state: ProgressCardState, nowMs: number): string {
 }
 
 function markerFor(state: ProgressCardState): string {
-  if (state.terminal && (state.phase === "done" || state.phase === "shipped")) return "✓";
+  if (state.terminal && (state.phase === "done" || state.phase === "shipped" || state.phase === "shipped (couriered)")) return "✓";
   if (state.terminal && state.phase === "cancelled") return "⛔";
   if (state.terminal || state.alert) return "⚠";
   return "▸";

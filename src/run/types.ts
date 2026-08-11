@@ -54,6 +54,22 @@ export interface RunStateChange {
 }
 
 /**
+ * How a `done` run's branch actually reached GitHub — additive next to the existing top-level
+ * `prUrl` (#228). Two terminal shapes:
+ *   - `{via: "outbox", prUrl}` — the durable publish outbox (`../dispatch/publish-outbox.ts`)
+ *     landed it itself, synchronously or after a retry.
+ *   - `{via: "courier", prUrl}` — a human took the outbox row over and published it by hand
+ *     (`RunSupervisor.courier`). `prUrl` starts `null` (there is no automatic signal for a
+ *     courier-landed PR — the daemon never drove it) and can be backfilled later
+ *     ({@link ../store.ts RunStore.backfillCourierPrUrl}) once a human knows it.
+ * `null` on every run that never reached `publishing`, and on every OLD persisted run from before
+ * this field existed — `../store.ts`'s schema tolerates the missing field on load (migration
+ * safety), and nothing reads `published` as load-bearing for a run's actual state (`state` +
+ * `prUrl` still carry that), so an old row renders exactly as it always did.
+ */
+export type PublishRecord = { via: "outbox" | "courier"; prUrl: string | null };
+
+/**
  * The execution unit. One row per `beckett task deploy` call (or plan-filed run). Durable at
  * `<beckettDir>/runs.json` via {@link ./store.ts}'s `RunStore`.
  */
@@ -92,4 +108,6 @@ export interface Run {
   reviewCycles: number;
   prUrl: string | null;
   error: string | null;
+  /** How a `done` run got published — null until it does (see {@link PublishRecord}). */
+  published: PublishRecord | null;
 }
