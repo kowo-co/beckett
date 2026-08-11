@@ -250,6 +250,27 @@ export interface IncomingForwardedEmbed {
   urls: string[];
 }
 
+/**
+ * A link preview Discord attached to an ORDINARY message (issue #235). Discord attaches these a
+ * beat AFTER the message itself, so the gateway settles them before the turn is built — without
+ * that, a "@beckett what do you make of <url>" turn saw a bare link and improvised "nothing came
+ * through on my end". Reduced to display metadata; the description is already truncated by the
+ * gateway so a giant article preview cannot flood a turn.
+ */
+export interface IncomingLinkEmbed {
+  title?: string;
+  description?: string;
+  url?: string;
+}
+
+/** An explicit @mention target on an inbound message: who the author actually addressed. */
+export interface IncomingMentionTarget {
+  /** Discord user id — the authority. */
+  id: string;
+  /** Display name at capture time (render label only — never authoritative). */
+  name: string;
+}
+
 /** Original material carried by Discord's message-forward snapshot, not words authored by the sender. */
 export interface IncomingMessageSnapshot {
   content: string;
@@ -285,6 +306,19 @@ export interface IncomingMessage {
   /** A bot reply reference could not be inspected; privacy-sensitive routing must fail closed. */
   repliedToBotUnverified?: boolean;
   mentionsBot: boolean;
+  /**
+   * Everyone this message explicitly @mentioned, in Discord's own order (issue #232). `mentionsBot`
+   * answers only "was I addressed"; this answers "who was", which is what the ambient classifier
+   * needs to stop guessing who is talking to whom. Absent (not empty) when the message mentioned
+   * nobody, so the byte-shape of an ordinary message is unchanged.
+   */
+  mentionedUsers?: IncomingMentionTarget[];
+  /**
+   * Link previews attached to this message, settled by the gateway (issue #235). An empty ARRAY
+   * means the gateway looked and Discord attached none; `undefined` means nothing looked at all
+   * (a legacy/hand-built message), and the two are read differently — see `contentWithLinkEmbeds`.
+   */
+  embeds?: IncomingLinkEmbed[];
   authorIsBot: boolean;
   /**
    * Present ONLY when the author is an allow-listed trusted peer Beckett (federation). Its presence

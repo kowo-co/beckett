@@ -52,6 +52,8 @@ import { effectiveActionClass, renderCatalogBlock, type ExtensionContext, type E
 import { createDiscordGateway, type DiscordGateway } from "../discord/gateway.ts";
 import { deliverChilled } from "./chill-gate.ts";
 import { contentWithForwardedSnapshots } from "./forwarded-message.ts";
+import { contentWithLinkEmbeds } from "./link-embeds.ts";
+import { splitByAddressee, type BurstAnchor } from "./reply-anchors.ts";
 import {
   downloadAttachments,
   buildAttachmentContent,
@@ -514,6 +516,13 @@ const MAX_LIVE_TURN_INJECTIONS = 8;
  * pinning message objects forever.
  */
 const MAX_TRACKED_INJECTIONS = 64;
+
+/**
+ * How far back a shared-window line may sit and still be a legal reply anchor (issue #235). Past
+ * this it is background context, not part of the beat this turn is answering — and pinning an
+ * answer under an hour-old message reads worse than not pinning it at all.
+ */
+const BURST_ANCHOR_MAX_AGE_MS = 10 * 60_000;
 
 /**
  * One mid-flow message handed to a live turn ({@link ConciergeSession.injectIntoLiveTurn}), tracked
@@ -3457,6 +3466,9 @@ export class Concierge {
       content: e.content,
       ts: e.ts,
       repliedToId: e.repliedToId,
+      // The stored @mention targets (issue #232) — the store is the snapshot triage actually sees,
+      // so a field dropped here is a field the classifier has to guess at.
+      ...(e.mentions?.length ? { mentions: e.mentions } : {}),
       isBeckett: e.kind === "beckett",
     }));
   }
@@ -6105,7 +6117,13 @@ export class Concierge {
     // snapshots of its own. When this turn has none, look back for one the same author just
     // forwarded into this channel rather than answering blind.
     const forwardedSnapshots = m.forwardedSnapshots?.length ? m.forwardedSnapshots : this.recentForwardedSnapshots(m);
-    const turnContent = contentWithForwardedSnapshots(content, forwardedSnapshots);
+    // Issue #235: the gateway already waited out Discord's unfurl, so by here the link preview is
+    // either attached or provably absent. Say which — "nothing came through on my end" was Beckett
+    // guessing at a race it now has the answer to.
+    const turnContent = contentWithLinkEmbeds(
+      contentWithForwardedSnapshots(content, forwardedSnapshots),
+      m.embeds,
+    );
     if (!turnContent && m.attachments.length === 0) return;
 
     // Message-aware so a trusted peer resolves as "peer" (below a member, above an outsider) rather
@@ -6343,10 +6361,21 @@ export class Concierge {
     // jumps the queue, so there is no line to narrate. Typing (above) is the whole ack — the way
     // a person pausing mid-thought to hear you needs no "hold on" signage.
 
+    // The other people whose unanswered lines this turn is about to fold in (issue #235). Collected
+    // as the prompt is built, from the one place that knows what actually fit the budget.
+    let windowEntries: readonly ChannelEntry[] = [];
     try {
-      const built = await this.buildTurn(m, turnContent, workspace, (watermark) => {
-        mention.contextWatermark = watermark;
-      });
+      const built = await this.buildTurn(
+        m,
+        turnContent,
+        workspace,
+        (watermark) => {
+          mention.contextWatermark = watermark;
+        },
+        (entries) => {
+          windowEntries = entries;
+        },
+      );
       // Both notes say the same thing in different shapes — an earlier message of this person's is
       // still unanswered and this turn owes it a reply too. Empty on an ordinary turn, so the
       // composed prompt stays byte-identical when neither path fired.
@@ -6389,19 +6418,24 @@ export class Concierge {
         this.owed.markDelivering(m.messageId);
         for (const injectedId of absorbedInjections) this.owed.markDelivering(injectedId);
         // The Concierge's conversational reply is a native reply, which notifies only its author.
-        // Restyled through chilltext when enabled (v7 architecture doc) — fail-open to the exact
-        // call above on any bypass/failure, so this posts byte-for-byte the same with the flag off.
-        const ackId = await deliverChilled(m.channelId, text, {
-          input: turnContent || undefined,
-          postOpts: { replyToMessageId: m.messageId, replyToUserId: m.userId },
-          gateway: this.gateway,
-          cfg: this.config.concierge.chilltext,
-          logger: this.log,
-          recordPost: (chId, bubbleText, bubbleId) => this.recordBeckettPost(chId, bubbleText, bubbleId),
-        });
+        // Issue #235: when the burst spanned several people and the answer addresses more than one
+        // of them, that is several answers — each posts under the message it actually answers.
+        // Anything ambiguous returns null and delivers whole, exactly as it always did.
+        const segments = splitByAddressee(text, this.burstAnchors(m, windowEntries));
+        const ackId = segments
+          ? await this.deliverPerAddressee(m, segments, turnContent)
+          : await deliverChilled(m.channelId, text, {
+              input: turnContent || undefined,
+              postOpts: { replyToMessageId: m.messageId, replyToUserId: m.userId },
+              gateway: this.gateway,
+              cfg: this.config.concierge.chilltext,
+              logger: this.log,
+              recordPost: (chId, bubbleText, bubbleId) => this.recordBeckettPost(chId, bubbleText, bubbleId),
+            });
         // OPS-80: our own reply joins the shared record (a CLI reply was already recorded on the
-        // bus path — this covers the auto-post half, so exactly one entry either way).
-        this.recordBeckettPost(m.channelId, text, ackId);
+        // bus path — this covers the auto-post half, so exactly one entry either way). A split
+        // delivery recorded each of its segments as it posted them.
+        if (!segments) this.recordBeckettPost(m.channelId, text, ackId);
         mention.ackMessageId = ackId;
       } else if (mention.superseded && !mention.repliedViaCli) {
         // This turn was killed mid-answer by a superseding message (issue #138): cancelLiveTurn
@@ -6468,6 +6502,76 @@ export class Concierge {
     } finally {
       if (this.activeMentions.get(m.channelId) === mention) this.activeMentions.delete(m.channelId);
     }
+  }
+
+  /**
+   * The inbound messages this turn could anchor an answer to (issue #235).
+   *
+   * The live message always leads, and it is the ONLY candidate for its own author: a same-author
+   * burst must keep the delivery it has always had, so a fold-in or a settle-hold never moves the
+   * anchor off the message the turn is running for. Everything else comes from the shared window
+   * this turn folded in — other people's unanswered lines, which is exactly the multi-author burst
+   * that was being pinned to one person. Beckett's own posts are never anchors, and anything older
+   * than {@link BURST_ANCHOR_MAX_AGE_MS} is stale context rather than part of this beat.
+   */
+  private burstAnchors(m: IncomingMessage, windowEntries: readonly ChannelEntry[]): BurstAnchor[] {
+    const anchors: BurstAnchor[] = [
+      {
+        messageId: m.messageId,
+        userId: m.userId,
+        name: m.authorDisplayName?.trim() || m.userId,
+        ts: m.createdAt,
+      },
+    ];
+    const floor = m.createdAt - BURST_ANCHOR_MAX_AGE_MS;
+    for (const entry of windowEntries) {
+      if (entry.kind !== "user") continue;
+      if (entry.authorId === m.userId || entry.authorId === "beckett") continue;
+      if (entry.ts < floor) continue;
+      anchors.push({
+        messageId: entry.messageId,
+        userId: entry.authorId,
+        name: entry.authorName,
+        ts: entry.ts,
+      });
+    }
+    return anchors;
+  }
+
+  /**
+   * Post one answer per addressee, each as a native reply to the message it answers (issue #235).
+   * Sequential on purpose: the segments are one reply the model wrote in order, and Discord should
+   * show them in that order. Returns the FIRST message id, keeping the same reply-correlation
+   * contract the single-delivery path has always returned.
+   */
+  private async deliverPerAddressee(
+    m: IncomingMessage,
+    segments: { text: string; anchor: BurstAnchor }[],
+    turnContent: string,
+  ): Promise<string> {
+    this.log.info("splitting a turn's delivery per addressee", {
+      channelId: m.channelId,
+      messageId: m.messageId,
+      anchors: segments.map((segment) => segment.anchor.messageId),
+    });
+    let firstId: string | null = null;
+    for (const segment of segments) {
+      const postedId = await deliverChilled(m.channelId, segment.text, {
+        input: turnContent || undefined,
+        postOpts: {
+          replyToMessageId: segment.anchor.messageId,
+          replyToUserId: segment.anchor.userId,
+        },
+        gateway: this.gateway,
+        cfg: this.config.concierge.chilltext,
+        logger: this.log,
+        recordPost: (chId, bubbleText, bubbleId) => this.recordBeckettPost(chId, bubbleText, bubbleId),
+      });
+      // Each segment is its own message in the room, so each is its own line in the record.
+      this.recordBeckettPost(m.channelId, segment.text, postedId);
+      firstId ??= postedId;
+    }
+    return firstId!;
   }
 
   // ── the directed settle window (src/concierge/directed-settle.ts) ─────────────────────────
@@ -6790,6 +6894,7 @@ export class Concierge {
     content: string,
     workspace: WorkspaceContext | null = null,
     onSharedContext?: (watermark: { channelId: string; sessionId: string; lastMessageId: string }) => void,
+    onWindow?: (entries: readonly ChannelEntry[]) => void,
   ): Promise<TurnMessage> {
     const speaker = this.resolveSpeaker(m);
     // Mention-path win (§4.4): a mention like "do that" after five un-mentioned messages is a riddle
@@ -6806,7 +6911,7 @@ export class Concierge {
       workspacePrefix +
       attachSeed +
       (this.channelStore
-        ? await this.sharedContextPrefix(m.channelId, content, m.messageId, onSharedContext)
+        ? await this.sharedContextPrefix(m.channelId, content, m.messageId, onSharedContext, onWindow)
         : this.ambientContextPrefix(m.channelId)) +
       // Who is talking, in full: their person file, once per session per speaker.
       this.personContextPrefix(m.channelId, speaker.userId) +
@@ -7076,6 +7181,9 @@ export class Concierge {
       authorName: (m.authorDisplayName?.trim() || m.userId).replace(/\s+/g, " "),
       content,
       repliedToId: m.repliedToId,
+      // Issue #232: the reply edge alone says a message answered SOMETHING; the mention targets
+      // say who it was for. Both are needed before the classifier can stop guessing.
+      ...(m.mentionedUsers?.length ? { mentions: m.mentionedUsers } : {}),
       kind: "user",
       forwardedSnapshots: m.forwardedSnapshots,
     });
@@ -7130,6 +7238,7 @@ export class Concierge {
     messageText: string,
     excludeMessageId?: string,
     onWatermark?: (watermark: { channelId: string; sessionId: string; lastMessageId: string }) => void,
+    onWindow?: (entries: readonly ChannelEntry[]) => void,
   ): Promise<string> {
     // Three blocks: (1) this channel's unseen window, (2) the awareness footer naming the OTHER
     // channels, and (3) the cross-channel block pushing their actual relevant lines (#74). The
@@ -7137,7 +7246,7 @@ export class Concierge {
     // the other channels when someone asks here (server memory, v4.1). The cross-channel block is
     // awaited because relevance ranking primes the semantic index first (#73).
     return (
-      this.sharedTranscriptBlock(channelId, excludeMessageId, onWatermark) +
+      this.sharedTranscriptBlock(channelId, excludeMessageId, onWatermark, onWindow) +
       this.awarenessFooter(channelId) +
       (await this.crossChannelContextPrefix(channelId, messageText))
     );
@@ -7234,6 +7343,7 @@ export class Concierge {
     channelId: string,
     excludeMessageId?: string,
     onWatermark?: (watermark: { channelId: string; sessionId: string; lastMessageId: string }) => void,
+    onWindow?: (entries: readonly ChannelEntry[]) => void,
   ): string {
     if (!this.channelStore) return "";
     const sessionId = this.pool.sessionIdFor(channelId);
@@ -7252,6 +7362,10 @@ export class Concierge {
       selected.unshift(unseen[i]!);
       usedChars += lineLen;
     }
+    // These are the OTHER people's lines this turn is about to answer alongside the live message —
+    // the multi-author burst issue #235 was mis-anchoring. Reported here, at the one place that
+    // knows exactly which entries made it into the prompt under the budget.
+    onWindow?.(selected);
     const roster = this.rosterLine(selected, sc.roster_max);
     const lines = selected.map(sharedTranscriptLine).join("\n");
     // The measurement before anyone raises the budget (§8: stats() plumbing deferred).
