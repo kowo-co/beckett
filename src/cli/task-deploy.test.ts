@@ -257,6 +257,40 @@ test("deployRun: creates the Run via the store and pings the bus exactly once", 
   ]);
 });
 
+// The ordering `beckett task start` depends on: the bus ping ADMITS the run, and the supervisor's
+// first event resolves its destination through the task→run link. A link written after the ping
+// loses that race and routes the deploy receipt to the wrong channel.
+test("deployRun: preNotify runs after the store write and BEFORE the bus ping", async () => {
+  const deps = fakeDeps();
+  const order: string[] = [];
+  const notifyBus = deps.notifyBus;
+  await deployRun(["--prompt", "add oauth middleware", "--task", "12.1"], {
+    ...deps,
+    async notifyBus(cmd, args) {
+      order.push("ping");
+      await notifyBus(cmd, args);
+    },
+    async preNotify(run) {
+      order.push(`link:${run.id}`);
+      expect(deps.created).toHaveLength(1); // the row is already durable
+    },
+  });
+  expect(order).toEqual(["link:run-20260810-add-oauth-middleware", "ping"]);
+});
+
+test("deployRun: a preNotify failure stops the deploy before anything is admitted", async () => {
+  const deps = fakeDeps();
+  await expect(
+    deployRun(["--prompt", "add oauth middleware", "--task", "12.1"], {
+      ...deps,
+      preNotify: async () => {
+        throw new Error("branch #12.1 is already linked to another run");
+      },
+    }),
+  ).rejects.toThrow(/already linked/);
+  expect(deps.busPings).toEqual([]);
+});
+
 test("deployRun: a validation failure never reaches the store or the bus", async () => {
   const deps = fakeDeps();
   await expect(deployRun([], deps)).rejects.toThrow(TaskDeployUsageError);

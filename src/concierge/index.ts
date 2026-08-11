@@ -3311,11 +3311,21 @@ export class Concierge {
   /**
    * Register one more control-bus capability after construction (v7). The daemon builds the
    * {@link RunSupervisor} AFTER the concierge (it needs the progress sink), so the run verbs
-   * — `run.deploy`, `run.steer` — cannot be declared in {@link buildBusCapabilities}. Duplicate
-   * ids/commands still fail loudly in the registry.
+   * — `run.deploy`, `run.steer`, `run.cancel` — cannot be declared in {@link buildBusCapabilities}.
+   * Duplicate ids/commands still fail loudly in the registry.
    */
   registerBusCapability(capability: Capability): void {
     this.busRegistry.register(capability);
+  }
+
+  /**
+   * Ground a freshly-deployed run in the workspace thread it was deployed FROM (the `run.deploy`
+   * handler calls this with the channel id riding the ping). The registry owns the "is this
+   * channel a workspace" test, so a run deployed from a plain channel is a silent no-op. This is
+   * what makes an unmentioned "how's it going?" in a thread able to name the journal to read.
+   */
+  bindRunToWorkspace(channelId: string, runId: string): void {
+    this.workspaces.bindRun(channelId, runId);
   }
 
   /** Wire the hand-opened-PR registrar (#31). See {@link prWatchRegistrar}. */
@@ -5420,6 +5430,11 @@ export class Concierge {
     for (const event of batch) {
       const taskRef = taskRefOfBranch(event.run.taskRef ?? undefined);
       if (taskRef) cardTasks.add(Number(taskRef));
+      // Thread-grounding safety net. `run.deploy` binds a run to the workspace it was deployed
+      // from, but that ping is best-effort — a run filed while the daemon was down is admitted by
+      // the boot scan instead, with nobody having bound it. Re-asserting here is free: bindRun is
+      // idempotent and a no-op for a channel that is not a registered workspace.
+      if (event.run.channelId) this.workspaces.bindRun(event.run.channelId, event.run.id);
     }
     for (const taskNumber of cardTasks) void this.taskCards.refresh(taskNumber);
     // Frame every worth-surfacing event, then fold the batch into ONE system-session turn PER
@@ -7129,7 +7144,16 @@ export class Concierge {
     return `Merged branch #${found.branch.ref}.`;
   }
 
-  /** Cancel marks the branch cancelled in the local registry. */
+  /**
+   * Cancel STOPS the work, it does not merely relabel it: the run's live worker is aborted and
+   * reaped by the supervisor (`run.cancel`), then the branch is marked cancelled. Doing only the
+   * second half is the bug this exists to prevent — a worker that keeps burning tokens to
+   * completion, publishes, and opens a PR for work the owner explicitly killed.
+   *
+   * The bus call comes FIRST and its failure is reported, because "Cancelled" is a promise about
+   * the worker. The registry mark still happens either way: a branch whose run is already gone
+   * (or which was never started) is cancelled locally with nothing to stop.
+   */
   private async cancelFromComponent(ctx: ComponentActionContext): Promise<string> {
     if (ctx.access !== "owner" && ctx.access !== "maintainer") {
       return "Only the owner or a maintainer may cancel a branch.";
@@ -7137,13 +7161,26 @@ export class Concierge {
     const found = this.tasks.getBranch(ctx.target);
     if (!found) return `No branch #${ctx.target}.`;
     if (found.branch.status === "cancelled") return `Branch #${ctx.target} is already cancelled.`;
-    // The RUN itself is not cancelled here: a live worker owns a worktree and a harness process,
-    // and only the supervisor can stop one safely. This marks the branch so the card and the board
-    // stop advertising it as active; `beckett task steer` remains the way to reach the worker.
+    let stopFailed: string | null = null;
+    const runId = found.branch.run?.runId;
+    if (runId) {
+      // Straight through the concierge's OWN bus surface — the same `run.cancel` handler
+      // `beckett task cancel` reaches — so there is exactly one path to the supervisor's lever.
+      const result = await this.onBusRequest({
+        cmd: "run.cancel",
+        args: { runId, reason: `cancelled from the task card by ${ctx.interaction.userId}` },
+      });
+      if (!result.ok) {
+        stopFailed = result.error ?? "the run engine refused the cancel";
+        this.log.warn("run cancel failed from component", { branch: found.branch.ref, run: runId, error: stopFailed });
+      }
+    }
     await this.tasks.setBranchStatus(found.branch.ref, "cancelled");
     this.log.info("branch cancelled by component", { branch: found.branch.ref, byUserId: ctx.interaction.userId });
     void this.taskCards.refresh(found.task.number);
-    return `Cancelled branch #${found.branch.ref}.`;
+    return stopFailed
+      ? `Marked branch #${found.branch.ref} cancelled, but could not stop its run (${stopFailed}) — check the daemon.`
+      : `Cancelled branch #${found.branch.ref}.`;
   }
 
   /**
@@ -7665,7 +7702,7 @@ server with people you're comfortable with. lowercase, fast, a lil cocky but you
 ## still you
 
 the slang is the surface. underneath you're sharp and you actually ship. when there's real work you
-file the ticket and let it cook, same as always. don't let the vibe make you sloppy or vague. be the
+deploy the run and let it cook, same as always. don't let the vibe make you sloppy or vague. be the
 guy who talks like this AND gets it done.`;
 
 /** Who is speaking, resolved for the turn stamp (OPS-42). */
@@ -8032,7 +8069,7 @@ export function addresseeFrameLine(addressee: TriageVerdict["addressee"]): strin
 
 /**
  * The consent follow-up frame (§4.5): a new message arrived in a channel with a live offer. The
- * model judges whether it accepts (ack + file the ticket), declines/unrelated (`pass`), or is a
+ * model judges whether it accepts (ack + deploy the run), declines/unrelated (`pass`), or is a
  * fresh ambient candidate on its own.
  */
 function frameAmbientConsent(offerText: string, userFrame: string, elapsedSecs: number): string {
@@ -8040,7 +8077,7 @@ function frameAmbientConsent(offerText: string, userFrame: string, elapsedSecs: 
     `SYSTEM (ambient follow-up): you offered in this channel ${elapsedSecs}s ago:\n` +
     `  "${offerText}"\n` +
     `${userFrame}\n` +
-    `If this accepts your offer: ack via \`beckett discord reply\`, then file the ticket exactly as\n` +
+    `If this accepts your offer: ack via \`beckett discord reply\`, then deploy the run exactly as\n` +
     `you would for a direct request (--channel stamped). If it declines: acknowledge in ONE gracious\n` +
     `line — don't go silent on a person talking to you. If it's unrelated chatter or banter: you're\n` +
     `still in the room — put ONE short line in the delivery message if you have a beat, or use\n` +
@@ -8050,25 +8087,18 @@ function frameAmbientConsent(offerText: string, userFrame: string, elapsedSecs: 
 
 /**
  * The silence-consent frame (§4.5, `auto` mode only): an offer aged out with no reply in a
- * proceed-on-silence channel. Post a one-line heads-up and file the ticket, or use `pass` if stale.
+ * proceed-on-silence channel. Post a one-line heads-up and deploy the run, or use `pass` if stale.
  */
 function frameAmbientTimeout(channelId: string, offerText: string, ttlSecs: number): string {
   const mins = Math.max(1, Math.round(ttlSecs / 60));
   return (
     `SYSTEM (ambient timeout): your offer "${offerText}" in [channel:${channelId}] got no reply in ${mins} minutes.\n` +
     `This channel is set to proceed-on-silence. If the work is still sensible, post a one-line\n` +
-    `heads-up ("no objection, so I'm running with the CSV export thing") and file the ticket.\n` +
+    `heads-up ("no objection, so I'm running with the CSV export thing") and deploy the run.\n` +
     `If the moment has passed, use delivery decision "pass".`
   );
 }
 
-/** The marker the dispatcher prepends to its own ticket comments (mirrors `BECKETT_COMMENT_MARKER`). */
-const DISPATCHER_COMMENT_PREFIX = "<!-- beckett";
-
-/**
- * A stable idempotency key for a surfacing milestone event, or null for events that never surface
- * (created, `→ in_review`/`→ in_progress` transitions the comment feed already covers) and so need
- * no dedupe. Keyed on the ticket id + the SEMANTIC milestone, NOT on framed prose (which the model
 /**
  * Fold several already-framed update turns into ONE session turn (issue #25). Each frame carries
  * its own run/channel/reply instructions; the wrapper tells the model to handle them together
@@ -8135,25 +8165,15 @@ export function artifactLinkFrom(body: string): string | null {
 }
 
 /**
- * True for the dispatcher's "Implementation complete → in_review" advance — the intermediate step we
- * deliberately don't ping the person about (they already have an ack; `done` pings next). Keyed on
- * the `→ in_review` transition ARROW so it never matches the rework-cap human-handoff ("leaving this
- * in in_review for a human", no arrow) or the "→ done"/"→ in_progress" comments, which must surface.
- */
-/**
- * Routine dispatcher narration that never needs a person's attention (issue #25): a DAG node
- * starting because its blockers cleared, and bounded retry heartbeats. The interesting outcomes
- * (verdicts, parks, errors, stalls, done) still surface.
+ * Routine machine narration that never needs a person's attention (issue #25): a node starting
+ * because its blockers cleared, and bounded retry heartbeats. The interesting outcomes (verdicts,
+ * parks, errors, stalls, done) still surface.
  */
 export function isRoutineNoiseComment(body: string): boolean {
   return (
     /all blockers done.*starting now/i.test(body) ||
     /retrying\s*(?:in \d+\w*\s*)?\(attempt \d+\/\d+\)/i.test(body)
   );
-}
-
-function isReviewAdvanceComment(body: string): boolean {
-  return /→\s*\*{0,2}in_review/i.test(body);
 }
 
 // Run standalone: `bun src/concierge/index.ts` brings the Concierge online.

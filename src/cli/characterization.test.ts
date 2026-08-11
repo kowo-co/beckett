@@ -307,6 +307,9 @@ const CASES: Case[] = [
   { name: "task: deploy with a broken cast is refused", argv: ["task", "deploy", "--prompt", "x", "--cast", "{"] },
   { name: "task: steer without a note prints usage", argv: ["task", "steer", "ghost-run"] },
   { name: "task: steer of an unknown run fails", argv: ["task", "steer", "ghost-run", "do the thing"] },
+  { name: "task: cancel without a reference prints usage", argv: ["task", "cancel"] },
+  { name: "task: cancel of an unknown run fails", argv: ["task", "cancel", "ghost-run"] },
+  { name: "task: cancel of an unknown branch fails", argv: ["task", "cancel", "#9.1"] },
 
   // ── preset ──────────────────────────────────────────────────────────────────────────────
   { name: "preset: ls seeds and lists the presets file", argv: ["preset", "ls"] },

@@ -139,6 +139,43 @@ function mergeProactivityOverride(rawConfig: unknown, overridePath: string): unk
   return root;
 }
 
+/**
+ * Top-level sections that USED to be schema keys and no longer are. The composed root schema is
+ * `.strict()`, so a live `~/.beckett/config.toml` that still carries one would make the daemon
+ * refuse to start on "unrecognized key" — a deploy-time outage on a box whose config file the
+ * deploy never touches. Stripping them here (with one loud line per key) turns a hard boot failure
+ * into a visible deprecation the operator can clean up on their own schedule.
+ *
+ * This is the same one-release shim shape `foldLegacyPlaneSection` occupied before the ticket
+ * rip-out retired it, and it should retire the same way: once prod's config.toml no longer has
+ * these sections, delete the entry.
+ *
+ *   - `plane`   — the first tracker section, long since folded into `[tracker]` (itself now gone).
+ *   - `tracker` — the out-of-process ticket queue. v7 has no board; the run ledger is the queue.
+ *   - `progress`— `cards_as_code`, the ticket dispatcher's card switch. Runs use `[runs] cards`.
+ */
+const RETIRED_CONFIG_SECTIONS = ["plane", "tracker", "progress"] as const;
+
+/**
+ * Drop retired top-level sections from a parsed config before the strict schema sees them.
+ * Returns the raw object untouched when it carries none (the steady state), so the common path
+ * pays nothing and logs nothing.
+ */
+export function dropRetiredSections(raw: unknown, warn: (message: string) => void): unknown {
+  if (!isRecord(raw)) return raw;
+  const present = RETIRED_CONFIG_SECTIONS.filter((key) => Object.prototype.hasOwnProperty.call(raw, key));
+  if (present.length === 0) return raw;
+  const root = cloneRecord(raw);
+  for (const key of present) {
+    delete root[key];
+    warn(
+      `beckett: config section [${key}] was retired with the v7 run engine and is being IGNORED. ` +
+        `Delete it from your config.toml — this compatibility strip goes away in a future release.`,
+    );
+  }
+  return root;
+}
+
 export interface LoadConfigOptions {
   /** Override env source (for tests). Defaults to process.env. */
   env?: PathEnv;
@@ -176,6 +213,10 @@ export function loadConfig(opts: LoadConfigOptions = {}): Config {
 
   // 3. runtime proactivity overrides (partial [proactivity]) → raw object.
   raw = mergeProactivityOverride(raw, opts.proactivityOverrideFile ?? `${beckettDir}/proactivity.json`);
+
+  // 3b. retired v6 sections ([tracker], [progress], [plane]) → stripped with a deprecation line,
+  //     so a prod config.toml written before the run engine still boots this daemon.
+  raw = dropRetiredSections(raw, (message) => console.warn(message));
 
   // 4. validate + apply defaults (loud refuse-to-start on invalid).
   const result = ConfigSchema.safeParse(raw);

@@ -35,7 +35,7 @@ import { readJournal, DEFAULT_TAIL_LINES } from "../progress/journal.ts";
 import type { Casting } from "../run/cast.ts";
 import { projectSlug } from "../run/cast.ts";
 import { parseSince, readSpendLedger, summarizeSpend } from "../spend.ts";
-import { TaskStore, displayTaskName, normalizeBranchRef, normalizeTaskNumber } from "../task/store.ts";
+import { TaskStore, displayTaskName, normalizeBranchRef, normalizeTaskNumber, type TaskBranch } from "../task/store.ts";
 import { createMemory } from "../memory/index.ts";
 import { linkLoopTask } from "../memory/loops.ts";
 import { AgentStore } from "../agent/store.ts";
@@ -910,6 +910,13 @@ export async function runTask(argv: string[]): Promise<void> {
       body || found.branch.title,
       ...(criteria.length ? ["", "Acceptance criteria:", ...criteria.map((c) => `- ${c}`)] : []),
     ].join("\n");
+    // Bind the branch to the run now executing it, so `task list`, the PR router, and the
+    // concierge's `findByRun` all resolve the way they used to resolve a ticket link. This runs
+    // as `preNotify` — BEFORE the `run.deploy` bus ping — because the ping wakes the supervisor,
+    // whose very first event (the deploy receipt card) resolves its channel through this link. A
+    // link written after the ping loses that race and routes the card to the run's stamped
+    // channel instead of the task's own thread.
+    const linked: { branch?: TaskBranch } = {};
     const deployed = await deployRun(
       [
         "--title", found.branch.title,
@@ -920,13 +927,19 @@ export async function runTask(argv: string[]): Promise<void> {
         ...(Object.keys(casting).length > 0 ? ["--cast", JSON.stringify(casting)] : []),
         ...(flags.ultracode ? ["--ultracode"] : []),
       ],
-      { store: runStore(), notifyBus },
+      {
+        store: runStore(),
+        notifyBus,
+        preNotify: async (run) => {
+          let branch = await store.linkRun(branchRef, { runId: run.id }, "queued", project);
+          if (pings.length > 0) branch = await store.setPings(branch.ref, pings);
+          linked.branch = branch;
+        },
+      },
     );
     if (!("runId" in deployed)) fail("beckett task start: deploy returned no run id");
-    // Bind the branch to the run now executing it, so `task list`, the PR router, and the
-    // concierge's `findByRun` all resolve the way they used to resolve a ticket link.
-    const started = await store.linkRun(branchRef, { runId: deployed.runId }, "queued", project);
-    if (pings.length > 0) await store.setPings(started.ref, pings);
+    const started = linked.branch;
+    if (!started) fail("beckett task start: the branch was not linked to the deployed run");
 
     // `task.created` is intentionally idempotent: repeat it at first start so a task allocated
     // while the daemon was down still gets its Discord workspace once execution begins.
@@ -1002,6 +1015,46 @@ export async function runTask(argv: string[]): Promise<void> {
       );
     }
     await bus("run.steer", { runId: run.id, note });
+  }
+
+  // v7 cancellation: the ONE lever that stops work already running. Like `steer` it goes through
+  // `bus()` rather than `notifyBus()` on purpose — a cancel the daemon never received must EXIT
+  // NON-ZERO, because the caller (a human, or the concierge answering a Cancel click) tells someone
+  // "stopped it" off the back of this call, and a silently-swallowed cancel means a worker keeps
+  // burning tokens on work the owner explicitly killed. `RunSupervisor.cancel()` aborts + reaps the
+  // live worker and patches the run to `cancelled`; a branch ref also marks its task branch.
+  if (sub === "cancel") {
+    const ref = _[0];
+    if (!ref) fail('usage: beckett task cancel <run-id|slug|#N.x> [--reason <text>]');
+    const reason = typeof flags.reason === "string" && flags.reason.trim() ? flags.reason.trim() : "cancelled";
+    // A branch ref (`#12.1`) resolves through the task registry to the run executing it, so the
+    // public handle a person actually types works here exactly like it does for `task start`.
+    let runId: string;
+    let branchRef: string | null = null;
+    if (/^#?\d+\.\d+/.test(ref)) {
+      const normalized = normalizeBranchRef(ref);
+      const found = store.getBranch(normalized);
+      if (!found) fail(`no such branch: #${normalized}`);
+      if (!found.branch.run) fail(`branch #${normalized} has no run to cancel`);
+      runId = found.branch.run.runId;
+      branchRef = found.branch.ref;
+    } else {
+      const run = ref.startsWith("run-") ? runStore().get(ref) : runStore().bySlug(ref);
+      if (!run) fail(`no such run: ${ref}`);
+      runId = run.id;
+      branchRef = run.taskRef && run.taskRef.includes(".") ? normalizeBranchRef(run.taskRef) : null;
+    }
+    await bus("run.cancel", { runId, reason });
+    // The registry follows the engine: the daemon's own state-change sync does this too, but a
+    // cancel issued while the daemon is mid-restart must still leave the board honest.
+    if (branchRef) {
+      try {
+        await store.setBranchStatus(branchRef, "cancelled");
+      } catch {
+        /* the run is cancelled either way; a stale branch ref must not fail the verb */
+      }
+    }
+    out({ runId, cancelled: true, ...(branchRef ? { branchRef: `#${branchRef}` } : {}) });
   }
 
   if (sub === "show") {

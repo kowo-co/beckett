@@ -875,6 +875,135 @@ describe("ultracode", () => {
   });
 });
 
+// The review GATE (`cast.ts#HarnessSpec.reviewTier`), ported from the dispatcher. `self` is what
+// `--preset taste-lane` and the cheap lanes are FOR: one pass, no second adversarial seat.
+describe("review tier", () => {
+  test("an explicit self tier publishes straight off implement — no reviewer is ever spawned", async () => {
+    const { supervisor, store, publishCalls } = newSupervisor({ publish: true });
+    const run = seedRun(
+      store,
+      makeRun({ cast: { implement: { harness: "claude", model: "claude-opus-5", effort: "high", reviewTier: "self" } } }),
+    );
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    await settle();
+    expect(spawnCalls.map((c) => c.stage)).toEqual(["implement"]);
+    expect(store.get(run.id)!.state).toBe("done");
+    expect(publishCalls).toHaveLength(1);
+  });
+
+  test("a low/medium implement effort derives self; high and an un-cast run stay fresh", async () => {
+    for (const [effort, expected] of [["low", ["implement"]], ["medium", ["implement"]], ["high", ["implement", "review"]]] as const) {
+      spawnCalls = [];
+      created = [];
+      const { supervisor, store } = newSupervisor({ publish: true });
+      const run = seedRun(store, makeRun({ slug: `tier-${effort}`, cast: { implement: { harness: "pi", effort } } }));
+      await supervisor.admit(run.id);
+      await tick();
+      created[0]!.finish("success", "implemented", doneSignal("complete"));
+      await settle();
+      expect(spawnCalls.map((c) => c.stage)).toEqual([...expected]);
+    }
+
+    spawnCalls = [];
+    created = [];
+    const { supervisor, store } = newSupervisor({ publish: true });
+    const plain = seedRun(store, makeRun({ slug: "tier-none" }));
+    await supervisor.admit(plain.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    await settle();
+    expect(spawnCalls.map((c) => c.stage)).toEqual(["implement", "review"]);
+  });
+
+  test("the spend ledger records the tier the run ACTUALLY ran under, not a constant", async () => {
+    const dir = scratch();
+    const ledger = join(dir, "spend.jsonl");
+    const { supervisor, store } = newSupervisor({ publish: true, spendLedgerPath: ledger });
+    const run = seedRun(store, makeRun({ cast: { implement: { harness: "pi", effort: "low" } } }));
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.telemetry = () => ({
+      turns: 1,
+      toolCalls: 2,
+      tokens: { input: 10, output: 5, cacheRead: 0, cacheCreate: 0 },
+      usdEstimate: 0.01,
+    });
+    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    await settle();
+    const rows = readFileSync(ledger, "utf8").trim().split("\n").map((l) => JSON.parse(l) as SpendRecord);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.reviewTier).toBe("self");
+  });
+});
+
+// The ONE lever that stops work already running. Under the ticket system this was the poller's
+// `cancelled` event reaching the dispatcher; without it a cancelled run burns to completion.
+describe("cancel", () => {
+  test("cancelling a live run aborts + reaps its worker and marks it cancelled", async () => {
+    const { supervisor, store } = newSupervisor({ publish: true });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    const worker = created[0]!;
+    let aborted: string | undefined;
+    let reaped = 0;
+    worker.abort = async (reason?: string) => void (aborted = reason);
+    worker.reap = async () => void (reaped += 1);
+
+    expect(await supervisor.cancel(run.id, "owner clicked cancel")).toBe("cancelled");
+    expect(aborted).toBe("owner clicked cancel");
+    expect(reaped).toBe(1);
+    expect(store.get(run.id)!.state).toBe("cancelled");
+    expect(store.get(run.id)!.error).toBe("owner clicked cancel");
+
+    // And the run is genuinely off the engine: a late worker finish must not resurrect it into
+    // review, publish it, or spawn anything else.
+    worker.finish("success", "implemented", doneSignal("complete"));
+    await settle();
+    expect(spawnCalls).toHaveLength(1);
+    expect(store.get(run.id)!.state).toBe("cancelled");
+  });
+
+  test("a queued (never-staffed) run cancels cleanly, and a finished one is refused", async () => {
+    const { supervisor, store } = newSupervisor();
+    const queued = seedRun(store, makeRun({ slug: "queued-one" }));
+    expect(await supervisor.cancel(queued.id)).toBe("cancelled");
+    expect(store.get(queued.id)!.state).toBe("cancelled");
+    expect(spawnCalls).toHaveLength(0);
+
+    expect(await supervisor.cancel("run-20260810-nope")).toBe("unknown");
+    const finished = seedRun(store, makeRun({ slug: "shipped", state: "done" }));
+    expect(await supervisor.cancel(finished.id)).toBe("already-terminal");
+    expect(store.get(finished.id)!.state).toBe("done");
+  });
+
+  test("a parked run IS cancellable — parking is held-for-a-human, not finished", async () => {
+    const { supervisor, store } = newSupervisor();
+    const parked = seedRun(store, makeRun({ slug: "held", state: "parked" }));
+    expect(await supervisor.cancel(parked.id)).toBe("cancelled");
+    expect(store.get(parked.id)!.state).toBe("cancelled");
+  });
+
+  test("cancelling frees the live-run slot so a queued run is pumped in", async () => {
+    const { supervisor, store } = newSupervisor({
+      config: cfg({ runs: { max_live: 1, review_cycles_max: 2, budget_usd_per_run: 0 } }),
+    });
+    const first = seedRun(store, makeRun({ slug: "first" }));
+    const second = seedRun(store, makeRun({ slug: "second" }));
+    await supervisor.admit(first.id);
+    await tick();
+    await supervisor.admit(second.id);
+    await settle();
+    expect(spawnCalls).toHaveLength(1); // second is queued behind the cap
+
+    await supervisor.cancel(first.id);
+    await settle();
+    expect(spawnCalls.map((c) => c.itemId)).toEqual([first.id, second.id]);
+  });
+});
+
 describe("steering", () => {
   test("a live worker is nudged; an idle run buffers for its next brief", async () => {
     const { supervisor, store } = newSupervisor();

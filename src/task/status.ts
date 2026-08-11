@@ -103,9 +103,14 @@ export class BranchStatusService {
     const found = this.opts.store.getBranch(ref);
     if (!found) throw new Error(`no such task branch: #${ref.replace(/^#/, "")}`);
     const { task, branch } = found;
+    // The git ref is only ever the one actually recorded. A run executes on its OWN branch
+    // (`beckett/run-<slug>`, stamped here by the daemon's run-engine bridge via `setGit`), so
+    // deriving `beckett/task-N-x` for a run-linked branch would name a ref that does not exist —
+    // worse than showing none. The derivation survives only for a branch with no run at all,
+    // where it is still the name a hand-cut branch would carry.
     const gitRef = branch.git?.gitRef ?? (branch.run
-      ? gitBranchForWork({ identifier: branch.run.runId, branchRef: branch.ref })
-      : undefined);
+      ? undefined
+      : gitBranchForWork({ identifier: branch.ref, branchRef: branch.ref }));
 
     if (branch.pullRequest) {
       if (!this.opts.github) throw new Error(`GitHub status is unavailable for published branch #${branch.ref}`);

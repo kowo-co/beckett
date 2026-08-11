@@ -57,6 +57,7 @@ import { LiveAgentRegistry } from "../agent/registry.ts";
 import { createAgentRunner } from "../agent/invoke.ts";
 import { TaskStore } from "../task/store.ts";
 import { createBranchStatusService } from "../task/status.ts";
+import { createRunTaskSync } from "../task/run-sync.ts";
 import { createAgentMailApi, defaultMailStateFile, safeMailError } from "../mail/index.ts";
 import { createAgentMailPoller, defaultMailListenerStateFile, type AgentMailPoller } from "../mail/listener.ts";
 import { ExtensionRegistry, type ExtensionContext } from "../ext/index.ts";
@@ -272,6 +273,16 @@ async function boot(): Promise<BootedSystem> {
       })
     : null;
 
+  // The task registry ↔ run engine bridge (`../task/run-sync.ts`): what keeps `beckett task list`,
+  // the #104 task card, the branch card and the Merge button moving as a run works. Without it a
+  // started branch sits at "ready" forever — see that module's header for the whole rationale.
+  const taskSync = createRunTaskSync({
+    tasks,
+    projectSlugOf: runProjectSlug,
+    githubOwner: identity.github.owner,
+    logger: logger.child("task-sync"),
+  });
+
   // The RUN engine — `beckett task deploy` files a Run, and this drives it implement → review →
   // publish → done. It is the daemon's ONLY staffing loop.
   const runSupervisor = createRunSupervisor({
@@ -299,10 +310,19 @@ async function boot(): Promise<BootedSystem> {
     // The closed loop: every run transition reaches the concierge, which decides whether it is
     // worth telling the person who asked. Fire-and-forget by contract — the supervisor logs and
     // continues if this throws, so a Discord hiccup can never wedge the engine.
-    onStateChange: (event) => concierge.notify(event),
+    onStateChange: (event) => {
+      // The user-facing board first (fire-and-forget, same contract), then the voice.
+      void taskSync.onStateChange(event);
+      concierge.notify(event);
+    },
     onPrOpened: ({ prUrl, run }) => {
       const parsed = parsePrUrl(prUrl);
-      if (!parsed || !prPoller) return;
+      if (!parsed) return;
+      // The task registry's PR link: what puts the artifact on the card and arms the Merge
+      // button, what `concierge.stampPrState` updates on merge/close, and what the boot PR
+      // re-watch loop below scans for. Recorded whether or not a poller exists.
+      void taskSync.onPrOpened(run, { repo: parsed.repo, number: parsed.number, url: prUrl });
+      if (!prPoller) return;
       prPoller.watch({
         repo: parsed.repo,
         number: parsed.number,
@@ -313,14 +333,16 @@ async function boot(): Promise<BootedSystem> {
         ...(run.channelId ? { channel: run.channelId } : {}),
       });
     },
+    onPublished: ({ url, kind, run }) => void taskSync.onPublished(run, { url, kind }),
     logger: logger.child("run"),
   });
   // `beckett task deploy` pings `run.deploy` on the control bus; `beckett task steer` pings
-  // `run.steer`. Registered post-construction because the supervisor needs the concierge's
-  // progress sink, so it cannot exist when the concierge builds its own bus surface.
+  // `run.steer`; `beckett task cancel` (and the task card's Cancel button) pings `run.cancel`.
+  // Registered post-construction because the supervisor needs the concierge's progress sink, so it
+  // cannot exist when the concierge builds its own bus surface.
   concierge.registerBusCapability({
     id: "runs",
-    summary: "v7 runs: deploy admission and mid-flight steering",
+    summary: "v7 runs: deploy admission, mid-flight steering, and cancellation",
     actionClass: ActionClass.FREE,
     cliVerbs: [],
     busCommands: [
@@ -330,8 +352,26 @@ async function boot(): Promise<BootedSystem> {
         handle: async (req) => {
           const runId = typeof req.args.runId === "string" ? req.args.runId.trim() : "";
           if (!runId) return { ok: false, error: "run.deploy needs a runId" };
+          // THREAD GROUNDING: work deployed from inside a workspace thread binds to it here, at
+          // the one moment both ids are in hand (`task deploy` stamps the channel onto the ping).
+          // Without this a thread's runIds stay empty, so an unmentioned "how's it going?" has no
+          // run to name and updates fall back to the run's stamped channel.
+          const channelId = typeof req.args.channelId === "string" ? req.args.channelId.trim() : "";
+          if (channelId) concierge.bindRunToWorkspace(channelId, runId);
           await runSupervisor.admit(runId);
           return { ok: true, data: { runId } };
+        },
+      },
+      {
+        name: "run.cancel",
+        summary: "stop a live run: abort its worker and mark it cancelled",
+        handle: async (req) => {
+          const runId = typeof req.args.runId === "string" ? req.args.runId.trim() : "";
+          if (!runId) return { ok: false, error: "run.cancel needs a runId" };
+          const reason = typeof req.args.reason === "string" && req.args.reason.trim() ? req.args.reason.trim() : undefined;
+          const outcome = await runSupervisor.cancel(runId, reason);
+          if (outcome === "unknown") return { ok: false, error: `no such run: ${runId}` };
+          return { ok: true, data: { runId, outcome } };
         },
       },
       {

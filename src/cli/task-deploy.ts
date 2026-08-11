@@ -49,6 +49,15 @@ export interface TaskDeployDeps {
   store: RunStoreLike;
   /** Same bus-notify helper `task start` uses (`core.ts`'s `notifyBus`), injected for testing. */
   notifyBus: (cmd: string, args: Record<string, unknown>) => Promise<void>;
+  /**
+   * Ledger-adjacent bookkeeping that must be DURABLE BEFORE the bus ping, run between
+   * `store.create()` and `notifyBus`. `task start` uses it to link the task branch to the run:
+   * the ping wakes the supervisor, which can emit its first event (and a card) immediately, and
+   * an event that lands before the link exists routes to the run's stamped channel instead of the
+   * task's own thread. Anything here is on the deploy's critical path, so keep it to one write.
+   * A throw propagates — the run row already exists, but nothing has been admitted.
+   */
+  preNotify?: (run: Run) => Promise<void>;
   /** Injectable clock so tests get deterministic ids/timestamps. */
   now?: () => Date;
 }
@@ -235,6 +244,9 @@ export async function deployRun(argv: string[], deps: TaskDeployDeps): Promise<R
   const now = deps.now ? deps.now() : new Date();
   if (input.dry) return previewRun(input, now);
   const created = await deps.store.create(createInputOf(input));
+  // Create → link → ping, in that order. The ping is what admits the run, so anything the first
+  // event needs to resolve correctly has to be on disk before it goes out.
+  if (deps.preNotify) await deps.preNotify(created);
   await deps.notifyBus("run.deploy", { runId: created.id, channelId: created.channelId });
   return outputOf(created);
 }

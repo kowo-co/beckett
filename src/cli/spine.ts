@@ -121,7 +121,7 @@ export const SPINE: SpineEntry[] = [
   },
   { id: "eval", cliHelp: "eval <author/model> [--short|--full]", verbs: [{ name: "eval", load: core((m) => m.runEval) }] },
   { id: "site", cliHelp: "site deploy", verbs: [{ name: "site", load: core((m) => m.runSite) }] },
-  { id: "task", cliHelp: "task create|branch|start|deploy|ask|steer|show|list|trace", verbs: [{ name: "task", load: core((m) => m.runTask) }] },
+  { id: "task", cliHelp: "task create|branch|start|deploy|ask|steer|cancel|show|list|trace", verbs: [{ name: "task", load: core((m) => m.runTask) }] },
   { id: "preset", cliHelp: "preset ls|show", verbs: [{ name: "preset", load: core((m) => m.runPreset) }] },
   {
     // The end-of-ticket motion as ONE verb: PR → CI → merge → the guarded redeploy. Sits next to

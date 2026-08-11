@@ -475,8 +475,11 @@ export class TaskStore {
 
   /**
    * Bind a branch to the run executing it, and project that run's state onto the branch status.
-   * Re-linking the SAME run is idempotent (the supervisor calls this on every state change); a
-   * DIFFERENT run throws, because a branch with two runs is two workers on one ref.
+   * Re-linking the SAME run is idempotent, which is load-bearing: `beckett task start` calls it
+   * once at deploy time, and the daemon's run-engine bridge (`shell/main.ts`, the supervisor's
+   * `onStateChange` hook) calls it again on EVERY transition — that repeat is what keeps the
+   * board, the task card, and the branch card moving as the run works. A DIFFERENT run throws,
+   * because a branch with two runs is two workers on one ref.
    */
   async linkRun(
     branchRef: string,

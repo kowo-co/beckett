@@ -17,8 +17,10 @@
  *    filtered upstream to user-created threads only.
  *  - **Work grounding** is additive within a thread, and never comes from the thread NAME — the
  *    name is attacker-chosen text and binding work by it is a routing hijack (see the note above
- *    {@link StoredWorkspace}). A run deployed FROM inside a workspace binds to it when the Concierge
- *    acks it ({@link WorkspaceRegistry.bindRun}); an explicit `&ref` attaches more later
+ *    {@link StoredWorkspace}). A run deployed FROM inside a workspace binds to it when the daemon
+ *    admits it — `beckett task deploy --channel <threadId>` stamps the channel onto the
+ *    `run.deploy` bus ping, whose handler calls {@link WorkspaceRegistry.bindRun} before the
+ *    supervisor is woken; an explicit `&ref` attaches more later
  *    ({@link WorkspaceRegistry.attachTasks}). Additive is the invariant that matters: attaching #2
  *    must never silently drop #1, because a dropped binding shows up much later as results posting
  *    to the wrong place with no error anywhere.
@@ -290,8 +292,10 @@ export class WorkspaceRegistry {
   }
 
   /**
-   * Ground a deployed run in the workspace it was deployed from. No-op when `channelId` is not a
-   * registered workspace (a run deployed from a plain channel has no workspace to bind to).
+   * Ground a deployed run in the workspace it was deployed from. Called by the `run.deploy` bus
+   * handler (`shell/main.ts`, via `Concierge.bindRunToWorkspace`) with the channel id the CLI
+   * stamped onto the ping. No-op when `channelId` is not a registered workspace (a run deployed
+   * from a plain channel has no workspace to bind to), and idempotent on re-delivery.
    */
   bindRun(channelId: string, runId: string): void {
     const ws = this.byThread.get(channelId);

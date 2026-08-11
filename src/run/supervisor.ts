@@ -8,7 +8,12 @@
  *   3. the staffing watchdog (a live run that has sat workerless past its grace),
  *
  * — and from there it drives implement → review → publish → done, with a bounded rework
- * loop and a park for anything a human has to look at.
+ * loop and a park for anything a human has to look at. `run.cancel` is the one lever that stops a
+ * live run (abort + reap the worker, drop the reservation, state → `cancelled`).
+ *
+ * The review stage is GATED by the run's cast (`reviewTierFor`): `self` (explicit, or derived from
+ * a low/medium implement effort) publishes straight off a passing implement stage; `fresh` (the
+ * default) spawns the separate adversarial reviewer.
  *
  * WHAT IS DELIBERATELY REUSED, NOT REBUILT. Every worker prompt, persona, done-signal parse,
  * and driver launch stays in `src/dispatch/stages.ts` + `src/dispatch/spawn.ts`, untouched.
@@ -342,6 +347,11 @@ export class RunSupervisor {
       const runId = typeof args.runId === "string" ? args.runId : "";
       const note = typeof args.note === "string" ? args.note : "";
       if (runId && note.trim()) await this.steer(runId, note);
+    });
+    this.bus?.on("run.cancel", async (args) => {
+      const runId = typeof args.runId === "string" ? args.runId : "";
+      const reason = typeof args.reason === "string" && args.reason.trim() ? args.reason.trim() : undefined;
+      if (runId) await this.cancel(runId, reason);
     });
     await this.recoverFromCrash();
     await this.replayPublishes();
@@ -793,6 +803,17 @@ export class RunSupervisor {
   ): Promise<void> {
     const run = this.store.get(runId);
     if (!run) return;
+    // A run that is already finished-or-killed must not be advanced by a late worker callback.
+    // {@link cancel} drops the handle, bills the partial spend, and patches `cancelled` BEFORE it
+    // aborts — an abort the driver may answer with its ordinary terminal event, which lands here.
+    // Without this guard a cancelled run would still commit, advance to review, spawn a reviewer,
+    // publish, and open a PR: precisely the work the owner just stopped. Deliberately narrower
+    // than `RUN_TERMINAL`: `parked` is set BY this path, and re-entering a park is not a race.
+    if (run.state === "cancelled" || run.state === "done" || run.state === "failed") {
+      this.logger.info("ignoring a worker finish on a terminal run", { run: runId, stage, state: run.state });
+      this.spendMetaByWorker.delete(handle.id);
+      return;
+    }
     this.trace(
       run,
       stage,
@@ -842,10 +863,31 @@ export class RunSupervisor {
     }
     // Safety net: capture anything the worker left uncommitted so review sees the whole change.
     await this.commitContribution(run, handle);
+    // The review GATE (`../run/cast.ts#HarnessSpec.reviewTier`), ported from the dispatcher: a
+    // `self` run is one pass by design — the implement worker self-verified inline, so it goes
+    // straight to publish and never pays a second adversarial seat.
+    if (this.reviewTierFor(run) === "self") {
+      this.trace(run, "implement:verdict", "passed", "implementation complete → publish (self review tier)");
+      await this.publishRun(run, summary);
+      return;
+    }
     await this.patchRun(run.id, { state: "reviewing" });
     this.trace(run, "implement:verdict", "passed", "implementation complete → review");
     const next = this.store.get(run.id);
     if (next) this.spawnGuarded(next, "review");
+  }
+
+  /**
+   * The review gate for a run. An explicit `reviewTier` on the implement cast wins; otherwise it
+   * derives from the CAST effort: low/medium → `self` (one pass, the worker self-verifies inline),
+   * everything else (high/xhigh/ultracode, or no cast at all) → `fresh` (a separate adversarial
+   * reviewer). Deliberately reads the run's OWN cast rather than the resolved worker spec, so an
+   * un-cast run keeps the safe default of a full fresh review — the dispatcher's rule verbatim.
+   */
+  private reviewTierFor(run: Run): "self" | "fresh" {
+    const impl = run.cast?.implement;
+    if (impl?.reviewTier) return impl.reviewTier;
+    return impl?.effort === "low" || impl?.effort === "medium" ? "self" : "fresh";
   }
 
   private async finishReview(
@@ -1060,6 +1102,78 @@ export class RunSupervisor {
     }
     this.bufferSteer(runId, note);
     return "buffered";
+  }
+
+  // ── cancellation ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * STOP a run. The lever behind the task card's Cancel button (`concierge.cancelFromComponent`)
+   * and `beckett task cancel`; ported from the dispatcher's `onCancelled`, which was the only thing
+   * that could ever stop a live worker.
+   *
+   * Order matters and is the dispatcher's verbatim:
+   *   1. drop the mid-spawn reservation FIRST, so a `doSpawn` racing us discards its own worker at
+   *      its post-spawn reservation check instead of registering one nobody wants;
+   *   2. cancel the durable publish row (a queued retry must not resurrect unwanted work) and the
+   *      queued spawn, and drop buffered steering — cancelled work does not get corrected;
+   *   3. abort + reap the live worker, billing its partial spend as `cancelled`;
+   *   4. only then patch the state, so the `cancelled` event the concierge sees is emitted with
+   *      nothing still running behind it.
+   *
+   * Returns what actually happened so a caller can say so honestly. `parked` runs ARE cancellable
+   * (a park is held-for-a-human, not finished); `done`/`failed`/`cancelled` are not.
+   */
+  async cancel(runId: string, reason = "cancelled"): Promise<"cancelled" | "unknown" | "already-terminal"> {
+    const run = this.store.get(runId);
+    if (!run) {
+      this.logger.warn("run.cancel for an unknown run", { runId });
+      return "unknown";
+    }
+    if (run.state === "done" || run.state === "failed" || run.state === "cancelled") return "already-terminal";
+
+    this.trace(run, "cancel", "cancelled", reason);
+    this.staffing.delete(runId); // mid-spawn reservation → doSpawn discards its worker
+    this.publishOutbox?.cancel(runId);
+    this.dropPending(runId);
+    this.unstaffedSince.delete(runId);
+    this.watchdogRestaffed.delete(runId);
+    this.budgetBlocked.delete(runId);
+    this.restartInterrupted.delete(runId);
+    this.resumables.delete(runId);
+    // Cancelled = the work is not wanted; held steering dies with it (the dispatcher's issue #22
+    // posture, kept verbatim).
+    let persist = this.pendingSteers.delete(runId);
+    persist = this.liveLedger.delete(runId) || persist;
+    if (persist) this.persistRuntimeState();
+
+    const handle = this.workers.get(runId);
+    if (handle) {
+      this.workers.delete(runId);
+      const meta = this.spendMetaByWorker.get(handle.id);
+      this.spendMetaByWorker.delete(handle.id);
+      if (meta) this.recordSpend(run, handle.stage as RunStage, handle, "error", meta, "cancelled");
+      this.logger.warn("run cancelled — aborting worker", { run: runId, workerId: handle.id });
+      try {
+        await handle.abort(reason);
+      } catch (err) {
+        this.logger.warn("worker abort failed during cancel", { run: runId, error: String(err) });
+      }
+      try {
+        await handle.reap();
+      } catch (err) {
+        this.logger.warn("worker reap failed during cancel", { run: runId, error: String(err) });
+      }
+    }
+    await this.patchRun(runId, { state: "cancelled", error: reason });
+    this.pump();
+    return "cancelled";
+  }
+
+  /** Drop a run's queued (over-cap) spawn, if it has one. */
+  private dropPending(runId: string): void {
+    for (let i = this.pending.length - 1; i >= 0; i -= 1) {
+      if (this.pending[i]!.runId === runId) this.pending.splice(i, 1);
+    }
   }
 
   private bufferSteer(runId: string, note: string): void {
@@ -1365,13 +1479,18 @@ export class RunSupervisor {
     }
   }
 
-  /** Persist a stage's telemetry. Keyed by RUN id — `spendForTicket` is generic over id strings. */
+  /**
+   * Persist a stage's telemetry. Keyed by RUN id — `spendForTicket` is generic over id strings.
+   * `forcedOutcome` is the cancel path's override: an aborted worker's partial burn is billed as
+   * `cancelled`, not misreported as a failure it never got to have.
+   */
   private recordSpend(
     run: Run,
     stage: RunStage,
     handle: WorkerHandle,
     status: "success" | "error",
     meta: SpendStageMeta,
+    forcedOutcome?: SpendOutcome,
   ): void {
     if (typeof handle.telemetry !== "function") return;
     try {
@@ -1379,7 +1498,8 @@ export class RunSupervisor {
       const signal = status === "success" ? parseDoneSignal(handle.result?.structured) : null;
       const tokens = t.tokens.input + t.tokens.cacheRead + t.tokens.cacheCreate + t.tokens.output;
       const outcome: SpendOutcome =
-        status !== "success"
+        forcedOutcome ??
+        (status !== "success"
           ? t.toolCalls === 0 && tokens === 0
             ? "launch_failed"
             : "failed"
@@ -1387,7 +1507,7 @@ export class RunSupervisor {
             ? "rework"
             : stage === "implement" && (signal?.status === "blocked" || signal?.status === "partial")
               ? "rework"
-              : "done";
+              : "done");
       appendSpendRecord(this.spendLedgerPath, {
         ticketId: run.id,
         project: run.repo ?? null,
@@ -1402,7 +1522,9 @@ export class RunSupervisor {
         costUsd: t.usdEstimate ?? null,
         durationMs: Math.max(0, Date.now() - meta.startedAt),
         outcome,
-        reviewTier: "fresh",
+        // The REAL gate this run ran under (self ⇒ no separate reviewer), so the ledger's
+        // per-tier cost analysis isn't reading a hardcoded lie.
+        reviewTier: this.reviewTierFor(run),
         ts: new Date().toISOString(),
         ...(handle.result?.errorClass ? { errorClass: handle.result.errorClass } : {}),
         ...(handle.sessionId ? { sessionId: handle.sessionId } : {}),
