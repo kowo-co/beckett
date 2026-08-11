@@ -8,6 +8,11 @@ the order of operations for getting from v0 to here is [migration.md](migration.
 rationale behind the casting and seat choices is [token-efficiency.md](token-efficiency.md); the
 one path by which a Job is created without a human turn is [initiative.md](initiative.md).
 
+> **v7 (2026-08) status:** the bored-backed ticket queue, the 4,174-line dispatcher and the poller
+> are already deleted from the running system — v7 replaced them with runs (`beckett task deploy`,
+> a run ledger, one supervisor, a `spec.md` checklist). This document's Job model is the step
+> after that, and its "absorbs" columns name v0 machinery that no longer exists.
+
 ## 0. The whole design in eight concepts
 
 Everything below is built from exactly these. Nothing else is durable, nothing else has a name.

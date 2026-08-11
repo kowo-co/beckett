@@ -306,7 +306,7 @@ but it significantly weakens the security of your system.
 For `beckett`, this maps cleanly onto Beckett's existing pattern of narrowly-scoped, explicit
 privilege escalation — its Ubuntu installer already avoids blanket sudo (`install.sh`: "Do not give
 this account unrestricted passwordless sudo on a public/shared host"). On Arch, the same script,
-invoked as `beckett`, gives a clean N-minute root window for whatever a ticket genuinely needs root
+invoked as `beckett`, gives a clean N-minute root window for whatever a piece of work genuinely needs root
 for (a `pacman -S` install, say), auto-closing itself — strictly better than either blanket
 passwordless sudo or a bespoke reimplementation. This is the one piece of the design where Omarchy
 hands Beckett the exact primitive it needs, built by someone who had the identical problem first.

@@ -6,6 +6,11 @@ window you file requests into and wait on. Not a bot you command. A teammate who
 room, decides how much effort a request deserves, and either answers in a sentence or goes and
 builds the thing — in your voice, on your infrastructure, in your channel.
 
+> **v7 (2026-08): tickets are already gone.** The `bored` tracker, the poller and the ticket
+> dispatcher were removed from the running system and replaced by runs — one `beckett task deploy`
+> call, one `spec.md` checklist, one supervisor. See the repo README for the shipped shape; the v0
+> critique below is the history that motivated it.
+
 v1 exists because v0 built the wrong half of that sentence. It got the Discord feel right and
 the engineering wrong: a rigid ticket tracker (`bored`) and a 4,174-line dispatcher stood
 between every request and the work, smuggling structure through markdown, polling every 5

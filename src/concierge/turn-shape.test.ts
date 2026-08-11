@@ -42,6 +42,7 @@ const quietLog = (() => {
 // ── pure helpers ────────────────────────────────────────────────────────────────────────
 
 test("isFilingShapedToolUse matches the filing/staffing marker list, not arbitrary commands", () => {
+  expect(isFilingShapedToolUse('beckett task deploy --prompt "add rate limiting" --channel 1')).toBe(true);
   expect(isFilingShapedToolUse("beckett task create --title 'ship it'")).toBe(true);
   expect(isFilingShapedToolUse("beckett task start '#42.1' --title x")).toBe(true);
   expect(isFilingShapedToolUse("beckett ticket create --title y --project beckett")).toBe(true);

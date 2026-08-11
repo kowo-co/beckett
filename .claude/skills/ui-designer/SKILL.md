@@ -1,17 +1,17 @@
 ---
 name: ui-designer
-description: Use whenever you spec, cast, or build frontend/UI work — a page, component, dashboard, marketing site, app screen, or "make it look good." Encodes the house aesthetic and a Tailwind-first, source-before-hand-roll workflow (21st.dev → shadcn/ui → build). Invoke it before writing a frontend cast brief and hand it to any worker implementing a UI ticket.
+description: Use whenever you spec, cast, or build frontend/UI work — a page, component, dashboard, marketing site, app screen, or "make it look good." Encodes the house aesthetic and a Tailwind-first, source-before-hand-roll workflow (21st.dev → shadcn/ui → build). Invoke it before writing a frontend brief and hand it to any worker implementing UI work.
 ---
 
 # ui-designer
 
-This is the house style. Load it every time UI is on the table — when you spec a frontend
-ticket, when you write the cast brief, and (as a worker) before you touch a single component.
+This is the house style. Load it every time UI is on the table — when you brief frontend work,
+when you write the prompt, and (as a worker) before you touch a single component.
 The point is that Beckett's UI has a *consistent, opinionated look* instead of being reinvented,
-blandly, per ticket. Taste is a default here, not a coin flip.
+blandly, one build at a time. Taste is a default here, not a coin flip.
 
-Anything visual is an Opus seat (see the frontend row in [[concierge]] — `claude` @ `high` +
-`"reviewTier":"self"`). This skill is what that seat implements *against*.
+Anything visual is an Opus seat (see the frontend row in [[concierge]] — `claude-opus-5` @
+`high`). This skill is what that seat implements *against*.
 
 ## The one rule: source before you hand-roll
 
@@ -159,7 +159,7 @@ Read your own UI against this. If you can't check a box, fix it, don't ship it.
       one-offs.
 - [ ] **Intentional** — looks like someone with taste made a decision, not a framework default.
 
-## How to apply it — implementing a UI ticket
+## How to apply it — implementing UI work
 
 1. **Open with this skill.** Re-read the aesthetic and rubric before you write code so the
    defaults are loaded.
@@ -172,23 +172,23 @@ Read your own UI against this. If you can't check a box, fix it, don't ship it.
    tokens.
 5. **Wire states and motion** — hover/focus/active/disabled and fast, purposeful transitions;
    honor reduced-motion.
-6. **Run the rubric on yourself.** This is a `"reviewTier":"self"` seat — no cold reviewer catches
-   taste, so *you* are the review gate. Walk every box; fix misses.
+6. **Run the rubric on yourself.** No cold reviewer can catch taste — it reads a diff, it never
+   sees the page — so *you* are the gate that matters. Walk every box; fix misses.
 7. **Show it.** Deploy the running result to a subdomain ([[deploy]]) or attach a screenshot so a
    human can judge by eye — the only real test of visual work. Need a raster asset (logo, hero,
    illustration)? Generate it ([[image]]), don't fake it with CSS.
 
-## Plugging into a frontend cast brief
+## Plugging into a frontend prompt
 
-When you (concierge) spec frontend work, name this skill in the brief so the worker loads the same
-taste you did. A frontend ticket body should read like:
+When you (concierge) brief frontend work, name this skill in the prompt so the worker loads the
+same taste you did. A frontend prompt should read like:
 
 > **Invoke the `ui-designer` skill.** Build the pricing page. **Check 21st.dev for a pricing-table
 > base and shadcn/ui for the primitives (button, card, toggle) before hand-rolling anything;
 > retheme to our tokens.** House aesthetic: confident minimalism, one accent, generous whitespace,
 > dark-mode-from-tokens. Tailwind + shadcn only. **Self-check against the ui-designer rubric before
 > done** (sourced/breathes/hierarchy/token-pure/alive/accessible/responsive). Cast:
-> `{"implement":{"harness":"claude","effort":"high","reviewTier":"self"}}`.
+> `{"implement":{"harness":"claude","model":"claude-opus-5","effort":"high"}}`.
 
-That one paragraph turns "make a pricing page" into a ticket with a design POV baked in — which is
+That one paragraph turns "make a pricing page" into a brief with a design POV baked in — which is
 the whole point of having a house style. See the frontend seat and cast table in [[concierge]].

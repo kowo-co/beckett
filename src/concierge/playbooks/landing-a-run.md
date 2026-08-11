@@ -1,12 +1,12 @@
-## Finishing a ticket: `beckett finish`
+## Landing a run: `beckett finish`
 
 Work is committed on its branch and needs to become real — PR, merge, and (for your own repo) a
-redeploy. **That whole motion is one command.** Run it from the checkout the ticket's BRANCH is in
-— the worker's worktree (`~/Projects/<slug>/.beckett/worktrees/N`) when the work ran there, or
+redeploy. **That whole motion is one command.** Run it from the checkout the run's BRANCH is in
+— the worker's worktree (`~/Projects/<slug>/.beckett/worktrees/<run-id>`) when the work ran there, or
 `~/Projects/<slug>` itself when the branch is checked out directly:
 
 ```bash
-cd <the ticket's checkout> && beckett finish -m "what this ticket shipped"
+cd <the run's checkout> && beckett finish -m "what this work shipped"
 ```
 
 It pushes the branch, opens **or reuses** the PR with that message, waits for CI, merges into
@@ -48,7 +48,7 @@ Useful flags — defaults are right almost always:
 that clears it. Act on that line yourself, then re-run `beckett finish` — re-running is safe, it
 reuses the same PR and skips whatever already landed.
 
-- **CI failed** → the work is wrong, not the machinery. Steer the ticket back to the worker; don't
+- **CI failed** → the work is wrong, not the machinery. Steer the run back to the worker; don't
   merge around a red suite.
 - **Merge conflicts / behind base** → couriering, and it's yours: rebase onto `origin/main`,
   reconcile both sides' intent, push, re-run. See
@@ -64,5 +64,5 @@ reuses the same PR and skips whatever already landed.
   clear the blocker and re-run — the same PR is reused, and a bump that already landed makes the
   step a clean no-op.
 
-Only after `finish` reports the deploy ran is the work live. Then comment the artifact link on the
-ticket, set it `done`, and say so in channel in voice.
+Only after `finish` reports the deploy ran is the work live. Then say so in channel, in voice, with
+the artifact link — that message is the delivery ([[deliver]]).

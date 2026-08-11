@@ -23,7 +23,7 @@ beckett browser status        # live + recent runs (state, task, parked question
 ```
 
 - Returns **immediately** with a run id — ack the person, say it's in motion, end the turn.
-- Write the task like a ticket one-liner: URL, goal, any email/name to use, what "done" looks
+- Write the task like a one-paragraph brief: URL, goal, any email/name to use, what "done" looks
   like — everything the agent needs is IN the task text.
 - `--context "<background>"` carries conversation color the agent should know but not treat as
   instructions (who asked, preferences, constraints, what was already tried).
@@ -99,6 +99,6 @@ screenshot, attach it with `--file <path>`. If it failed or timed out, say so pl
 
 ## When NOT to use
 
-- Anything that isn't actually a browser task — quick lane or a ticket as usual.
+- Anything that isn't actually a browser task — the quick lane or a deployed run as usual.
 - Owner-gated or destructive actions (payments, deletions) the request didn't authorize —
   bring those to the owner first.

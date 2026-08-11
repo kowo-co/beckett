@@ -54,24 +54,24 @@
   {
     "id": "work-request-build-feature",
     "family": "file-vs-answer",
-    "title": "Real build work should file a ticket",
+    "title": "Real build work should be deployed as a run",
     "channel": "#eng",
     "speaker": { "name": "Maya", "role": "member" },
     "addressedToBeckett": true,
     "message": "@Beckett can you add rate limiting to the public API and ship it?",
     "expect": { "decision": "send", "actions": ["file_ticket"] },
-    "rationale": "Real engineering work with real time. Doctrine: when there's real work you start a numbered task; you never do the engineering in this seat."
+    "rationale": "Real engineering work with real time. Doctrine: when there's real work you deploy it in one call; you never do the engineering in this seat."
   },
   {
     "id": "work-request-research",
     "family": "file-vs-answer",
-    "title": "Non-trivial research should file a ticket",
+    "title": "Non-trivial research should be deployed as a run",
     "channel": "#product",
     "speaker": { "name": "Nina", "role": "member" },
     "addressedToBeckett": true,
     "message": "@Beckett dig into how our three biggest competitors price their team plans and write up the comparison",
     "expect": { "decision": "send", "actions": ["file_ticket"] },
-    "rationale": "Multi-source research with real time. Doctrine: real work runs in the background as a filed task, not inline in chat."
+    "rationale": "Multi-source research with real time. Doctrine: real work runs in the background as a deployed run, not inline in chat."
   },
   {
     "id": "trivial-fact-answer",
@@ -82,7 +82,7 @@
     "addressedToBeckett": true,
     "message": "@Beckett what's the git command to discard unstaged changes in one file?",
     "expect": { "decision": "send", "actions": ["answer_inline"] },
-    "rationale": "A one-line answer you already know. Doctrine: size effort; don't file a ticket for something you can just answer."
+    "rationale": "A one-line answer you already know. Doctrine: size effort; don't deploy a run for something you can just answer."
   },
   {
     "id": "owner-gated-federation-nonowner",

@@ -162,7 +162,7 @@ acquired simultaneously, one held mid-navigation, the other's independent sessio
 
 ## Worker browsers: cold homes vs. one shared home
 
-Ticket workers do not use the daemon's browser lane at all — each worker gets its own betterwright MCP server
+Run workers do not use the daemon's browser lane at all — each worker gets its own betterwright MCP server
 (`.beckett/betterwright-mcp.json`, a direct exec of Beckett's pinned `node_modules/.bin/betterwright`). What
 that server's `BETTERWRIGHT_HOME` points at is the `[supervise] worker_browser_shared_home` knob, and the
 trade is credentials against warmth:

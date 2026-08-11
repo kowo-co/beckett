@@ -514,7 +514,7 @@ const FILING_TURN_BUDGET_MS = 20_000;
  * an odd quoting style cost nothing.
  */
 export function isFilingShapedToolUse(command: string): boolean {
-  const markers = ["task create", "task start", "ticket create", "ticket state", "beckett plan"];
+  const markers = ["task deploy", "task create", "task start", "ticket create", "ticket state", "beckett plan"];
   return markers.some((marker) => command.includes(marker));
 }
 
@@ -8065,7 +8065,7 @@ function frameAmbientCandidate(
       `answer, riff back, or close it out warmly with ONE short message in your voice.\n` +
       `Use delivery decision "pass" if people pivoted to each other, a human already answered, the moment\n` +
       `is settled, or the latest line is a natural closer. Never reply merely because you spoke earlier.\n` +
-      `Do not file a ticket yet. An offer is a question, not a commitment.`
+      `Do not deploy any work yet. An offer is a question, not a commitment.`
     );
   }
   return (
@@ -8082,7 +8082,7 @@ function frameAmbientCandidate(
     `\`beckett discord decline --channel ${channelId}\` BEFORE you write anything — that quietly\n` +
     `drops the turn, posting nothing. Prefer it over posting a reply into a conversation that\n` +
     `wasn't yours.\n` +
-    `Do not file a ticket yet. An offer is a question, not a commitment.`
+    `Do not deploy any work yet. An offer is a question, not a commitment.`
   );
 }
 
