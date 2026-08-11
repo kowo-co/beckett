@@ -12,7 +12,7 @@
 
 /** A single hook entry: one event, one optional tool matcher, one shell command. */
 export interface HookSpec {
-  event: "PreToolUse" | "PostToolUse" | "UserPromptSubmit";
+  event: "PreToolUse" | "PostToolUse" | "UserPromptSubmit" | "Stop";
   /** Tool name pattern (passed as `matcher` to claude). Omit to match all tools. */
   matcher?: string;
   command: string;
@@ -49,4 +49,18 @@ export function renderClaudeSettings(specs: HookSpec[]): ClaudeHookSettings {
   }
 
   return { hooks: Object.fromEntries(byEvent) };
+}
+
+/**
+ * Return the {@link HookSpec} that registers the spec.md Stop-gate (`../hooks/spec-gate.ts`,
+ * v7 run architecture) for a worker. Bakes the workspace root into the command args so the hook
+ * is self-contained (no env dependency), mirroring `scopeGuardSpec` in scope-guard.ts. No
+ * `matcher` — Stop hooks are not tool-scoped.
+ *
+ * NOT wired into any spawn path yet — implement-stage workers don't get this hook until it is
+ * added to the settings a worker is spawned with.
+ */
+export function specGateSpec(specGateScriptPath: string, workspace: string): HookSpec {
+  const command = `bun ${JSON.stringify(specGateScriptPath)} --root ${JSON.stringify(workspace)}`;
+  return { event: "Stop", command };
 }
