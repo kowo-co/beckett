@@ -43,6 +43,8 @@ import { AgentStore } from "../agent/store.ts";
 import { createAgentRunner } from "../agent/invoke.ts";
 import { AGENT_HARNESSES, AGENT_EFFORTS, type AgentDefinition } from "../agent/types.ts";
 import { startTaskBranch } from "./task-start.ts";
+import { runTaskDeploy } from "./task-deploy.ts";
+import { RunStore } from "../run/store.ts";
 import { formatDispatchTrace, readDispatchEvents } from "../dispatch/events.ts";
 import {
   commitVersion,
@@ -222,6 +224,32 @@ function criteriaFromFlags(flags: Record<string, string | boolean>): string[] {
 
 function csvFlag(value: string | boolean | undefined): string[] {
   return value ? String(value).split(",").map((part) => part.trim()).filter(Boolean) : [];
+}
+
+/** One `RunStore` per call — CLI invocations are one-shot processes, so there is no state to share. */
+function runStore(): RunStore {
+  return new RunStore(join(paths.beckettDir, "runs.json"));
+}
+
+/**
+ * Read `<workspace>/spec.md`'s checklist progress for `task show` on a Run. Deliberately tiny and
+ * local rather than a shared `src/run/spec-file.ts` codec — no such module is this lane's to
+ * define; this only needs to COUNT boxes, not parse/render the scaffold.
+ */
+function readRunChecklist(workspace: string | null): { total: number; done: number; hasPlaceholder: boolean } | null {
+  if (!workspace) return null;
+  const specPath = join(workspace, "spec.md");
+  if (!existsSync(specPath)) return null;
+  let text: string;
+  try {
+    text = readFileSync(specPath, "utf8");
+  } catch {
+    return null;
+  }
+  const items = [...text.matchAll(/^- \[([ xX])\] (.+)$/gm)];
+  const done = items.filter((m) => m[1]!.toLowerCase() === "x").length;
+  const hasPlaceholder = items.some((m) => m[2]!.trim().startsWith("(worker fills"));
+  return { total: items.length, done, hasPlaceholder };
 }
 
 // ── spend (in-process: the local spend ledger) ─────────────────────────────────────────
@@ -933,9 +961,22 @@ export async function runTask(argv: string[]): Promise<void> {
     });
   }
 
+  if (sub === "deploy") {
+    await runTaskDeploy(rest, { store: runStore(), notifyBus });
+  }
+
   if (sub === "show") {
     const ref = _[0];
     if (!ref) fail("usage: beckett task show <#N|#N.x>");
+    // v7: `run-<id>` or a bare slug names a Run instead of a ticket-backed task/branch — try
+    // that lookup FIRST, before `normalizeTaskNumber`/`normalizeBranchRef` (which throw on
+    // anything non-numeric) get anywhere near it. `#N`/`N`/`N.x` keep the existing path below
+    // untouched.
+    if (!/^#?\d+(\.\d+)*$/.test(ref)) {
+      const run = ref.startsWith("run-") ? runStore().get(ref) : runStore().bySlug(ref);
+      if (!run) fail(`no such run: ${ref}`);
+      out({ run, checklist: readRunChecklist(run.workspace) });
+    }
     if (ref.includes(".")) {
       const found = store.getBranch(ref);
       if (!found) fail(`no such branch: #${normalizeBranchRef(ref)}`);
@@ -952,7 +993,7 @@ export async function runTask(argv: string[]): Promise<void> {
   if (sub === "list" || sub === "ls") {
     const wanted = flags.status ? String(flags.status) : undefined;
     const tasks = store.list().filter((task) => !wanted || task.status === wanted);
-    out(tasks.map((task) => ({
+    const taskRows = tasks.map((task) => ({
       ref: `#${task.number}`,
       title: task.title,
       displayName: displayTaskName(task),
@@ -966,10 +1007,28 @@ export async function runTask(argv: string[]): Promise<void> {
         ticket: branch.ticket?.identifier ?? null,
       })),
       updatedAt: task.updatedAt,
-    })));
+    }));
+    // v7: runs deployed straight from a prompt (`task deploy`) have no ticket-backed task row —
+    // append them so `task list` stays the one place to see everything in flight. Tagged `kind`
+    // so a consumer can tell the two row shapes apart; existing task rows are untouched.
+    const runRows = runStore()
+      .list()
+      .filter((run) => !wanted || run.state === wanted)
+      .map((run) => ({
+        kind: "run" as const,
+        ref: run.id,
+        slug: run.slug,
+        title: run.title,
+        displayName: run.title,
+        status: run.state,
+        project: run.repo,
+        threadId: run.channelId,
+        updatedAt: run.updatedAt,
+      }));
+    out([...taskRows, ...runRows]);
   }
 
-  fail("usage: beckett task create|branch|start|show|list <...>");
+  fail("usage: beckett task create|branch|start|deploy|show|list <...>");
 }
 
 // ── ticket (in-process: the tracker client — the Concierge's door to the queue) ───────────
