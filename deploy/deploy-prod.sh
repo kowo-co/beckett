@@ -158,6 +158,11 @@ fi
 git fetch origin
 git checkout main
 git pull --ff-only origin main
+# Global model-selection doctrine for every claude session on this account (workers, quick,
+# free-time, concierge): the repo file is the source of truth, this keeps the installed copy in
+# sync on every deploy. Idempotent — a plain overwrite, safe to re-run.
+mkdir -p "$HOME/.claude"
+cp ~/beckett/deploy/claude-global.md "$HOME/.claude/CLAUDE.md"
 bun install --frozen-lockfile
 # BetterWright's documented setup provisions its managed runtime. Since 1.7.x a bare
 # `betterwright setup` installs three legs: the Obscura resident DOM engine

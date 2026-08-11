@@ -919,6 +919,12 @@ export interface Config {
     review_cycles_max: number;
     /** Per-run USD ceiling; 0 falls back to `[budget] per_task_usd_cap`. Default 0. */
     budget_usd_per_run: number;
+    /**
+     * The deploy receipt: one progress card per run (`src/progress/cards.ts`), edited off the
+     * dispatch event bus. Default ON — this is the run engine's own switch, independent of
+     * `[progress] cards_as_code` (the ticket dispatcher's flag).
+     */
+    cards: boolean;
   };
   /** OPS-124 — GitHub PR poller. The credential lives in env; active only when one is set. */
   github: {

@@ -2045,6 +2045,7 @@ boards = ["ops", "int", "vid", "vidpip"]
 max_live = 3
 review_cycles_max = 2
 budget_usd_per_run = 0
+cards = true
 
 [github]
 poll_secs = 60

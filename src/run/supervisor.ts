@@ -195,6 +195,30 @@ export function runProjectSlug(run: Pick<Run, "repo">, env: Record<string, strin
   return projectSlug(run.repo?.trim() || selfProjectSlug(env));
 }
 
+/**
+ * `progress/cards.ts`'s `specReader` adapter: reads a run's LIVE `## Checklist` progress off its
+ * workspace, keyed by `DispatchEvent.ticketId` (the run id the supervisor stamps every trace
+ * with). Exported standalone — `shell/main.ts` wires it into `createProgressCardService` — so
+ * the card module itself never touches the filesystem. `store` is typed to the one method this
+ * needs so a test can hand in a trivial fake instead of a real `RunStore`.
+ */
+export function runSpecReader(
+  store: Pick<RunStore, "get">,
+): (ticketId: string) => { done: number; total: number } | null {
+  return (ticketId) => {
+    const run = store.get(ticketId);
+    if (!run?.workspace) return null;
+    const path = join(run.workspace, "spec.md");
+    if (!existsSync(path)) return null;
+    try {
+      const parsed = parseSpecChecklist(readFileSync(path, "utf8"));
+      return { done: parsed.done, total: parsed.total };
+    } catch {
+      return null; // a torn/mid-write spec.md is not worth surfacing as a card error
+    }
+  };
+}
+
 /** Watchdog grace: reuse the dispatcher's `[supervise] staffing_watchdog_s` (default 120s). */
 const DEFAULT_WATCHDOG_GRACE_S = 120;
 /** The watchdog tick, mirroring the dispatcher: never slower than half the grace, floor 15s. */
@@ -339,6 +363,12 @@ export class RunSupervisor {
       this.logger.warn("run.deploy for an unknown run", { runId });
       return;
     }
+    // The deploy receipt (progress cards): fire the FIRST observable event for this run right
+    // here, before a worktree exists or a worker spawns, so a card shows "queued" within seconds
+    // of the CLI call instead of waiting on provisioning to finish. Guarded to run state "queued"
+    // only: a duplicate run.deploy bus ping (or a manual re-admit) against a run already past
+    // admission must not flip its live card's phase back to "queued" mid-flight.
+    if (run.state === "queued") this.trace(run, "run:deploy", "started", "queued");
     this.admitRun(run);
   }
 
@@ -895,7 +925,10 @@ export class RunSupervisor {
       prUrl: outcome.status === "published" ? outcome.prUrl ?? outcome.url : null,
       error: null,
     });
-    this.trace(publishing, "done", "passed", summary);
+    // The deploy receipt's closing line: the shipped PR/push URL when there is one, the review
+    // summary otherwise (a local-only completion with no publishRepo wired).
+    const shipped = outcome.status === "published" ? outcome.prUrl ?? outcome.url : "";
+    this.trace(publishing, "done", "passed", shipped || summary);
     this.logger.info("run done", { run: run.id });
   }
 
@@ -963,7 +996,8 @@ export class RunSupervisor {
         prUrl: pub.status === "published" ? pub.prUrl ?? pub.url : null,
         error: null,
       });
-      this.trace(run, "done", "passed", "durable publish retry succeeded");
+      const shipped = pub.status === "published" ? pub.prUrl ?? pub.url : "";
+      this.trace(run, "done", "passed", shipped || "durable publish retry succeeded");
       return { action: "remove" };
     });
   }
