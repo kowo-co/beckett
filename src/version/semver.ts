@@ -10,39 +10,76 @@
  * is owner-only, so auto-classification tops out at minor by design.
  */
 
-/** A parsed MAJOR.MINOR.PATCH triple. Pre-release / build metadata is intentionally out of scope. */
+/** A parsed MAJOR.MINOR.PATCH triple, plus an optional pre-release tail ("rc.1"). Build metadata
+ *  (`+…`) stays out of scope — Beckett never emits it. */
 export interface Semver {
   major: number;
   minor: number;
   patch: number;
+  /** Dot-separated pre-release identifiers ("rc.1"); absent on a release version. */
+  pre?: string;
 }
 
 /** Which part of the version a bump moves. `major` is owner-only (never auto-suggested). */
 export type BumpLevel = "major" | "minor" | "patch";
 
-/** Parse "4.1.2" (a leading "v" is tolerated) into a {@link Semver}, or throw on garbage. */
+/** Parse "4.1.2" or "7.0.0-rc.1" (a leading "v" is tolerated) into a {@link Semver}, or throw on
+ *  garbage. */
 export function parseSemver(input: string): Semver {
   const cleaned = input.trim().replace(/^v/i, "");
-  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(cleaned);
-  if (!m) throw new Error(`not a MAJOR.MINOR.PATCH version: ${JSON.stringify(input)}`);
-  return { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]) };
+  const m = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/.exec(cleaned);
+  if (!m) throw new Error(`not a MAJOR.MINOR.PATCH[-pre] version: ${JSON.stringify(input)}`);
+  const v: Semver = { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]) };
+  if (m[4]) v.pre = m[4];
+  return v;
 }
 
-/** "{4,1,2}" → "4.1.2". */
+/** "{4,1,2}" → "4.1.2"; a pre-release tail rides along ("7.0.0-rc.1"). */
 export function formatSemver(v: Semver): string {
-  return `${v.major}.${v.minor}.${v.patch}`;
+  const triple = `${v.major}.${v.minor}.${v.patch}`;
+  return v.pre ? `${triple}-${v.pre}` : triple;
 }
 
-/** Compare two versions numerically (negative when `a < b`, zero when equal, positive when `a > b`). */
+/** Semver §11 pre-release ordering: numeric identifiers compare numerically and sort below
+ *  alphanumeric ones; a shorter identifier list that is a prefix of a longer one sorts first. */
+function comparePre(a: string, b: string): number {
+  const as = a.split(".");
+  const bs = b.split(".");
+  for (let i = 0; i < Math.min(as.length, bs.length); i++) {
+    const ai = as[i]!;
+    const bi = bs[i]!;
+    const an = /^\d+$/.test(ai);
+    const bn = /^\d+$/.test(bi);
+    if (an && bn) {
+      const d = Number(ai) - Number(bi);
+      if (d !== 0) return d;
+    } else if (an !== bn) {
+      return an ? -1 : 1;
+    } else if (ai !== bi) {
+      return ai < bi ? -1 : 1;
+    }
+  }
+  return as.length - bs.length;
+}
+
+/** Compare two versions numerically (negative when `a < b`, zero when equal, positive when `a > b`).
+ *  A pre-release sorts below its release ("7.0.0-rc.1" < "7.0.0"). */
 export function compareSemver(a: string, b: string): number {
   const left = parseSemver(a);
   const right = parseSemver(b);
-  return left.major - right.major || left.minor - right.minor || left.patch - right.patch;
+  const triple = left.major - right.major || left.minor - right.minor || left.patch - right.patch;
+  if (triple !== 0) return triple;
+  if (!left.pre && !right.pre) return 0;
+  if (!left.pre) return 1;
+  if (!right.pre) return -1;
+  return comparePre(left.pre, right.pre);
 }
 
 /**
  * Apply a bump to a version string and return the new one. Higher parts zero the lower parts
- * (a minor resets patch; a major resets minor + patch) — the standard semver carry.
+ * (a minor resets patch; a major resets minor + patch) — the standard semver carry. A patch bump
+ * of a pre-release just drops the tail ("7.0.0-rc.1" → "7.0.0", npm's behavior): the pre-release
+ * WAS the not-yet-released patch, so releasing it is the bump.
  */
 export function applyBump(base: string, level: BumpLevel): string {
   const v = parseSemver(base);
@@ -52,7 +89,9 @@ export function applyBump(base: string, level: BumpLevel): string {
     case "minor":
       return formatSemver({ major: v.major, minor: v.minor + 1, patch: 0 });
     case "patch":
-      return formatSemver({ major: v.major, minor: v.minor, patch: v.patch + 1 });
+      return v.pre
+        ? formatSemver({ major: v.major, minor: v.minor, patch: v.patch })
+        : formatSemver({ major: v.major, minor: v.minor, patch: v.patch + 1 });
   }
 }
 
