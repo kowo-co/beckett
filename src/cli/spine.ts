@@ -121,7 +121,7 @@ export const SPINE: SpineEntry[] = [
   },
   { id: "eval", cliHelp: "eval <author/model> [--short|--full]", verbs: [{ name: "eval", load: core((m) => m.runEval) }] },
   { id: "site", cliHelp: "site deploy", verbs: [{ name: "site", load: core((m) => m.runSite) }] },
-  { id: "task", cliHelp: "task create|branch|start|show|list", verbs: [{ name: "task", load: core((m) => m.runTask) }] },
+  { id: "task", cliHelp: "task create|branch|start|deploy|show|list", verbs: [{ name: "task", load: core((m) => m.runTask) }] },
   { id: "ticket", cliHelp: "ticket create|comment|state|list|show|trace", verbs: [{ name: "ticket", load: core((m) => m.runTicket) }] },
   { id: "preset", cliHelp: "preset ls|show", verbs: [{ name: "preset", load: core((m) => m.runPreset) }] },
   { id: "plan", cliHelp: "plan", verbs: [{ name: "plan", load: core((m) => m.runPlan) }] },
