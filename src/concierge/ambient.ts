@@ -110,6 +110,9 @@ function asTranscriptMessage(m: IncomingMessage): AmbientTranscriptMessage {
     content: m.content,
     ts: m.createdAt,
     repliedToId: m.repliedToId,
+    // Issue #232: who the author actually addressed rides with the message into triage. Absent
+    // (never an empty array) when nobody was mentioned, so an ordinary line's shape is unchanged.
+    ...(m.mentionedUsers?.length ? { mentions: m.mentionedUsers } : {}),
     isBeckett: false,
   };
 }

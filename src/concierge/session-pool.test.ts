@@ -189,6 +189,33 @@ test("metaForToken resolves an issuer token to ITS session's executing turn, nev
   expect(p.metaForToken("")).toBeNull();
 });
 
+test("issue #229: beginInlineErrand marks the ISSUING session, and is a safe no-op otherwise", async () => {
+  const made: FakeSession[] = [];
+  const p = pool({ made });
+  await p.ask("chan-a", "x");
+  await p.ask("chan-b", "y");
+  const errands = new Map<string, number>();
+  for (const s of made) {
+    (s as PoolSession).noteInlineErrand = () => {
+      errands.set(s.scope, (errands.get(s.scope) ?? 0) + 1);
+      return () => errands.set(s.scope, (errands.get(s.scope) ?? 0) - 1);
+    };
+  }
+
+  const settle = p.beginInlineErrand("tok-chan-a");
+  expect(errands.get("chan-a")).toBe(1);
+  expect(errands.get("chan-b")).toBeUndefined(); // the other scope stays free to re-ground
+  settle();
+  expect(errands.get("chan-a")).toBe(0);
+
+  // A forged/stale/absent token must never gate some other scope — and never throw at the caller,
+  // which always fires the settle fn from a `finally`.
+  expect(() => p.beginInlineErrand("tok-forged")()).not.toThrow();
+  expect(() => p.beginInlineErrand("")()).not.toThrow();
+  expect(errands.get("chan-a")).toBe(0);
+  expect(errands.get("chan-b")).toBeUndefined();
+});
+
 test("injectLiveTurn: matching channel + author folds in; wrong author or channel refuses without calling the session", async () => {
   const made: FakeSession[] = [];
   const p = pool({ made });

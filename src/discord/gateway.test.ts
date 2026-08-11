@@ -1252,3 +1252,110 @@ test("createThreadFromMessage surfaces a real Discord failure instead of masking
     gateway.createThreadFromMessage("chan-1", "card-msg-1", "#12 - Ship export"),
   ).rejects.toThrow("Missing Permissions");
 });
+
+test("normalize carries the @mention targets a message actually addressed (issue #232)", async () => {
+  const gateway = new DiscordJsGateway();
+  (gateway as unknown as { client: { user: { id: string } } }).client = { user: { id: "bot-1" } };
+
+  const normalized = await (
+    gateway as unknown as { normalize: (msg: Record<string, unknown>) => Promise<{
+      mentionedUsers?: { id: string; name: string }[];
+      repliedToId: string | null;
+    }> }
+  ).normalize({
+    id: "human-msg-1",
+    guildId: "guild-1",
+    channelId: "chan-1",
+    content: "<@user-ro> were you working on the RO thing?",
+    createdTimestamp: 0,
+    author: { id: "user-ssh", bot: false, username: "sshdev", globalName: null },
+    member: { displayName: "sshdev", roles: { cache: new Map() } },
+    mentions: {
+      has: () => false,
+      users: new Map([["user-ro", { id: "user-ro", username: "ro_raw", globalName: "ro" }]]),
+      members: new Map([["user-ro", { displayName: "ro" }]]),
+    },
+    reference: { messageId: "ssh-question-1" },
+    attachments: new Map(),
+    fetchReference: async () => {
+      throw new Error("not needed");
+    },
+  });
+
+  // The reply edge (message_reference) and the mention targets travel together — one says a
+  // message answered something, the other says who it was for.
+  expect(normalized.repliedToId).toBe("ssh-question-1");
+  expect(normalized.mentionedUsers).toEqual([{ id: "user-ro", name: "ro" }]);
+});
+
+test("normalize settles a late link preview before the turn ever sees the message (issue #235)", async () => {
+  const gateway = new DiscordJsGateway();
+  (gateway as unknown as { client: { user: { id: string } } }).client = { user: { id: "bot-1" } };
+  // The production wait is a fixed constant; a test must not spend it.
+  (gateway as unknown as { embedSettleWaitMs: number }).embedSettleWaitMs = 0;
+
+  const base = {
+    id: "human-msg-1",
+    guildId: "guild-1",
+    channelId: "chan-1",
+    content: "@beckett what do you make of https://example.com/post",
+    createdTimestamp: Date.now(),
+    author: { id: "user-1", bot: false, username: "u", globalName: null },
+    member: { displayName: "u", roles: { cache: new Map() } },
+    mentions: { has: () => true },
+    attachments: new Map(),
+  };
+  let fetched = 0;
+
+  const normalized = await (
+    gateway as unknown as { normalize: (msg: Record<string, unknown>) => Promise<{
+      embeds?: { title?: string; url?: string; description?: string }[];
+    }> }
+  ).normalize({
+    ...base,
+    // MESSAGE_CREATE arrives before Discord has unfurled the URL.
+    embeds: [],
+    fetch: async () => {
+      fetched++;
+      return {
+        ...base,
+        embeds: [
+          {
+            title: "The post",
+            url: "https://example.com/post",
+            description: `${"x".repeat(600)}`,
+          },
+        ],
+      };
+    },
+  });
+
+  expect(fetched).toBe(1);
+  expect(normalized.embeds).toHaveLength(1);
+  expect(normalized.embeds?.[0]?.title).toBe("The post");
+  // A thousand-character article unfurl is truncated at the boundary, not downstream.
+  expect(normalized.embeds?.[0]?.description?.length).toBe(400);
+});
+
+test("normalize leaves an ordinary message's embed field an honest empty array", async () => {
+  const gateway = new DiscordJsGateway();
+  (gateway as unknown as { client: { user: { id: string } } }).client = { user: { id: "bot-1" } };
+  const normalized = await (
+    gateway as unknown as { normalize: (msg: Record<string, unknown>) => Promise<{ embeds?: unknown[] }> }
+  ).normalize({
+    id: "human-msg-1",
+    guildId: "guild-1",
+    channelId: "chan-1",
+    content: "how did the deploy go?",
+    createdTimestamp: 0,
+    author: { id: "user-1", bot: false, username: "u", globalName: null },
+    member: { displayName: "u", roles: { cache: new Map() } },
+    mentions: { has: () => true },
+    attachments: new Map(),
+    embeds: [],
+    fetch: async () => {
+      throw new Error("a message with no link must never be re-read");
+    },
+  });
+  expect(normalized.embeds).toEqual([]);
+});

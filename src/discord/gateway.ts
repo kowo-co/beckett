@@ -62,6 +62,8 @@ import {
 import type {
   DiscordGateway,
   DiscordMessageEditPayload,
+  IncomingLinkEmbed,
+  IncomingMentionTarget,
   IncomingMessage,
   IncomingReaction,
   DiscordButton,
@@ -76,6 +78,7 @@ import type {
 } from "../types.ts";
 import { log as rootLog } from "../log.ts";
 import { isInternalUrl } from "../net/url-safety.ts";
+import { EMBED_SETTLE_MS, settleEmbeds } from "./embed-settle.ts";
 import { isFederatedPeer, PeerBurstLimiter } from "./federation.ts";
 import { loadPeers } from "./peers.ts";
 import { buildPaths } from "../paths.ts";
@@ -202,6 +205,13 @@ export class DiscordJsGateway implements DiscordGateway {
 
   /** The single inbound handler the Orchestrator registers via {@link onMessage}. */
   private handler: ((m: IncomingMessage) => void | Promise<void>) | undefined;
+
+  /**
+   * How long `normalize` waits for Discord to attach a link preview (issue #235). Not a config
+   * knob — the production value is the constant; this exists so a test can drive the settle path
+   * without spending two real seconds on it.
+   */
+  private embedSettleWaitMs: number = EMBED_SETTLE_MS;
 
   /** Handler for user-created threads ({@link onThreadCreate}); numbered task threads register directly. */
   private threadHandler: ((t: ThreadCreated) => void | Promise<void>) | undefined;
@@ -986,6 +996,13 @@ export class DiscordJsGateway implements DiscordGateway {
       msg.author.bot && isFederatedPeer(msg.author.id, botId, this.effectivePeers())
         ? { botId: msg.author.id, displayName: displayName ?? msg.author.username }
         : undefined;
+    // Issue #235: a bare URL arrives BEFORE Discord unfurls it. Wait the one short beat here, at
+    // the single choke point, so the turn sees the preview (or learns there is none) instead of
+    // improvising. No-op for every message without a bare, un-suppressed link.
+    const settled = await settleEmbeds(msg, { waitMs: this.embedSettleWaitMs });
+    // Issue #232: WHO this message addressed, not merely whether it addressed Beckett. The
+    // classifier reads the reply edge and these targets together to stop guessing the addressee.
+    const mentionedUsers = mentionTargets(msg);
     return {
       messageId: msg.id,
       userId: msg.author.id,
@@ -1006,6 +1023,10 @@ export class DiscordJsGateway implements DiscordGateway {
       ...(reference.browserQuestion ? { repliedToBrowserQuestion: true } : {}),
       ...(reference.unverified ? { repliedToBotUnverified: true } : {}),
       mentionsBot: isDM || directMention || reference.toBot,
+      ...(mentionedUsers.length > 0 ? { mentionedUsers } : {}),
+      // An empty array is meaningful: it says the gateway looked and Discord attached nothing.
+      // Omitted entirely only when the raw message had no `embeds` collection at all.
+      ...(settled.embeds ? { embeds: linkEmbeds(settled.embeds) } : {}),
       authorIsBot: msg.author.bot,
       ...(peer ? { peer } : {}),
       createdAt: msg.createdTimestamp,
@@ -1580,6 +1601,65 @@ function threadInfo(msg: Message): { isThread?: boolean; parentChannelId?: strin
   } catch {
     return {};
   }
+}
+
+/** A link preview's description is trimmed to this before it is ever put in front of a turn. */
+const LINK_EMBED_DESCRIPTION_MAX = 400;
+
+/**
+ * Everyone a message explicitly @mentioned (issue #232), as id + display label. Defensive by the
+ * same reasoning as {@link threadInfo}: partial channels, uncached members, and hand-built test
+ * doubles all reach `normalize`, and an inbound message is far too valuable to drop over a
+ * missing collection — anything unexpected degrades to "mentioned nobody".
+ */
+function mentionTargets(msg: Message): IncomingMentionTarget[] {
+  try {
+    const mentions = msg.mentions as unknown as {
+      users?: { values?: () => Iterable<{ id: string; username?: string; globalName?: string | null }> };
+      members?: { get?: (id: string) => { displayName?: string } | undefined };
+    };
+    const users = mentions?.users?.values?.();
+    if (!users) return [];
+    const targets: IncomingMentionTarget[] = [];
+    for (const user of users) {
+      if (typeof user?.id !== "string") continue;
+      const name =
+        mentions.members?.get?.(user.id)?.displayName || user.globalName || user.username || user.id;
+      // Names are single-line render labels — collapse whitespace games, exactly as capture does.
+      targets.push({ id: user.id, name: String(name).replace(/\s+/g, " ").trim() || user.id });
+    }
+    return targets;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Reduce Discord's link previews to the display metadata a turn can actually use (issue #235).
+ * Descriptions are truncated here, at the boundary, so no downstream caller has to remember that
+ * an article unfurl can be a thousand characters long.
+ */
+function linkEmbeds(embeds: readonly unknown[]): IncomingLinkEmbed[] {
+  const out: IncomingLinkEmbed[] = [];
+  for (const raw of embeds) {
+    const embed = raw as { title?: unknown; description?: unknown; url?: unknown } | null;
+    if (!embed || typeof embed !== "object") continue;
+    const title = typeof embed.title === "string" ? embed.title.replace(/\s+/g, " ").trim() : "";
+    const url = typeof embed.url === "string" ? embed.url.trim() : "";
+    const rawDescription =
+      typeof embed.description === "string" ? embed.description.replace(/\s+/g, " ").trim() : "";
+    const description =
+      rawDescription.length > LINK_EMBED_DESCRIPTION_MAX
+        ? `${rawDescription.slice(0, LINK_EMBED_DESCRIPTION_MAX - 1).trimEnd()}…`
+        : rawDescription;
+    if (!title && !url && !description) continue;
+    out.push({
+      ...(title ? { title } : {}),
+      ...(description ? { description } : {}),
+      ...(url ? { url } : {}),
+    });
+  }
+  return out;
 }
 
 /** Split Discord content without truncating, preferring paragraph/newline/word boundaries. */

@@ -61,6 +61,7 @@ import { createRunTaskSync } from "../task/run-sync.ts";
 import { createAgentMailApi, defaultMailStateFile, safeMailError } from "../mail/index.ts";
 import { createAgentMailPoller, defaultMailListenerStateFile, type AgentMailPoller } from "../mail/listener.ts";
 import { ExtensionRegistry, type ExtensionContext } from "../ext/index.ts";
+import { opsLogEnabled, startOpsLogSink, type OpsLogSink } from "../ops-log/index.ts";
 import { ActionClass } from "../capability/index.ts";
 import { pendingConfigurationProblems, startPendingConfigurationDaemon } from "./pending.ts";
 // NOTE: the Phase 4 organs (github/dns/deploy/mail) are deliberately NOT daemon-registered yet —
@@ -115,6 +116,7 @@ interface BootedSystem {
   browser: BrowserRuntime;
   extensions: ExtensionRegistry;
   lifecycleLedgerPath: string;
+  opsLog: OpsLogSink | null;
 }
 
 /**
@@ -185,6 +187,20 @@ async function boot(): Promise<BootedSystem> {
   const tasks = new TaskStore(join(beckettDir, "tasks.json"));
   // The Concierge and dashboard deliberately share this one gateway connection.
   const gateway = createDiscordGateway({ config, logger: logger.child("discord") });
+
+  // Discord ops-log mirror (OPS-231): "log everything in the ops channel … robust, expressive,
+  // legible." OFF by default (a fresh/local install stays silent); the deploy config's own
+  // [ops_log] section is what turns it on for the owner's box, same posture as `announce` and
+  // `github.activity` above. Registered early (right after the gateway exists) so it can mirror
+  // everything that follows, including the rest of boot.
+  const opsLog: OpsLogSink | null =
+    opsLogEnabled(config.ops_log)
+      ? startOpsLogSink({
+          config: config.ops_log,
+          post: (channelId, content) => gateway.post(channelId, content),
+          logger,
+        })
+      : null;
   const githubReader = githubConfigured(identity)
     ? new GitHubCli({
         ...githubAuth(identity),
@@ -372,6 +388,24 @@ async function boot(): Promise<BootedSystem> {
           const outcome = await runSupervisor.cancel(runId, reason);
           if (outcome === "unknown") return { ok: false, error: `no such run: ${runId}` };
           return { ok: true, data: { runId, outcome } };
+        },
+      },
+      {
+        name: "run.courier",
+        summary: "a human published this run's work by hand: mark it done/shipped (couriered), never cancelled",
+        handle: async (req) => {
+          const runId = typeof req.args.runId === "string" ? req.args.runId.trim() : "";
+          if (!runId) return { ok: false, error: "run.courier needs a runId" };
+          const outcome = await runSupervisor.courier(runId);
+          if (outcome === "unknown") return { ok: false, error: `no such run: ${runId}` };
+          if (outcome === "not-eligible") {
+            return { ok: false, error: `run ${runId} is not publishing or parked — nothing for a courier to have shipped` };
+          }
+          const prUrl = typeof req.args.prUrl === "string" ? req.args.prUrl.trim() : "";
+          if (prUrl && (outcome === "done" || outcome === "already-terminal")) {
+            await runSupervisor.backfillCourierPrUrl(runId, prUrl);
+          }
+          return { ok: true, data: { runId, outcome, ...(prUrl ? { prUrl } : {}) } };
         },
       },
       {
@@ -714,7 +748,7 @@ async function boot(): Promise<BootedSystem> {
 
   logger.info("beckett online", { liveRuns: runSupervisor.live().length });
 
-  return { config, logger, prPoller, activityPoller, mailPoller, runSupervisor, concierge, voiceGateway, statusDashboard, quick, browserAgent, browser, extensions, lifecycleLedgerPath };
+  return { config, logger, prPoller, activityPoller, mailPoller, runSupervisor, concierge, voiceGateway, statusDashboard, quick, browserAgent, browser, extensions, lifecycleLedgerPath, opsLog };
 }
 
 /** Tear the system down in reverse boot order. Best-effort: one failure never blocks the rest. */
@@ -753,6 +787,13 @@ async function shutdown(sys: BootedSystem, signal: string): Promise<void> {
     recordCleanShutdown(sys.lifecycleLedgerPath);
   } catch (err) {
     sys.logger.warn("uptime ledger clean-shutdown append failed", { error: (err as Error).message });
+  }
+  // Stopped LAST (issue #231): every other stop() above logs on its way down, and the mirror
+  // should get a chance to carry as much of that as possible before it flushes and unregisters.
+  try {
+    await sys.opsLog?.stop();
+  } catch (err) {
+    sys.logger.warn("ops-log mirror shutdown failed", { error: (err as Error).message });
   }
 }
 

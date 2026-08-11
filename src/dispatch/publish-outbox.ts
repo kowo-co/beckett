@@ -10,9 +10,15 @@ import { dirname } from "node:path";
 import type { WorkItem } from "../run/work-item.ts";
 import type { Logger } from "../types.ts";
 
-export const PUBLISH_RETRY_DELAYS_MS = [60_000, 5 * 60_000, 30 * 60_000] as const;
+export const PUBLISH_RETRY_DELAYS_MS = [30_000, 2 * 60_000, 10 * 60_000] as const;
 /** Longest a retry hold can legitimately be scheduled out; anything beyond is a sentinel/bug. */
 export const MAX_PUBLISH_RETRY_DELAY_MS = Math.max(...PUBLISH_RETRY_DELAYS_MS);
+/**
+ * attempts 1..4: the first 3 failures each schedule the next delay off the ladder above; the 4th
+ * failure parks for a human courier instead of scheduling a 4th delay (#227 — an unattended row
+ * that never stops retrying is indistinguishable from one silently wedged forever).
+ */
+export const PUBLISH_MAX_ATTEMPTS = PUBLISH_RETRY_DELAYS_MS.length + 1;
 export type PublishPurpose = "done" | "wip";
 
 export interface PublishOperation {
@@ -31,16 +37,84 @@ export interface PublishOperation {
 
 export type PublishFailureKind = "transient" | "permanent";
 
-/** Conservative classifier: only known transport/service failures are retried unattended. */
+/** Verbatim message off an Error (or `String(error)` for a non-Error throw) — never summarized. */
+export function publishErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Classifier: only KNOWN unrecoverable-without-a-human failure classes are permanent — an
+ * auth/permission failure, a fork PAT limit, or the repo genuinely not existing. Everything else
+ * defaults to "transient".
+ *
+ * #227 root cause: this used to default an UNMATCHED error to "permanent" (only a recognized
+ * 5xx/network/timeout pattern was "transient"). Real gh/git failure text rarely matches a
+ * hand-written transient regex exactly, so almost every first failure fell through to the
+ * permanent default and got `nextAttemptAt: Number.MAX_SAFE_INTEGER` — a silent park after exactly
+ * one attempt, logged as "queued ... for retry". Flipping the default to "transient" means an
+ * unrecognized error gets the real backoff ladder (attempts 1..4) instead of skipping straight to
+ * park; the ladder itself is what bounds how long an unattended retry loop can run.
+ */
 export function classifyPublishError(error: unknown): PublishFailureKind {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = publishErrorMessage(error);
   if (
-    /\b(?:401|403)\b|unauthori[sz]ed|forbidden|cross[- ]fork|fork.{0,80}(?:pat|token|pull request)|resource not accessible by integration/i.test(message)
+    /\b(?:401|403|404)\b|unauthori[sz]ed|forbidden|repository not found|could not resolve to a repository|cross[- ]fork|fork.{0,80}(?:pat|token|pull request)|resource not accessible by integration/i.test(
+      message,
+    )
   ) return "permanent";
-  if (
-    /\b5\d\d\b|\b(?:econnreset|econnrefused|etimedout|enotfound|eai_again)\b|network(?: error| failed)?|fetch failed|timeout|timed out/i.test(message)
-  ) return "transient";
-  return "permanent";
+  return "transient";
+}
+
+/** Why a publish attempt landed where it did: a matched failure class, or the ladder running out. */
+export type PublishRetryReason = PublishFailureKind | "attempts-exhausted";
+
+export interface PublishRetryPlan {
+  action: "retry" | "park";
+  nextAttemptAt: number;
+  reason: PublishRetryReason;
+  /** Verbatim underlying error text. */
+  error: string;
+  /**
+   * Honest one-liner for logs/trace: "publish attempt N failed — retrying in Xs" while there is
+   * still a rung left on the ladder, "parked for human courier" once there is not (#227 — never
+   * "queued for retry" on a row that is not actually going to be retried).
+   */
+  message: string;
+}
+
+/**
+ * Decide what happens after `attempt` (the count of failed attempts INCLUDING this one) just
+ * failed with `error`. The single source of truth for both the durable outbox row's own retry
+ * scheduling (`RunSupervisor.publishRun`, attempt 1) and every replay after it
+ * (`RunSupervisor.replayPublishes`, attempts 2..) — so a park decided on attempt 1 and one decided
+ * on attempt 4 are reached by identical logic and logged identically.
+ */
+export function planPublishRetry(attempt: number, error: unknown, now: number = Date.now()): PublishRetryPlan {
+  const errorMessage = publishErrorMessage(error);
+  const kind = classifyPublishError(error);
+  if (kind === "permanent") {
+    return { action: "park", nextAttemptAt: Number.MAX_SAFE_INTEGER, reason: "permanent", error: errorMessage, message: "parked for human courier" };
+  }
+  if (attempt >= PUBLISH_MAX_ATTEMPTS) {
+    return {
+      action: "park", nextAttemptAt: Number.MAX_SAFE_INTEGER, reason: "attempts-exhausted", error: errorMessage,
+      message: "parked for human courier",
+    };
+  }
+  const delay = PUBLISH_RETRY_DELAYS_MS[attempt - 1]!;
+  return {
+    action: "retry", nextAttemptAt: now + delay, reason: kind, error: errorMessage,
+    message: `publish attempt ${attempt} failed — retrying in ${formatDelay(delay)}`,
+  };
+}
+
+/** "30s" / "2m" / "10m" — the ladder's own delays are round numbers, so this stays simple. */
+function formatDelay(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return remainder ? `${minutes}m${remainder}s` : `${minutes}m`;
 }
 
 export type PublishDrainResult =
@@ -59,15 +133,21 @@ export class PublishOutbox {
 
   constructor(private readonly path: string, private readonly logger: Logger) {}
 
-  /** Replaces an existing row for the run: an outbox row has exclusive publish ownership. */
-  append(op: PublishOperation): void {
+  /**
+   * Replaces an existing row for the run: an outbox row has exclusive publish ownership.
+   * `plan` is the {@link planPublishRetry} decision that produced `op` — logged VERBATIM (#227:
+   * the old log here carried no error field at all, just attempt/nextAttemptAt) with the honest
+   * retry-vs-park wording the plan already computed, so this can never drift from what `op` says.
+   */
+  append(op: PublishOperation, plan: Pick<PublishRetryPlan, "message" | "error" | "reason">): void {
     // A genuinely new operation after a previous courier handoff owns the ticket anew.
     this.cancelled.delete(op.item.id);
     const ops = this.read().filter((existing) => existing.item.id !== op.item.id);
     ops.push(op);
     this.writeAll(ops);
-    this.logger.warn("queued GitHub publish for retry", {
+    this.logger.warn(plan.message, {
       id: op.id, item: op.item.identifier, attempt: op.attempt, nextAttemptAt: op.nextAttemptAt,
+      reason: plan.reason, error: plan.error,
     });
   }
 

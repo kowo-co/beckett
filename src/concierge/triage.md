@@ -22,6 +22,13 @@ classification.
   happens to be "beckett". `role:"unknown"` means a reply target fell outside the window.
 - `replyTo` is a strong structural signal. Combine it with wording and the newest lines; do not guess
   a target from an old topic alone.
+- Read a message's `replyTo` as the context line `↳ replying to @<name>: "<excerpt>"`, and its
+  `mentions` as `↳ addressing @<name>`. `replyTo.excerpt` is a short quote of the message being
+  replied to; `mentions` lists the explicit @mention targets the author actually addressed, id
+  first. Both are absent when the message carried neither.
+- A short line like "hold on" belongs to whatever its `replyTo` excerpt and `mentions` point at.
+  A reply to another human's question is that human's turn even when the words would fit Beckett —
+  do not read a pause aimed at someone else as a pause aimed at Beckett.
 - The runtime speaking threshold is deliberately absent. Score the conversation on the fixed scale
   below; Beckett applies the operator's threshold after your response.
 

@@ -221,6 +221,7 @@ export function previewRun(input: TaskDeployInput, now: Date): Run {
     reviewCycles: 0,
     prUrl: null,
     error: null,
+    published: null,
   };
 }
 

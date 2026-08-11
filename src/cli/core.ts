@@ -1057,6 +1057,21 @@ export async function runTask(argv: string[]): Promise<void> {
     out({ runId, cancelled: true, ...(branchRef ? { branchRef: `#${branchRef}` } : {}) });
   }
 
+  // A human published the run's work by hand (git push / opened the PR themselves) — end the run
+  // `done` + `published: {via: "courier"}`, never through `cancel` (#228: the cancel verb was the
+  // only lever, so shipped work went on the ledger as `cancelled` with an error). Goes through
+  // `bus()` for the same reason cancel does: "marked it shipped" must not be said off a
+  // silently-swallowed call.
+  if (sub === "courier") {
+    const ref = _[0];
+    if (!ref) fail('usage: beckett task courier <run-id|slug> [--pr-url <url>]');
+    const run = ref.startsWith("run-") ? runStore().get(ref) : runStore().bySlug(ref);
+    if (!run) fail(`no such run: ${ref}`);
+    const prUrl = typeof flags["pr-url"] === "string" && flags["pr-url"].trim() ? flags["pr-url"].trim() : null;
+    await bus("run.courier", { runId: run.id, ...(prUrl ? { prUrl } : {}) });
+    out({ runId: run.id, couriered: true, ...(prUrl ? { prUrl } : {}) });
+  }
+
   if (sub === "show") {
     const ref = _[0];
     if (!ref) fail("usage: beckett task show <#N|#N.x>");
@@ -1137,7 +1152,7 @@ export async function runTask(argv: string[]): Promise<void> {
     out(formatDispatchTrace(readDispatchEvents(tracePath, id), id));
   }
 
-  fail("usage: beckett task create|branch|start|deploy|ask|steer|cancel|show|list|trace <...>");
+  fail("usage: beckett task create|branch|start|deploy|ask|steer|cancel|courier|show|list|trace <...>");
 }
 
 // ── preset (in-process: inspect the user-defined cast presets in ~/.beckett/presets.json) ──

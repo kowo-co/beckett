@@ -662,6 +662,25 @@ export const configFragments = {
     })
     .strict()
     .default({}),
+  // Discord ops-log mirror (issue #231): "log everything in the ops channel … robust,
+  // expressive, legible" — legible one-line renderings of daemon log events (session/turn/run
+  // lifecycle, deploy, discord gateway, browser lease, publish outbox), batched into one
+  // channel, plus a turn-in-flight heartbeat (`src/ops-log/`). OFF by default: a fork's box
+  // opts in with its own channel, same posture as `announce` and `github.activity` above.
+  ops_log: z
+    .object({
+      enabled: z.boolean().default(false),
+      channel_id: z.string().trim().refine(
+        (value) => !value || /^\d{17,20}$/.test(value),
+        "must be a Discord channel id",
+      ).default(""),
+      level: z.enum(["debug", "info", "warn", "error"]).default("info"),
+      // Components admitted at ANY level (below `level`) — an opt-in allowlist for one noisy
+      // component's debug chatter without dropping the mirror's level for everything else.
+      include_debug_components: z.array(z.string().min(1)).default([]),
+    })
+    .strict()
+    .default({}),
 } satisfies { [K in keyof Config]: z.ZodType<Config[K], z.ZodTypeDef, unknown> };
 
 // =======================================================================================
@@ -694,6 +713,7 @@ const BUILTIN_CAPABILITY_INFO: {
   dream: { id: "dream", summary: "Nightly dream pass: token ceiling + model for the self-lane day replay." },
   free_time: { id: "free-time", summary: "Weekly self-directed session: trigger, walls, token ceiling, share channel." },
   social: { id: "social", summary: "Social-media agent's chilltext chill-pass toggle." },
+  ops_log: { id: "ops-log", summary: "Discord ops-log mirror: legible event lines, batching, turn heartbeat." },
 };
 
 /**

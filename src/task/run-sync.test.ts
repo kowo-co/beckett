@@ -52,6 +52,7 @@ function makeRun(over: Partial<Run> = {}): Run {
     reviewCycles: 0,
     prUrl: null,
     error: null,
+    published: null,
     ...over,
   };
 }

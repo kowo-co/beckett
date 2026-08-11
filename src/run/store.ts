@@ -79,6 +79,12 @@ const RunSchema = z.object({
   reviewCycles: z.number().int().nonnegative(),
   prUrl: z.string().nullable(),
   error: z.string().nullable(),
+  // Nullable + defaulted so an OLD persisted row (minted before `published` existed) still parses
+  // — the whole point of this schema running in strip/tolerant mode (#228 migration safety).
+  published: z
+    .object({ via: z.enum(["outbox", "courier"]), prUrl: z.string().nullable() })
+    .nullable()
+    .default(null),
 });
 
 const LedgerSchema = z.object({
@@ -167,6 +173,7 @@ export class RunStore {
         reviewCycles: 0,
         prUrl: null,
         error: null,
+        published: null,
       };
       ledger.runs.push(run);
       return structuredClone(run);
@@ -203,6 +210,27 @@ export class RunStore {
       if (!run) throw new Error(`no such run: ${id}`);
       Object.assign(run, patch);
       run.updatedAt = this.now().toISOString();
+      return structuredClone(run);
+    });
+  }
+
+  /**
+   * Backfill the PR URL on a courier-published run once a human knows it (#228). There is no
+   * automatic signal for a courier-landed PR — the daemon never drove that publish — so this is a
+   * plain setter for a human/future caller to invoke explicitly. Deliberately narrow: a no-op
+   * (returns the run unchanged) unless the run is actually `published.via === "courier"` with
+   * `prUrl` still `null`, so it can never clobber a normal outbox publish or overwrite evidence
+   * that is already there. Leaves `state`/`error` untouched — a courier run is already `done`.
+   */
+  async backfillCourierPrUrl(id: string, prUrl: string): Promise<Run> {
+    return this.mutate((ledger) => {
+      const run = ledger.runs.find((candidate) => candidate.id === id);
+      if (!run) throw new Error(`no such run: ${id}`);
+      if (run.published?.via === "courier" && run.published.prUrl === null) {
+        run.published = { via: "courier", prUrl };
+        run.prUrl = prUrl;
+        run.updatedAt = this.now().toISOString();
+      }
       return structuredClone(run);
     });
   }

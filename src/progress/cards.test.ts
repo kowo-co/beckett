@@ -200,6 +200,28 @@ describe("reduceProgressCard", () => {
     expect(state.phase).toBe("shipped");
     expect(state.detail).toBe("");
   });
+
+  // #228: a human-courier handoff is its own terminal state — never plain "shipped" (which would
+  // read as the outbox landing it) and never "cancelled" (the run finished; a human just published
+  // it by hand).
+  test("a run reaching `done:courier` reads as shipped (couriered), terminal, no alert", () => {
+    const state = reduceProgressCard(null, ev("done:courier", "passed", "shipped by human courier"), 0)!;
+    expect(state.phase).toBe("shipped (couriered)");
+    expect(state.terminal).toBe(true);
+    expect(state.alert).toBe(false);
+  });
+
+  test("a `done:courier` event carrying a PR URL shows it in the detail (the backfill seam's effect)", () => {
+    const state = reduceProgressCard(null, ev("done:courier", "passed", "https://github.com/o/r/pull/9"), 0)!;
+    expect(state.phase).toBe("shipped (couriered)");
+    expect(state.detail).toBe("https://github.com/o/r/pull/9");
+  });
+
+  test("a `done:courier` event with no message still ships (couriered), with no detail", () => {
+    const state = reduceProgressCard(null, ev("done:courier", "passed"), 0)!;
+    expect(state.phase).toBe("shipped (couriered)");
+    expect(state.detail).toBe("");
+  });
 });
 
 describe("renderProgressCard", () => {
@@ -222,6 +244,7 @@ describe("renderProgressCard", () => {
     expect(alert).toContain("\n— worker silent");
     expect(renderProgressCard({ ...base, phase: "done", terminal: true }, STARTED)).toContain("✓");
     expect(renderProgressCard({ ...base, phase: "cancelled", terminal: true }, STARTED)).toContain("⛔");
+    expect(renderProgressCard({ ...base, phase: "shipped (couriered)", terminal: true }, STARTED)).toContain("✓");
   });
 
   test("a huge error can never overflow one Discord message", () => {

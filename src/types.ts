@@ -250,6 +250,27 @@ export interface IncomingForwardedEmbed {
   urls: string[];
 }
 
+/**
+ * A link preview Discord attached to an ORDINARY message (issue #235). Discord attaches these a
+ * beat AFTER the message itself, so the gateway settles them before the turn is built — without
+ * that, a "@beckett what do you make of <url>" turn saw a bare link and improvised "nothing came
+ * through on my end". Reduced to display metadata; the description is already truncated by the
+ * gateway so a giant article preview cannot flood a turn.
+ */
+export interface IncomingLinkEmbed {
+  title?: string;
+  description?: string;
+  url?: string;
+}
+
+/** An explicit @mention target on an inbound message: who the author actually addressed. */
+export interface IncomingMentionTarget {
+  /** Discord user id — the authority. */
+  id: string;
+  /** Display name at capture time (render label only — never authoritative). */
+  name: string;
+}
+
 /** Original material carried by Discord's message-forward snapshot, not words authored by the sender. */
 export interface IncomingMessageSnapshot {
   content: string;
@@ -285,6 +306,19 @@ export interface IncomingMessage {
   /** A bot reply reference could not be inspected; privacy-sensitive routing must fail closed. */
   repliedToBotUnverified?: boolean;
   mentionsBot: boolean;
+  /**
+   * Everyone this message explicitly @mentioned, in Discord's own order (issue #232). `mentionsBot`
+   * answers only "was I addressed"; this answers "who was", which is what the ambient classifier
+   * needs to stop guessing who is talking to whom. Absent (not empty) when the message mentioned
+   * nobody, so the byte-shape of an ordinary message is unchanged.
+   */
+  mentionedUsers?: IncomingMentionTarget[];
+  /**
+   * Link previews attached to this message, settled by the gateway (issue #235). An empty ARRAY
+   * means the gateway looked and Discord attached none; `undefined` means nothing looked at all
+   * (a legacy/hand-built message), and the two are read differently — see `contentWithLinkEmbeds`.
+   */
+  embeds?: IncomingLinkEmbed[];
   authorIsBot: boolean;
   /**
    * Present ONLY when the author is an allow-listed trusted peer Beckett (federation). Its presence
@@ -1161,6 +1195,19 @@ export interface Config {
     /** Route composed X posts through chilltext before they reach the browser lane. Default
      *  true; chilltext already fails open, so false is purely a taste toggle. */
     chill: boolean;
+  };
+  /** Discord ops-log mirror (issue #231): legible one-line renderings of daemon log events,
+   *  batched into one channel, plus a turn-in-flight heartbeat. `src/ops-log/`. */
+  ops_log: {
+    /** Master switch. Default false — the DEPLOY config (not this repo's example) turns it on. */
+    enabled: boolean;
+    /** Discord channel id the mirror posts into. Empty means inactive even if enabled=true. */
+    channel_id: string;
+    /** Minimum level mirrored to Discord — independent of BECKETT_LOG_LEVEL, which gates stderr. */
+    level: LogLevel;
+    /** Components admitted at ANY level even below `level` — an opt-in allowlist for one noisy
+     *  component's debug chatter without dropping the global level for everything else. */
+    include_debug_components: string[];
   };
 }
 

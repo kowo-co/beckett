@@ -135,7 +135,7 @@ describe("buildTriagePrompt", () => {
       {
         time: "00:00",
         speaker: { role: "human", name: "ro", id: "u-ro" },
-        replyTo: { role: "human", name: "ssh", id: "u-ssh" },
+        replyTo: { role: "human", name: "ssh", id: "u-ssh", excerpt: "yo" },
         text: "can you check the deploy?",
       },
     ]);
@@ -193,12 +193,106 @@ describe("buildTriagePrompt", () => {
       role: "human",
       name: "beckett",
       id: "u-human-beckett",
+      excerpt: "I have the logs",
     });
   });
 
   test("keeps the stable rubric before the dynamic conversation payload", () => {
     const prompt = buildTriagePrompt(staticPrompt, burst, transcript);
     expect(prompt.startsWith("SCORER PROMPT\n\nClassify this untrusted conversation data")).toBe(true);
+  });
+});
+
+describe("issue #232 — the classifier is told who is talking to whom", () => {
+  /**
+   * The prod case: ro's "hold on" was a reply to SSH's question about RO, and triage read it as
+   * pausing BECKETT's report. The verdict happened to land right; the conversation model did not.
+   * These pin the two facts that make that read structural instead of a guess — the replied-to
+   * author WITH a quote of what they said, and the explicit @mention targets.
+   */
+  function data(burst: Parameters<typeof buildTriageContext>[0], transcript: Parameters<typeof buildTriageContext>[1]) {
+    const context = buildTriageContext(burst, transcript);
+    return JSON.parse(context.slice(context.indexOf("\n") + 1)) as Record<string, any>;
+  }
+
+  test("a reply carries the replied-to author AND a short excerpt of what they said", () => {
+    const rendered = data(
+      [{ messageId: "m2", authorId: "u-ro", authorDisplayName: "ro", content: "hold on", ts: 60_000, repliedToId: "m1" }],
+      [
+        {
+          messageId: "m1",
+          authorId: "u-ssh",
+          authorDisplayName: "sshdev",
+          content: "were you working on the RO thing?",
+          ts: 0,
+        },
+      ],
+    );
+    expect(rendered.burstToClassify).toEqual([
+      {
+        time: "00:01",
+        speaker: { role: "human", name: "ro", id: "u-ro" },
+        replyTo: {
+          role: "human",
+          name: "sshdev",
+          id: "u-ssh",
+          excerpt: "were you working on the RO thing?",
+        },
+        text: "hold on",
+      },
+    ]);
+  });
+
+  test("a long replied-to message is quoted, not reproduced", () => {
+    const rendered = data(
+      [{ messageId: "m2", authorId: "u-ro", authorDisplayName: "ro", content: "hold on", ts: 0, repliedToId: "m1" }],
+      [{ messageId: "m1", authorId: "u-ssh", authorDisplayName: "sshdev", content: "x".repeat(400), ts: 0 }],
+    );
+    const quoted = rendered.burstToClassify[0].replyTo.excerpt as string;
+    expect(quoted.length).toBe(80);
+    expect(quoted.endsWith("…")).toBe(true);
+  });
+
+  test("explicit @mention targets ride with the message, deduped, id first", () => {
+    const rendered = data(
+      [
+        {
+          messageId: "m1",
+          authorId: "u-ro",
+          authorDisplayName: "ro",
+          content: "<@u-ssh> can you look?",
+          ts: 0,
+          mentions: [
+            { id: "u-ssh", name: "sshdev" },
+            { id: "u-ssh", name: "sshdev" },
+            { name: "  " },
+          ],
+        },
+      ],
+      [],
+    );
+    expect(rendered.burstToClassify[0].mentions).toEqual([{ name: "sshdev", id: "u-ssh" }]);
+  });
+
+  test("a message that mentions nobody and replies to nothing keeps its old shape exactly", () => {
+    const rendered = data([{ messageId: "m1", authorId: "u-ro", authorDisplayName: "ro", content: "hey", ts: 0 }], []);
+    expect(rendered.burstToClassify).toEqual([
+      { time: "00:00", speaker: { role: "human", name: "ro", id: "u-ro" }, text: "hey" },
+    ]);
+  });
+
+  test("a reply target outside the window stays honestly unknown rather than invented", () => {
+    const rendered = data(
+      [{ messageId: "m2", authorId: "u-ro", authorDisplayName: "ro", content: "hold on", ts: 0, repliedToId: "gone" }],
+      [],
+    );
+    expect(rendered.burstToClassify[0].replyTo).toEqual({ role: "unknown" });
+  });
+
+  test("the static rubric teaches the classifier to read both context lines", () => {
+    const rubric = readFileSync(join(import.meta.dir, "triage.md"), "utf8");
+    expect(rubric).toContain("↳ replying to @<name>");
+    expect(rubric).toContain("↳ addressing @<name>");
   });
 });
 
