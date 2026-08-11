@@ -188,3 +188,9 @@ channel_id = ""
 
 [social]
 chill = true
+
+[ops_log]
+enabled = false
+channel_id = ""
+level = "info"
+include_debug_components = []
