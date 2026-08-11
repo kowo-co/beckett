@@ -41,7 +41,11 @@ export type Harness = "claude" | "codex" | "pi" | (string & {});
 export type DriverKind = "claude-cli-stream" | "codex-exec-oneshot" | "pi-cli-stream";
 
 /** Reasoning depth; mapped per-harness at spawn (Spec 02 §9.1). */
-export type Effort = "low" | "medium" | "high" | "xhigh";
+/**
+ * Reasoning effort. `ultracode` is v7's deepest tier — the effort an `--ultracode` run's
+ * implement stage is cast at (claude 2.1.x accepts it on `--effort`).
+ */
+export type Effort = "low" | "medium" | "high" | "xhigh" | "ultracode";
 
 /** Worker runtime lifecycle (Spec 02 §2, §10.1). `done` is set by GATE, not the driver. */
 export type WorkerState =
@@ -907,6 +911,15 @@ export interface Config {
     /** Board name used when a caller omits --board. */
     default_board: string;
   };
+  /** v7 runs — the ticketless execution unit driven by `src/run/supervisor.ts`. */
+  runs: {
+    /** Concurrent live runs; over-cap admissions queue FIFO. Default 3. */
+    max_live: number;
+    /** Implement↔review round-trips before the supervisor parks the run for a human. Default 2. */
+    review_cycles_max: number;
+    /** Per-run USD ceiling; 0 falls back to `[budget] per_task_usd_cap`. Default 0. */
+    budget_usd_per_run: number;
+  };
   /** OPS-124 — GitHub PR poller. The credential lives in env; active only when one is set. */
   github: {
     /** How often to re-read watched PRs' review/CI/merge signal (seconds). */
@@ -1204,6 +1217,19 @@ export interface SpawnSpec {
   // worker runs IN the project checkout (no worktree) so we never clobber the project's own
   // .claude/settings.json — claude layers --settings on top rather than replacing it.
   settingsPath?: string;
+  /**
+   * v7 cross-session addressing: the session NAME the harness registers itself under
+   * (`claude --name <sessionName>`), so the concierge can message a live worker by a stable
+   * handle instead of a session uuid it never sees. Absent → no `--name` flag (pre-v7 behavior).
+   */
+  sessionName?: string;
+  /**
+   * Extra TOP-LEVEL keys merged into the worker's `--settings` JSON (v7: notably
+   * `"crossSessionInbound": "accept"` and `"workflowSizeGuideline"`). Merged over the rendered
+   * hook settings, so a caller can add settings without the hook renderer growing a vocabulary
+   * for each one. Absent → the settings file is exactly the rendered hooks (pre-v7 behavior).
+   */
+  settingsExtra?: Record<string, unknown>;
 }
 
 export interface SpawnResult {

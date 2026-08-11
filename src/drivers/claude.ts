@@ -367,6 +367,11 @@ export class ClaudeDriver extends BaseDriver implements HarnessDriver {
     if (mode.kind === "spawn") args.push("--session-id", mode.sessionId);
     else args.push("--resume", mode.sessionId);
 
+    // v7 cross-session addressing: register this session under a stable NAME so another session
+    // (the concierge) can message it for status. Only emitted when the caller asked for one, so
+    // every pre-v7 spawn produces byte-identical argv.
+    if (spec.sessionName && spec.sessionName.trim()) args.push("--name", spec.sessionName.trim());
+
     if (spec.systemAppend && spec.systemAppend.trim().length > 0) {
       args.push("--append-system-prompt", spec.systemAppend);
     }

@@ -38,6 +38,8 @@ import { createTrackerClient, type TrackerClient } from "../tracker/client.ts";
 import { boredBaseUrl } from "../bored/client.ts";
 import { createTrackerPoller, type TrackerPoller } from "../tracker/poll.ts";
 import { BECKETT_COMMENT_MARKER, createDispatcher, type Dispatcher } from "../dispatch/dispatcher.ts";
+import { RunStore } from "../run/store.ts";
+import { createRunSupervisor, type RunSupervisor } from "../run/supervisor.ts";
 import { createStagesExtension, stageViewOf } from "../dispatch/stages.ts";
 import { createProgressCardService, type ProgressCardService } from "../progress/cards.ts";
 import { createGitHubPrPoller, type GitHubPrPoller } from "../github/poll.ts";
@@ -75,6 +77,7 @@ import { reconcileTaskTickets } from "../task/reconcile.ts";
 import { createAgentMailApi, defaultMailStateFile, safeMailError } from "../mail/index.ts";
 import { createAgentMailPoller, defaultMailListenerStateFile, type AgentMailPoller } from "../mail/listener.ts";
 import { ExtensionRegistry, type ExtensionContext } from "../ext/index.ts";
+import { ActionClass } from "../capability/index.ts";
 import { pendingConfigurationProblems, startPendingConfigurationDaemon } from "./pending.ts";
 // NOTE: the Phase 4 organs (github/dns/deploy/mail) are deliberately NOT daemon-registered yet —
 // deploy.create's in-daemon host side effects (cloudflared + ~/.cloudflared/config.yml) need
@@ -170,6 +173,8 @@ interface BootedSystem {
   activityPoller: GitHubActivityPoller | null;
   mailPoller: AgentMailPoller | null;
   dispatcher: Dispatcher;
+  /** The v7 run engine (`src/run/supervisor.ts`) — ticketless dispatch. */
+  runSupervisor: RunSupervisor;
   concierge: Concierge;
   voiceGateway: VoiceGateway;
   statusDashboard: StatusDashboardService;
@@ -591,6 +596,76 @@ async function boot(): Promise<BootedSystem> {
     for (const p of pollers.values()) p.poke();
   });
 
+  // 4b. The v7 RUN engine — `beckett task deploy` files a Run, and this drives it implement →
+  //     review → publish → done with no ticket, board, or poller involved. It runs ALWAYS
+  //     (unlike the tracker path, which `config.tracker.enabled` still gates), so a board-less
+  //     instance is a fully working Beckett. Wave B removes the dispatcher above; until then the
+  //     two live side by side, sharing the spend ledger, the journal, and the dispatch event bus.
+  const runStore = new RunStore(join(beckettDir, "runs.json"));
+  const runSupervisor = createRunSupervisor({
+    store: runStore,
+    config,
+    stages: stageViewOf(extensions),
+    resolveRepoRoot: (run) => join(PROJECTS_ROOT, projectSlug(run.repo || run.id)),
+    publishRepo,
+    progress: concierge.progressSink(),
+    dispatchEventsPath: join(paths.eventsDir, "dispatch.jsonl"),
+    dispatchLiveSink: (event) => {
+      if (progressCards) void progressCards.observe(event);
+      return concierge.postDispatchEvent(event);
+    },
+    publishOutboxPath: join(beckettDir, "run-publish-outbox.jsonl"),
+    runtimeStatePath: join(beckettDir, "run-state.json"),
+    spendLedgerPath: paths.spend,
+    preflight: (harness) => preflightFor(harness, config),
+    onPrOpened: ({ prUrl, run }) => {
+      const parsed = parsePrUrl(prUrl);
+      if (!parsed || !prPoller) return;
+      prPoller.watch({
+        repo: parsed.repo,
+        number: parsed.number,
+        url: prUrl,
+        title: run.title,
+        // The PR poller is keyed by the RUN id now — its relays land on the run's own channel.
+        ticket: run.id,
+        ...(run.channelId ? { channel: run.channelId } : {}),
+      });
+    },
+    logger: logger.child("run"),
+  });
+  // `beckett task deploy` pings `run.deploy` on the control bus; `beckett run steer` pings
+  // `run.steer`. Registered post-construction because the supervisor needs the concierge's
+  // progress sink, so it cannot exist when the concierge builds its own bus surface.
+  concierge.registerBusCapability({
+    id: "runs",
+    summary: "v7 runs: deploy admission and mid-flight steering",
+    actionClass: ActionClass.FREE,
+    cliVerbs: [],
+    busCommands: [
+      {
+        name: "run.deploy",
+        summary: "admit a freshly-created run for staffing",
+        handle: async (req) => {
+          const runId = typeof req.args.runId === "string" ? req.args.runId.trim() : "";
+          if (!runId) return { ok: false, error: "run.deploy needs a runId" };
+          await runSupervisor.admit(runId);
+          return { ok: true, data: { runId } };
+        },
+      },
+      {
+        name: "run.steer",
+        summary: "deliver a note to a live run (nudge), or buffer it for its next stage",
+        handle: async (req) => {
+          const runId = typeof req.args.runId === "string" ? req.args.runId.trim() : "";
+          const note = typeof req.args.note === "string" ? req.args.note : "";
+          if (!runId || !note.trim()) return { ok: false, error: "run.steer needs a runId and a note" };
+          const delivery = await runSupervisor.steer(runId, note);
+          return { ok: true, data: { runId, delivery } };
+        },
+      },
+    ],
+  });
+
   // #31: a PR opened by hand from the concierge seat (`beckett gh pr create`) reaches the poller
   // through the `pr.watch` bus op, which lands here. Wired only when a poller exists (a PAT is set);
   // otherwise the bus op reports its clean no-op. `watch` persists immediately, so a hand-opened PR
@@ -934,6 +1009,11 @@ async function boot(): Promise<BootedSystem> {
   // race, or any other wedge). Runs after crash recovery so it never races the boot re-staff sweep.
   dispatcher.startStaffingWatchdog();
 
+  // The v7 run engine: crash-recover its own ledger, drain durable publish rows, re-admit every
+  // live run, then arm its checkpoint + staffing loops. Deliberately after the dispatcher's
+  // recovery so the two never race the same worktree during wave A's overlap.
+  await runSupervisor.start();
+
   // EARLY extension background loops start here — after crash recovery (so a migrated organ
   // never races the recovery block) and BEFORE the pollers, which stay last so events only flow
   // once everything else is ready to consume them. The browser agent's recover() rides this
@@ -1033,7 +1113,7 @@ async function boot(): Promise<BootedSystem> {
 
   logger.info("beckett v4 online", { liveWorkers: dispatcher.live().length, boards: [...pollers.keys()] });
 
-  return { config, logger, client, clients, poller, pollers, prPoller, activityPoller, mailPoller, dispatcher, concierge, voiceGateway, statusDashboard, quick, browserAgent, browser, extensions, lifecycleLedgerPath };
+  return { config, logger, client, clients, poller, pollers, prPoller, activityPoller, mailPoller, dispatcher, runSupervisor, concierge, voiceGateway, statusDashboard, quick, browserAgent, browser, extensions, lifecycleLedgerPath };
 }
 
 /** Tear the system down in reverse boot order. Best-effort: one failure never blocks the rest. */
@@ -1052,6 +1132,7 @@ async function shutdown(sys: BootedSystem, signal: string): Promise<void> {
   } catch (err) {
     sys.logger.warn("voice leaveAll on shutdown failed", { error: (err as Error).message });
   }
+  sys.runSupervisor.stop();
   sys.prPoller?.stop();
   sys.activityPoller?.stop();
   sys.mailPoller?.stop();

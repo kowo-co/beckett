@@ -92,7 +92,7 @@ const HarnessConfigSchema = z
         // claude 2.1.197). Sonnet 5 @ high is the worker default — the doctrine caps Sonnet at
         // high (a task that wants xhigh belongs on Opus 5). A ticket may cast a different
         // effort per stage. Honored by ClaudeDriver.buildArgs + dispatch/spawn#buildEnvelope.
-        default_effort: z.enum(["low", "medium", "high", "xhigh"]).default("high"),
+        default_effort: z.enum(["low", "medium", "high", "xhigh", "ultracode"]).default("high"),
         // v0 seed: bounded by the worktree + PreToolUse scope hook, so the worker runs
         // autonomously without per-edit prompts (Spec 12 §1.7; Spec 02 §8). Honored by
         // ClaudeDriver.buildArgs.
@@ -124,7 +124,7 @@ const HarnessConfigSchema = z
         // Empty = defer to codex's own ~/.codex/config.toml model (account-appropriate).
         // The Concierge can still cast an explicit model per ticket.
         default_model: z.string().default(""),
-        default_effort: z.enum(["low", "medium", "high", "xhigh"]).default("high"),
+        default_effort: z.enum(["low", "medium", "high", "xhigh", "ultracode"]).default("high"),
         // Sandbox OFF by default: `workspace-write` blocks network unless explicitly enabled,
         // which silently broke every codex worker that needed to install a dep / curl / clone /
         // enumerate (it "yaps about a network sandbox issue" and stalls). `danger-full-access`
@@ -148,7 +148,7 @@ const HarnessConfigSchema = z
         bin: z.string().min(1).default("pi"),
         default_provider: z.string().min(1).default("openai-codex"),
         default_model: z.string().min(1).default("gpt-5.6-terra"),
-        thinking: z.enum(["low", "medium", "high", "xhigh"]).default("high"),
+        thinking: z.enum(["low", "medium", "high", "xhigh", "ultracode"]).default("high"),
       })
       .default({}),
   })
@@ -416,6 +416,23 @@ export const configFragments = {
   // The bored ticket queue (OPS-190/191). bored's loopback URL rides BECKETT_BORED_URL in env,
   // not here; boards are plain names. Beckett keeps the canonical TicketStates.
   tracker: TrackerConfigSchema,
+  // v7 RUNS — the ticketless execution unit (`beckett task deploy`). The RunSupervisor
+  // (`src/run/supervisor.ts`) is the engine; these are its only knobs. There is deliberately no
+  // `claude_bin` here: worker harness config stays in `[harness.claude]`, one source of truth.
+  runs: z
+    .object({
+      // Concurrent live runs. Each run owns its own worktree, so this is a fleet-cost bound, not
+      // a correctness one; over-cap admissions queue FIFO and pump as slots free.
+      max_live: posInt.default(3),
+      // Implement↔review round-trips before the supervisor stops reworking and parks for a human.
+      review_cycles_max: posInt.default(2),
+      // Per-run USD ceiling, summed from the spend ledger over rows at/after the run's createdAt.
+      // 0 (the default) falls back to `[budget] per_task_usd_cap`, so an install that already
+      // tuned the task cap keeps exactly that behavior.
+      budget_usd_per_run: z.number().min(0).default(0),
+    })
+    .strict()
+    .default({}),
   // OPS-124 — GitHub PR sense: the poller that watches the PRs Beckett opened on the kowo-co
   // org and relays review/CI/merge signal. The credential (the GitHub App key, or a legacy PAT)
   // lives in env, not here; the poller is active only when one is configured. GitHub's REST API
@@ -696,6 +713,7 @@ const BUILTIN_CAPABILITY_INFO: {
   paths: { id: "paths", summary: "Filesystem layout: beckett dir, db, logs, events, socket." },
   identity: { id: "identity", summary: "Beckett's external identities (GitHub user, Gmail address)." },
   tracker: { id: "tracker", summary: "bored ticket-queue: board names, polling." },
+  runs: { id: "runs", summary: "v7 runs: live cap, rework cap, per-run budget." },
   github: { id: "github", summary: "GitHub sense: PR review/CI/merge poller + external-activity relay." },
   proactivity: { id: "proactivity", summary: "Ambient interjection policy (burst triage, cooldowns, channel modes)." },
   shared_context: { id: "shared-context", summary: "Channel-scoped shared context: attributed transcripts + server memory." },

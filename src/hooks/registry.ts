@@ -12,7 +12,7 @@
 
 /** A single hook entry: one event, one optional tool matcher, one shell command. */
 export interface HookSpec {
-  event: "PreToolUse" | "PostToolUse" | "UserPromptSubmit";
+  event: "PreToolUse" | "PostToolUse" | "UserPromptSubmit" | "Stop";
   /** Tool name pattern (passed as `matcher` to claude). Omit to match all tools. */
   matcher?: string;
   command: string;

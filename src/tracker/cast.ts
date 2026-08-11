@@ -68,7 +68,7 @@ const HarnessSpecSchema: z.ZodType<HarnessSpec> = z.object({
     message: `unknown harness — must be one of: ${availableHarnesses().join(", ")}`,
   }),
   model: z.string().min(1).optional(),
-  effort: z.enum(["low", "medium", "high", "xhigh"]).optional(),
+  effort: z.enum(["low", "medium", "high", "xhigh", "ultracode"]).optional(),
   reviewTier: z.enum(["self", "fresh"]).optional(),
 });
 

@@ -51,7 +51,7 @@ import { log } from "../log.ts";
 import { excludeFromGit, installScaffoldingGuardHook, SCAFFOLDING_DIR } from "../worker/worktree.ts";
 import { scopeGuardSpec } from "../hooks/scope-guard.ts";
 import { runtimeAwarenessSpec } from "../hooks/runtime-awareness.ts";
-import { renderClaudeSettings } from "../hooks/registry.ts";
+import { renderClaudeSettings, type HookSpec } from "../hooks/registry.ts";
 import { buildResumeBrief } from "./resume-brief.ts";
 import { gatherEnvBootstrap } from "./env-bootstrap.ts";
 import { defaultEffortFor, stageRegistry, type StageView } from "./stages.ts";
@@ -197,6 +197,20 @@ export interface SpawnWorkerArgs {
    * diverging stage tables. Absent (tests / embedders) → the shared default view.
    */
   stages?: StageView;
+  /**
+   * v7 cross-session addressing: the stable name this worker's harness session registers under
+   * (`claude --name`), so the concierge can ask a LIVE worker for status by handle. Absent →
+   * no `--name` flag, exactly as before.
+   */
+  sessionName?: string;
+  /**
+   * v7: extra top-level keys merged into the worker's `--settings` file (notably
+   * `crossSessionInbound: "accept"` and `workflowSizeGuideline`). Absent → the settings file is
+   * exactly the rendered hook settings, as before.
+   */
+  settingsExtra?: Record<string, unknown>;
+  /** Extra hooks registered into the worker's `--settings` (v7: the spec-gate Stop hook). */
+  extraHooks?: HookSpec[];
   logger?: Logger;
 }
 
@@ -232,6 +246,9 @@ const ENVELOPE_BY_EFFORT: Record<Effort, { turnCap: number; wallClockS: number }
   medium: { turnCap: 30, wallClockS: 1200 },
   high: { turnCap: 60, wallClockS: 2400 },
   xhigh: { turnCap: 100, wallClockS: 3600 },
+  // v7 ultracode: the deepest tier, cast on `--ultracode` runs. Same posture as every other
+  // row — a supervision ESTIMATE, never a hard kill.
+  ultracode: { turnCap: 160, wallClockS: 7200 },
 };
 
 /** Max chars of fallback assistant text used as a summary. */
@@ -329,6 +346,13 @@ export function writeWorkerMeta(
   slowToolMs: number,
   /** `<beckettDir>/worker-browser` when the shared worker browser home is enabled, else null. */
   sharedBrowserHome: string | null,
+  /**
+   * v7 (optional, absent ⇒ byte-identical output to pre-v7): extra hooks to register (the
+   * spec-gate Stop hook) and extra TOP-LEVEL settings keys to merge over the rendered hooks
+   * (`crossSessionInbound`, `workflowSizeGuideline`). Hooks are never clobbered — a caller's
+   * `hooks` key in `extra` would be ignored in favour of the rendered ones.
+   */
+  extra: { hooks?: HookSpec[]; settings?: Record<string, unknown> } = {},
 ): { doneSchemaPath: string; settingsPath: string; mcpConfigPath: string } {
   const metaDir = join(repoRoot, SCAFFOLDING_DIR);
   mkdirSync(metaDir, { recursive: true });
@@ -337,8 +361,11 @@ export function writeWorkerMeta(
   // Runtime awareness (PostToolUse): only registered when enabled — 0 means no hook at all,
   // so a disabled install pays zero subprocess overhead per tool call.
   if (slowToolMs > 0) hookSpecs.push(runtimeAwarenessSpec(runtimeAwarenessPath, slowToolMs));
+  if (extra.hooks?.length) hookSpecs.push(...extra.hooks);
   const settingsPath = join(metaDir, "worker-settings.json");
-  writeFileSync(settingsPath, JSON.stringify(renderClaudeSettings(hookSpecs), null, 2));
+  const rendered = renderClaudeSettings(hookSpecs);
+  const settings = extra.settings ? { ...extra.settings, ...rendered } : rendered;
+  writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
 
   const doneSchemaPath = join(metaDir, "done-schema.json");
   writeFileSync(doneSchemaPath, JSON.stringify(DONE_SCHEMA, null, 2));
@@ -516,6 +543,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<TicketWorkerHa
       config.supervise.worker_browser_shared_home
         ? join(buildPaths(config).beckettDir, "worker-browser")
         : null,
+      {
+        ...(args.extraHooks?.length ? { hooks: args.extraHooks } : {}),
+        ...(args.settingsExtra ? { settings: args.settingsExtra } : {}),
+      },
     );
 
     // Environment bootstrap: a spawn-time workspace snapshot appended to implement/rework (and
@@ -543,6 +574,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<TicketWorkerHa
       doneSchemaPath,
       settingsPath,
       mcpConfigPath,
+      ...(args.sessionName ? { sessionName: args.sessionName } : {}),
+      ...(args.settingsExtra ? { settingsExtra: args.settingsExtra } : {}),
     };
 
     const spawnResult = await driver.spawn(spec);

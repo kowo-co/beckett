@@ -57,7 +57,7 @@ export type HarnessName = "claude" | "codex" | "pi" | (string & {});
 export interface HarnessSpec {
   harness: HarnessName;
   model?: string;
-  effort?: "low" | "medium" | "high" | "xhigh";
+  effort?: "low" | "medium" | "high" | "xhigh" | "ultracode";
   /**
    * v3.1 review gate (set on the `implement` cast). `self` = the implement worker self-verifies
    * inline and the ticket goes straight to `done` (one pass, no separate reviewer). `fresh` = a
