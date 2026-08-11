@@ -41,7 +41,12 @@ import { BECKETT_COMMENT_MARKER, createDispatcher, type Dispatcher } from "../di
 import { RunStore } from "../run/store.ts";
 import { createRunSupervisor, runProjectSlug, runSpecReader, type RunSupervisor } from "../run/supervisor.ts";
 import { createStagesExtension, stageViewOf } from "../dispatch/stages.ts";
-import { createProgressCardService, type ProgressCardService } from "../progress/cards.ts";
+import {
+  createProgressCardService,
+  shouldObserveRunCard,
+  shouldObserveTicketCard,
+  type ProgressCardService,
+} from "../progress/cards.ts";
 import { createGitHubPrPoller, type GitHubPrPoller } from "../github/poll.ts";
 import { createGitHubActivityPoller, type GitHubActivityPoller } from "../github/activity.ts";
 import { parsePrUrl } from "../github/types.ts";
@@ -506,7 +511,7 @@ async function boot(): Promise<BootedSystem> {
       // by the bus. This lane's own switch is `progress.cards_as_code` — `progressCards` may
       // exist purely for `runs.cards` (the v7 lane below), so re-check the flag here rather than
       // just null-checking the service.
-      if (progressCards && config.progress.cards_as_code) void progressCards.observe(event);
+      if (shouldObserveTicketCard(progressCards, config.progress.cards_as_code)) void progressCards?.observe(event);
       return concierge.postDispatchEvent(event);
     },
     runtimeStatePath: join(beckettDir, "dispatcher-state.json"),
@@ -629,7 +634,7 @@ async function boot(): Promise<BootedSystem> {
     dispatchLiveSink: (event) => {
       // `runs.cards` (default ON) is this lane's own switch — the deploy receipt posts
       // independently of the ticket dispatcher's `progress.cards_as_code` above.
-      if (progressCards && runCardsEnabled) void progressCards.observe(event);
+      if (shouldObserveRunCard(progressCards, runCardsEnabled)) void progressCards?.observe(event);
       return concierge.postDispatchEvent(event);
     },
     publishOutboxPath: join(beckettDir, "run-publish-outbox.jsonl"),

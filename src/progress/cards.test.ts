@@ -4,7 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DiscordUnknownMessageError, type DiscordGateway } from "../discord/gateway.ts";
 import type { DispatchEvent, DispatchOutcome } from "../dispatch/events.ts";
-import { createProgressCardService, reduceProgressCard, renderProgressCard, type ProgressCardState } from "./cards.ts";
+import {
+  createProgressCardService,
+  reduceProgressCard,
+  renderProgressCard,
+  shouldObserveRunCard,
+  shouldObserveTicketCard,
+  type ProgressCardState,
+} from "./cards.ts";
 
 const TS = "2026-08-04T21:34:00.000Z";
 const STARTED = Date.parse(TS);
@@ -415,6 +422,30 @@ describe("ProgressCardService", () => {
     }
   });
 
+  test("the deploy-instant card reads 0/0 even with no specReader wired and no spec.md yet", async () => {
+    // Before a worktree (and so a spec.md) exists, specReader has nothing to read — the deploy
+    // receipt still promises "queued · 0/0" per the architecture doc, so this one event
+    // synthesizes the placeholder rather than dropping the checklist segment.
+    const h = harness();
+    try {
+      await h.service.observe(runEv("run:deploy", "started", "queued"));
+      expect(h.g.posts[0]!.content).toContain("0/0 checked");
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  test("once a real specReader is wired, its result wins over the deploy-instant placeholder", async () => {
+    const h = harness({ specReader: (id) => (id === "run-20260810-oauth" ? { done: 1, total: 4 } : null) });
+    try {
+      await h.service.observe(runEv("run:deploy", "started", "queued"));
+      expect(h.g.posts[0]!.content).toContain("1/4 checked");
+      expect(h.g.posts[0]!.content).not.toContain("0/0");
+    } finally {
+      h.cleanup();
+    }
+  });
+
   test("a wired specReader folds the run's live checklist progress into the card", async () => {
     const h = harness({ specReader: (id) => (id === "run-20260810-oauth" ? { done: 3, total: 7 } : null) });
     try {
@@ -449,5 +480,34 @@ describe("ProgressCardService", () => {
     } finally {
       h.cleanup();
     }
+  });
+});
+
+describe("boot sink gating (src/shell/main.ts's two dispatchLiveSink wirings)", () => {
+  // Both lanes share one card service instance; each sink must check its OWN flag before
+  // forwarding, independent of whether the service itself exists. A regression that drops
+  // either flag check (reverting to a bare service-truthy null-check) fails here.
+  test("shouldObserveTicketCard requires both the service and progress.cards_as_code", () => {
+    expect(shouldObserveTicketCard({}, true)).toBe(true);
+    expect(shouldObserveTicketCard({}, false)).toBe(false);
+    expect(shouldObserveTicketCard(null, true)).toBe(false);
+    expect(shouldObserveTicketCard(null, false)).toBe(false);
+  });
+
+  test("shouldObserveRunCard requires both the service and runs.cards — flag off skips observe()", () => {
+    expect(shouldObserveRunCard({}, true)).toBe(true);
+    expect(shouldObserveRunCard({}, false)).toBe(false); // runs.cards=false: the spec's "flag off" case
+    expect(shouldObserveRunCard(null, true)).toBe(false);
+    expect(shouldObserveRunCard(null, false)).toBe(false);
+  });
+
+  test("the two lanes are independent: either can be on while the other is off", () => {
+    const service = {};
+    // runs.cards on, progress.cards_as_code off: the run lane observes, the ticket lane does not.
+    expect(shouldObserveRunCard(service, true)).toBe(true);
+    expect(shouldObserveTicketCard(service, false)).toBe(false);
+    // The reverse: progress.cards_as_code on, runs.cards off.
+    expect(shouldObserveTicketCard(service, true)).toBe(true);
+    expect(shouldObserveRunCard(service, false)).toBe(false);
   });
 });

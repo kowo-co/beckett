@@ -356,7 +356,14 @@ export class ProgressCardService {
   private async deliver(key: string): Promise<void> {
     const record = this.records.get(key);
     if (!record) return;
-    const checklist = this.opts.specReader?.(record.lastEvent.ticketId) ?? null;
+    // The deploy-instant card (run:deploy admission) fires before a worktree — and so a
+    // spec.md — exists, so specReader has nothing to read yet. Synthesize the "0/0" the deploy
+    // receipt promises rather than silently falling back to no checklist segment for this one
+    // event; every event after it (once the workspace's spec.md scaffold is written) reads the
+    // real progress off specReader as normal.
+    const checklist =
+      this.opts.specReader?.(record.lastEvent.ticketId) ??
+      (record.lastEvent.stage === "run:deploy" ? { done: 0, total: 0 } : null);
     const text = renderProgressCard(record.state, this.now(), checklist);
     record.lastDeliveredAt = this.now();
     try {
@@ -478,4 +485,25 @@ export class ProgressCardService {
 
 export function createProgressCardService(opts: ProgressCardServiceOptions): ProgressCardService {
   return new ProgressCardService(opts);
+}
+
+// =======================================================================================
+// Sink gating (boot wiring)
+// =======================================================================================
+//
+// Two independent switches feed the ONE card service the daemon builds at boot
+// (`src/shell/main.ts`): `progress.cards_as_code` gates the ticket dispatcher's sink,
+// `runs.cards` gates the run engine's sink — either lane can be on while the other stays off.
+// Pulled out as pure predicates (rather than inlined `if` checks at each call site) so a
+// regression that drops a flag's check — e.g. reverting to a bare `service &&` null-check —
+// fails a fast unit test instead of only showing up as a silent behavior change in prod.
+
+/** Should the ticket dispatcher's dispatchLiveSink forward this event to the card service? */
+export function shouldObserveTicketCard(service: unknown, cardsAsCodeEnabled: boolean): boolean {
+  return Boolean(service) && cardsAsCodeEnabled;
+}
+
+/** Should the run engine's dispatchLiveSink forward this event to the card service? */
+export function shouldObserveRunCard(service: unknown, runCardsEnabled: boolean): boolean {
+  return Boolean(service) && runCardsEnabled;
 }

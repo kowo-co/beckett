@@ -365,8 +365,10 @@ export class RunSupervisor {
     }
     // The deploy receipt (progress cards): fire the FIRST observable event for this run right
     // here, before a worktree exists or a worker spawns, so a card shows "queued" within seconds
-    // of the CLI call instead of waiting on provisioning to finish.
-    this.trace(run, "run:deploy", "started", "queued");
+    // of the CLI call instead of waiting on provisioning to finish. Guarded to run state "queued"
+    // only: a duplicate run.deploy bus ping (or a manual re-admit) against a run already past
+    // admission must not flip its live card's phase back to "queued" mid-flight.
+    if (run.state === "queued") this.trace(run, "run:deploy", "started", "queued");
     this.admitRun(run);
   }
 
