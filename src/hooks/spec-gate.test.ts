@@ -81,9 +81,17 @@ describe("evaluateSpecGate", () => {
     expect(result.warned).toBe(false);
   });
 
-  test("no ## Checklist section at all (total 0, no placeholder) → allow", () => {
+  test("no ## Checklist section at all (total 0) → blocks with a no-checklist-items message", () => {
     const result = evaluateSpecGate("# Title\n\n## Goal\ndo it\n", 0);
-    expect(result.decision).toEqual({});
+    expect(result.decision).toMatchObject({ decision: "block" });
+    if ("reason" in result.decision) expect(result.decision.reason).toContain("no checklist items");
+    expect(result.nextCount).toBe(1);
+  });
+
+  test("an emptied ## Checklist section (heading present, zero items) also blocks", () => {
+    const result = evaluateSpecGate("## Checklist\n\n## Notes\nnone\n", 0);
+    expect(result.decision).toMatchObject({ decision: "block" });
+    if ("reason" in result.decision) expect(result.decision.reason).toContain("no checklist items");
   });
 
   test("3-strikes: blocks the first MAX_STRIKES times, then allows with a warning", () => {
@@ -102,10 +110,28 @@ describe("evaluateSpecGate", () => {
     expect(escaped.nextCount).toBe(MAX_STRIKES); // does not keep climbing once escaped
   });
 
-  test("a passing spec resets exposure even with a nonzero prior count (no further blocks)", () => {
+  test("a reset after a clean pass gives a later block episode the full MAX_STRIKES again", () => {
+    // Blocked once (episode 1: implement stage), then resolved.
+    const blocked = evaluateSpecGate(SOME_UNCHECKED, 0);
+    expect(blocked.nextCount).toBe(1);
+    const passed = evaluateSpecGate(ALL_CHECKED, blocked.nextCount);
+    expect(passed.nextCount).toBe(0);
+
+    // A later, unrelated block episode in the SAME workspace (e.g. a post-review rework cycle)
+    // must not inherit exposure spent by the earlier episode.
+    let count = passed.nextCount;
+    for (let i = 0; i < MAX_STRIKES; i++) {
+      const result = evaluateSpecGate(SOME_UNCHECKED, count);
+      expect(result.decision).toMatchObject({ decision: "block" });
+      count = result.nextCount;
+    }
+    expect(count).toBe(MAX_STRIKES);
+  });
+
+  test("a passing spec resets exposure even with a nonzero prior count (nextCount back to 0)", () => {
     const result = evaluateSpecGate(ALL_CHECKED, 2);
     expect(result.decision).toEqual({});
-    expect(result.nextCount).toBe(2);
+    expect(result.nextCount).toBe(0);
   });
 });
 

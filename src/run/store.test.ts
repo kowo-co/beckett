@@ -177,6 +177,28 @@ describe("durability", () => {
     expect(store.list()).toEqual([]);
   });
 
+  test("an unknown field on a row is stripped, not treated as corrupt (unlike .strict())", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "beckett-runs-"));
+    dirs.push(dir);
+    const path = join(dir, "runs.json");
+    const store = new RunStore(path, { now: CLOCK });
+    const run = await store.create({ title: "Kept", prompt: "…" });
+
+    // Simulate version skew / a sibling-lane writer / a hand edit: add an extra key to the row
+    // on disk that this schema doesn't know about.
+    const onDisk = JSON.parse(readFileSync(path, "utf8"));
+    onDisk.runs[0].note = "unexpected extra field";
+    writeFileSync(path, JSON.stringify(onDisk), "utf8");
+
+    const reopened = new RunStore(path, { now: CLOCK });
+    expect(reopened.list().map((r) => r.id)).toEqual([run.id]);
+
+    // A subsequent create must not have persisted an emptied ledger.
+    await reopened.create({ title: "Second", prompt: "…" });
+    const onDiskAfter = JSON.parse(readFileSync(path, "utf8"));
+    expect(onDiskAfter.runs).toHaveLength(2);
+  });
+
   test("a schema-invalid runs.json (e.g. bad state) also degrades to empty rather than throwing", () => {
     const dir = mkdtempSync(join(tmpdir(), "beckett-runs-"));
     dirs.push(dir);

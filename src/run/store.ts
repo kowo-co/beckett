@@ -37,51 +37,54 @@ const RUN_STATES = [
 /** Non-terminal states — a run in one of these still has (or will have) a live worker. */
 const LIVE_STATES: ReadonlySet<RunState> = new Set(["queued", "implementing", "reviewing", "publishing", "parked"]);
 
-const HarnessSpecSchema = z
-  .object({
-    harness: z.string().min(1),
-    model: z.string().optional(),
-    effort: z.enum(["low", "medium", "high", "xhigh"]).optional(),
-    reviewTier: z.enum(["self", "fresh"]).optional(),
-  })
-  .strict();
+// Deliberately NOT `.strict()` (matches `../task/store.ts`'s idiom): these schemas run in
+// strip mode, tolerating and dropping unknown fields rather than failing to parse. A ledger
+// read is a degrade-to-empty-on-failure path (see `read()` below), so `.strict()` here would
+// mean one unknown field on one row — a version-skew field, a sibling-lane writer with a wider
+// shape, a hand edit — makes the ENTIRE ledger read as empty, and the next mutate() persists
+// that empty ledger over the real one. Stripping unknown keys is the safe default; only a
+// genuinely malformed row (wrong type, missing required field) should fail the parse.
+const HarnessSpecSchema = z.object({
+  harness: z.string().min(1),
+  model: z.string().optional(),
+  effort: z.enum(["low", "medium", "high", "xhigh"]).optional(),
+  reviewTier: z.enum(["self", "fresh"]).optional(),
+});
 
 // `Casting` is an open index signature (`[stage: string]: HarnessSpec | undefined`) keyed by
 // stage name; a record schema mirrors that shape without hardcoding the stage set here.
 const CastingSchema = z.record(z.string(), HarnessSpecSchema.optional());
 
-const RunSchema = z
-  .object({
-    id: z.string().min(1),
-    slug: z.string().min(1),
-    title: z.string().min(1),
-    prompt: z.string(),
-    channelId: z.string().nullable(),
-    requesterId: z.string().nullable(),
-    taskRef: z.string().nullable(),
-    ultracode: z.boolean(),
-    cast: CastingSchema.nullable(),
-    repo: z.string().nullable(),
-    state: z.enum(RUN_STATES),
-    createdAt: z.string(),
-    updatedAt: z.string(),
-    workspace: z.string().nullable(),
-    branch: z.string().min(1),
-    baseSha: z.string().nullable(),
-    sessionIds: z.record(z.enum(["implement", "review"]), z.string()).default({}),
-    sessionName: z.string().min(1),
-    reviewCycles: z.number().int().nonnegative(),
-    prUrl: z.string().nullable(),
-    error: z.string().nullable(),
-  })
-  .strict();
+const RunSchema = z.object({
+  id: z.string().min(1),
+  slug: z.string().min(1),
+  title: z.string().min(1),
+  prompt: z.string(),
+  channelId: z.string().nullable(),
+  requesterId: z.string().nullable(),
+  taskRef: z.string().nullable(),
+  ultracode: z.boolean(),
+  cast: CastingSchema.nullable(),
+  repo: z.string().nullable(),
+  state: z.enum(RUN_STATES),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  workspace: z.string().nullable(),
+  branch: z.string().min(1),
+  baseSha: z.string().nullable(),
+  // Plain string-keyed record rather than enum-keyed: a future third RunStage (or a sibling
+  // lane's wider stage set) must stay parseable, not collapse the whole ledger to empty.
+  sessionIds: z.record(z.string(), z.string()).default({}),
+  sessionName: z.string().min(1),
+  reviewCycles: z.number().int().nonnegative(),
+  prUrl: z.string().nullable(),
+  error: z.string().nullable(),
+});
 
-const LedgerSchema = z
-  .object({
-    version: z.literal(1),
-    runs: z.array(RunSchema),
-  })
-  .strict();
+const LedgerSchema = z.object({
+  version: z.literal(1),
+  runs: z.array(RunSchema),
+});
 
 type RunLedger = z.infer<typeof LedgerSchema>;
 
@@ -189,7 +192,12 @@ export class RunStore {
     return this.list().filter((run) => LIVE_STATES.has(run.state));
   }
 
-  async update(id: string, patch: Partial<Omit<Run, "id">>): Promise<Run> {
+  /**
+   * `slug`/`branch`/`sessionName`/`createdAt` are minted once by `create()` and never patched:
+   * `bySlug()` and the collision-dedupe in `uniqueSlug()` both assume a run's slug (and the
+   * branch/sessionName derived from it) is stable identity, not a mutable field.
+   */
+  async update(id: string, patch: Partial<Omit<Run, "id" | "slug" | "branch" | "sessionName" | "createdAt">>): Promise<Run> {
     return this.mutate((ledger) => {
       const run = ledger.runs.find((candidate) => candidate.id === id);
       if (!run) throw new Error(`no such run: ${id}`);

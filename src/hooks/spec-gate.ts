@@ -13,7 +13,9 @@
  * SAME workspace {@link MAX_STRIKES} times, the next stop is allowed through (with a warning) no
  * matter what spec.md says. The strike count is tracked in a small sidecar file,
  * `<workspace>/.beckett/spec-gate-count`, so it survives across the several Stop events one
- * session can fire.
+ * session can fire. A clean pass resets the count to 0, so exposure earned during one blocked
+ * episode (e.g. the implement stage) can't be spent by an unrelated later episode in the same
+ * worktree (e.g. a rework cycle after review) — each episode gets its own full 3 strikes.
  *
  * Structural conventions match `./scope-guard.ts`: a pure decision function
  * ({@link evaluateSpecGate}) unit-tested directly, config resolution from argv (preferred, baked
@@ -79,18 +81,33 @@ export function resolveConfig(
 /**
  * The unresolved-item texts to list in a block reason: every unchecked checklist item, plus the
  * seeded placeholder text (even if somehow marked checked without being replaced) when it is
- * still present and not already in that list. `null` parsed input means spec.md itself is
- * missing — represented as a single synthetic item so the same message template covers it.
+ * still present and not already in that list. Callers only reach this for a spec.md that DOES
+ * have a non-empty Checklist section — the missing-file and no-checklist-items cases get their
+ * own dedicated messages in {@link buildBlockReason} rather than being routed through the
+ * "N unchecked item(s)" template, which reads wrong for a synthetic (non-)item.
  */
-function unresolvedItems(parsed: ParsedSpecChecklist | null): string[] {
-  if (parsed === null) return ["spec.md not found — write it with a ## Checklist section before finishing."];
+function unresolvedItems(parsed: ParsedSpecChecklist): string[] {
   const items = parsed.items.filter((item) => !item.done).map((item) => item.text);
   if (parsed.hasPlaceholder && !items.includes(SPEC_CHECKLIST_PLACEHOLDER)) items.push(SPEC_CHECKLIST_PLACEHOLDER);
   return items;
 }
 
-/** Build the block reason text: "spec.md gate: N unchecked item(s): … — finish them, …". */
+/**
+ * Build the block reason text. Three shapes:
+ *  - spec.md missing entirely → dedicated "not found" message.
+ *  - spec.md present but with no `## Checklist` items at all (missing/emptied section) →
+ *    dedicated "no checklist items" message. Treating this the same as zero real unchecked
+ *    items would let a blocked worker delete the Checklist section instead of doing the work —
+ *    cheaper than compliance and exactly the enforcement this hook exists to prevent.
+ *  - otherwise → "spec.md gate: N unchecked item(s): … — finish them, …".
+ */
 export function buildBlockReason(parsed: ParsedSpecChecklist | null): string {
+  if (parsed === null) {
+    return "spec.md gate: spec.md not found — write it with a ## Checklist section before finishing.";
+  }
+  if (parsed.total === 0) {
+    return "spec.md gate: spec.md has no checklist items — write a ## Checklist with concrete, verifiable items.";
+  }
   const items = unresolvedItems(parsed);
   return (
     `spec.md gate: ${items.length} unchecked item(s): ${items.join("; ")} — finish them, tick them off, ` +
@@ -109,9 +126,17 @@ export function evaluateSpecGate(
   maxStrikes: number = MAX_STRIKES,
 ): SpecGateEvaluation {
   const parsed = specText === null ? null : parseSpecChecklist(specText);
-  const gateFailed = parsed === null || parsed.hasPlaceholder || parsed.done < parsed.total;
+  // `total === 0` (no `## Checklist` section, or an emptied one) fails the gate exactly like a
+  // placeholder: otherwise a worker blocked once could delete the section instead of doing the
+  // work, which is cheaper than compliance and defeats the enforcement this hook exists for.
+  const gateFailed = parsed === null || parsed.hasPlaceholder || parsed.total === 0 || parsed.done < parsed.total;
 
-  if (!gateFailed) return { decision: {}, nextCount: priorCount, warned: false };
+  // A clean pass resets exposure: the 3-strikes counter tracks how many times THIS workspace has
+  // been blocked, and a spec.md that now satisfies the gate means the worker is no longer stuck —
+  // carrying a stale nonzero count forward would let a later, unrelated rework cycle in the same
+  // worktree (e.g. after a failed review sends it back) skate through its first real block for
+  // free, on exposure earned by a prior, already-resolved episode.
+  if (!gateFailed) return { decision: {}, nextCount: 0, warned: false };
 
   if (priorCount >= maxStrikes) {
     // Wedged worker escape hatch: this workspace has already been blocked `maxStrikes` times —
