@@ -67,12 +67,6 @@ spend = "/home/beckett/.beckett/spend.jsonl"
 github_user = ""
 gmail_address = ""
 
-[tracker]
-enabled = true
-poll_secs = 5
-default_board = "ops"
-boards = ["ops", "int", "vid", "vidpip"]
-
 [runs]
 max_live = 3
 review_cycles_max = 2
@@ -173,9 +167,6 @@ output_token_budget = 150000
 model = ""
 spike_output_token_budget = 60000
 spike_repo = ""
-
-[progress]
-cards_as_code = false
 
 [free_time]
 enabled = true

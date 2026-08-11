@@ -1,5 +1,5 @@
 /**
- * Durable user-facing task and branch registry. Tracker tickets remain an execution detail.
+ * Durable user-facing task and branch registry. Runs remain an execution detail.
  *
  * WAVES. Beckett no longer opens a thread per task, so "the batch you just filed" has to be a
  * real thing the store can hand back: the user types `&recent` in a thread they opened and means
@@ -30,7 +30,8 @@ import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { z } from "zod";
 import { prefixedId } from "../ids.ts";
-import type { Ticket, TicketState } from "../tracker/types.ts";
+import type { RunState } from "../run/types.ts";
+import { log as rootLog } from "../log.ts";
 
 export const TASK_TITLE_MAX = 100;
 const LOCK_STALE_MS = 30_000;
@@ -70,13 +71,15 @@ export type TaskBranchStatus =
   | "done"
   | "cancelled";
 
-const TicketLinkSchema = z.object({
-  id: z.string().min(1),
-  identifier: z.string().min(1),
-  board: z.string().min(1),
-  projectId: z.string(),
-  url: z.string(),
-});
+/**
+ * What a started branch points at: one run in the run ledger (`<beckettDir>/runs.json`).
+ *
+ * This replaced a five-field tracker link (`{id, identifier, board, projectId, url}`) — a board id
+ * and a deep link into a service that no longer exists. A run id is the whole reference: it is the
+ * journal ident, the spend key, the dispatch-event key, and the CLI handle (`beckett task show
+ * <runId>`), so one string reaches everything the old five did.
+ */
+const RunLinkSchema = z.object({ runId: z.string().min(1) });
 
 const GitLinkSchema = z.object({
   project: z.string().min(1),
@@ -130,7 +133,7 @@ const TaskBranchSchema = z.object({
   status: z.enum(["ready", "waiting", "designing", "approval", "running", "review", "blocked", "done", "cancelled"]),
   parentRef: z.string().optional(),
   needs: z.array(z.string()).default([]),
-  ticket: TicketLinkSchema.optional(),
+  run: RunLinkSchema.optional(),
   git: GitLinkSchema.optional(),
   pullRequest: PullRequestLinkSchema.optional(),
   publication: PublicationLinkSchema.optional(),
@@ -193,7 +196,7 @@ const RegistrySchema = z.object({
 });
 
 export type TaskCard = z.infer<typeof TaskCardSchema>;
-export type TaskTicketLink = z.infer<typeof TicketLinkSchema>;
+export type TaskRunLink = z.infer<typeof RunLinkSchema>;
 export type TaskGitLink = z.infer<typeof GitLinkSchema>;
 export type TaskPullRequestLink = z.infer<typeof PullRequestLinkSchema>;
 export type TaskPublicationLink = z.infer<typeof PublicationLinkSchema>;
@@ -239,16 +242,20 @@ export function effectivePings(task: Pick<WorkTask, "pings">, branch: Pick<TaskB
   return branch.pings ?? task.pings ?? [];
 }
 
-export function branchStatusForTicket(state: TicketState): TaskBranchStatus {
+/**
+ * How a run's lifecycle shows up on its task branch. `failed`/`parked` both land on `blocked`: from
+ * the board's point of view they are the same fact — the work stopped and a human has to look.
+ */
+export function branchStatusForRun(state: RunState): TaskBranchStatus {
   switch (state) {
-    case "backlog": return "waiting";
-    case "todo": return "ready";
-    case "design": return "designing";
-    case "design_review": return "approval";
-    case "in_progress": return "running";
-    case "in_review": return "review";
+    case "queued": return "ready";
+    case "implementing": return "running";
+    case "reviewing":
+    case "publishing": return "review";
     case "done": return "done";
     case "cancelled": return "cancelled";
+    case "failed":
+    case "parked": return "blocked";
   }
 }
 
@@ -331,11 +338,10 @@ export class TaskStore {
     return task ? structuredClone({ task }) : null;
   }
 
-  findByTicket(ticketIdOrIdentifier: string): { task: WorkTask; branch: TaskBranch } | null {
+  /** The task branch a run is executing, if any. Keyed by run id — the run's only reference. */
+  findByRun(runId: string): { task: WorkTask; branch: TaskBranch } | null {
     for (const task of this.read().tasks) {
-      const branch = task.branches.find(
-        (candidate) => candidate.ticket?.id === ticketIdOrIdentifier || candidate.ticket?.identifier === ticketIdOrIdentifier,
-      );
+      const branch = task.branches.find((candidate) => candidate.run?.runId === runId);
       if (branch) return structuredClone({ task, branch });
     }
     return null;
@@ -467,35 +473,29 @@ export class TaskStore {
     });
   }
 
-  async linkTicket(
+  /**
+   * Bind a branch to the run executing it, and project that run's state onto the branch status.
+   * Re-linking the SAME run is idempotent (the supervisor calls this on every state change); a
+   * DIFFERENT run throws, because a branch with two runs is two workers on one ref.
+   */
+  async linkRun(
     branchRef: string,
-    link: TaskTicketLink,
-    state: TicketState,
+    link: TaskRunLink,
+    state: RunState,
     project?: string,
   ): Promise<TaskBranch> {
     return this.updateBranch(branchRef, (branch) => {
-      if (branch.ticket && branch.ticket.id !== link.id) {
-        throw new Error(`branch #${branch.ref} is already linked to ${branch.ticket.identifier}`);
+      if (branch.run && branch.run.runId !== link.runId) {
+        throw new Error(`branch #${branch.ref} is already linked to run ${branch.run.runId}`);
       }
-      branch.ticket = link;
-      branch.status = branchStatusForTicket(state);
+      branch.run = link;
+      branch.status = branchStatusForRun(state);
       // A durable diff is the prior publish attempt's final contribution. Once implementation is
       // deliberately resumed it becomes stale; clear it so live cards follow the active worktree
       // until the next pre-publication snapshot replaces it.
-      if (state === "design" || state === "in_progress") delete branch.diff;
+      if (state === "implementing") delete branch.diff;
       if (project) branch.git = { ...(branch.git ?? { project }), project };
     });
-  }
-
-  async syncTicket(ticket: Ticket, board = "ops"): Promise<TaskBranch | null> {
-    const branchRef = ticket.branchRef ?? this.findByTicket(ticket.id)?.branch.ref;
-    if (!branchRef) return null;
-    return this.linkTicket(
-      branchRef,
-      { id: ticket.id, identifier: ticket.identifier, board, projectId: ticket.projectId, url: ticket.url },
-      ticket.state,
-      ticket.project,
-    );
   }
 
   async setGit(branchRef: string, git: TaskGitLink): Promise<TaskBranch> {
@@ -548,7 +548,7 @@ export class TaskStore {
       const task = registry.tasks.find((candidate) => candidate.number === Number(ref.split(".")[0]));
       const branch = task?.branches.find((candidate) => candidate.ref === ref);
       if (!branch) throw new Error(`no such branch: #${ref}`);
-      if (branch.ticket) throw new Error(`branch #${ref} is already started as ${branch.ticket.identifier}`);
+      if (branch.run) throw new Error(`branch #${ref} is already started as ${branch.run.runId}`);
       const existing = registry.startClaims[ref];
       const createdAt = existing ? Date.parse(existing.createdAt) : Number.NaN;
       if (existing && Number.isFinite(createdAt) && this.now().getTime() - createdAt < START_CLAIM_STALE_MS) {
@@ -579,7 +579,7 @@ export class TaskStore {
     });
   }
 
-  /** Explicit local lifecycle update for component controls before the next tracker poll arrives. */
+  /** Explicit local lifecycle update for component controls, ahead of the run's next state change. */
   async setBranchStatus(branchRef: string, status: TaskBranchStatus): Promise<TaskBranch> {
     return this.updateBranch(branchRef, (branch) => {
       branch.status = status;
@@ -625,7 +625,7 @@ export class TaskStore {
   private read(): TaskRegistry {
     try {
       const raw = readFileSync(this.path, "utf8");
-      return RegistrySchema.parse(JSON.parse(raw));
+      return RegistrySchema.parse(dropLegacyTicketLinks(JSON.parse(raw), this.path));
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === "ENOENT") return { version: 1, nextTaskNumber: 1, tasks: [], startClaims: {} };
@@ -673,6 +673,36 @@ export class TaskStore {
     }
     throw new Error(`timed out waiting for task registry lock ${this.lockPath}`);
   }
+}
+
+/**
+ * Registries written before the ticket rip-out carry a `ticket` link on started branches. There is
+ * nothing to migrate it INTO — a run id cannot be derived from a tracker ticket id, and the tracker
+ * those rows pointed at is gone — so the key is dropped and the branch keeps its last known status.
+ * zod would strip the unknown key silently; this exists so the drop is stated ONCE in the log
+ * instead of being a mystery when a pre-v7 branch shows no run.
+ */
+let warnedLegacyTicketLinks = false;
+function dropLegacyTicketLinks(raw: unknown, path: string): unknown {
+  if (!raw || typeof raw !== "object") return raw;
+  const registry = raw as { tasks?: unknown };
+  if (!Array.isArray(registry.tasks)) return raw;
+  let dropped = 0;
+  for (const task of registry.tasks) {
+    const branches = (task as { branches?: unknown }).branches;
+    if (!Array.isArray(branches)) continue;
+    for (const branch of branches) {
+      if (branch && typeof branch === "object" && "ticket" in branch) {
+        delete (branch as Record<string, unknown>).ticket;
+        dropped++;
+      }
+    }
+  }
+  if (dropped > 0 && !warnedLegacyTicketLinks) {
+    warnedLegacyTicketLinks = true;
+    rootLog.child("task.store").info("dropped pre-v7 tracker links from the task registry", { path, branches: dropped });
+  }
+  return raw;
 }
 
 /**

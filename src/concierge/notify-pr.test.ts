@@ -23,7 +23,7 @@ const pr = (over: Partial<PrRef> = {}): PrRef => ({
   number: 96,
   url: "https://github.com/0xbeckett/foo/pull/96",
   title: "Add sense",
-  ticket: "OPS-124",
+  runId: "run-20260810-sense",
   channel: CHAN,
   ...over,
 });

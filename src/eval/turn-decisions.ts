@@ -44,13 +44,25 @@ export type DecisionFamily = (typeof DECISION_FAMILIES)[number];
 export const TURN_ACTIONS = [
   "pass_silent", // say nothing this turn
   "answer_inline", // reply now from what you know or can read from state; nothing deployed
-  "file_ticket", // real work: deploy a run / background job instead of doing it in chat
+  "deploy_run", // real work: deploy a run / background job instead of doing it in chat
   "refuse_gated", // an owner-only ask from a non-owner: decline and name the gate
   "ask_owner", // stop and bounce a question back instead of acting/answering (anti-pattern for state lookups)
   "diagnose_denial", // a command failed: read the error, name the gate, re-route or deploy a fix
   "report_denial", // relay a failure with no diagnosis (anti-pattern)
 ] as const;
 export type TurnAction = (typeof TURN_ACTIONS)[number];
+
+/**
+ * Action labels this taxonomy has RENAMED, mapped old → current. Fixture files and recorded
+ * history on disk predate the ticket rip-out, so a parse that rejected `file_ticket` would throw
+ * away every eval run ever recorded. Normalizing on read keeps the history comparable.
+ */
+const LEGACY_TURN_ACTIONS: Readonly<Record<string, TurnAction>> = { file_ticket: "deploy_run" };
+
+/** Canonicalize an action label read from a fixture/history file; unknown labels pass through. */
+export function normalizeTurnAction(raw: string): string {
+  return LEGACY_TURN_ACTIONS[raw] ?? raw;
+}
 
 export type SpeakerRole = "owner" | "member" | "stranger";
 
@@ -76,7 +88,9 @@ export interface TurnFixture {
 
 export const DecisionOutputSchema = z.object({
   decision: z.enum(["send", "pass"]),
-  action: z.enum(TURN_ACTIONS),
+  // Preprocessed so a retired label from a fixture file or a recorded history row still parses —
+  // see {@link normalizeTurnAction}.
+  action: z.preprocess((raw) => (typeof raw === "string" ? normalizeTurnAction(raw) : raw), z.enum(TURN_ACTIONS)),
   message: z.string().nullable(),
 });
 export type DecisionOutput = z.infer<typeof DecisionOutputSchema>;
@@ -164,7 +178,7 @@ send, or null for pass>}
 - "pass_silent": you say nothing this turn.
 - "answer_inline": you reply now, directly, from what you already know or can read from the state
   shown; you do NOT start any background work for it.
-- "file_ticket": this is real work, so you deploy a run / background job rather than doing the
+- "deploy_run": this is real work, so you deploy a run / background job rather than doing the
   engineering in the chat.
 - "refuse_gated": the request is one only the owner may authorize and this speaker is not the owner,
   so you decline and name the gate.

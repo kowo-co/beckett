@@ -15,10 +15,10 @@
  * The registry is deliberately dumb state, no gateway handle at all:
  *  - **Registration** comes from the gateway's thread-create event ({@link WorkspaceRegistry.registerThread}),
  *    filtered upstream to user-created threads only.
- *  - **Ticket grounding** is additive within a thread, and never comes from the thread NAME — the
+ *  - **Work grounding** is additive within a thread, and never comes from the thread NAME — the
  *    name is attacker-chosen text and binding work by it is a routing hijack (see the note above
- *    {@link StoredWorkspace}). A ticket filed FROM inside a workspace binds to it when the Concierge
- *    acks it ({@link WorkspaceRegistry.bindTicket}); an explicit `&ref` attaches more later
+ *    {@link StoredWorkspace}). A run deployed FROM inside a workspace binds to it when the Concierge
+ *    acks it ({@link WorkspaceRegistry.bindRun}); an explicit `&ref` attaches more later
  *    ({@link WorkspaceRegistry.attachTasks}). Additive is the invariant that matters: attaching #2
  *    must never silently drop #1, because a dropped binding shows up much later as results posting
  *    to the wrong place with no error anywhere.
@@ -43,13 +43,13 @@ import { dirname } from "node:path";
 import type { Logger, TaskThreadCreated, ThreadCreated } from "../types.ts";
 import { log as rootLog } from "../log.ts";
 
-/** Ticket context attached to an inbound message from a workspace thread. */
-export interface TicketWorkspaceContext {
+/** Work context attached to an inbound message from a workspace thread. */
+export interface WorkspaceContext {
   parentChannelId: string;
   /** The thread name the person chose — the workspace's human label. */
   name: string;
-  /** Ticket identifiers grounded in this workspace (possibly empty for a fresh thread). */
-  ticketIdents: string[];
+  /** Run ids grounded in this workspace (possibly empty for a fresh thread). */
+  runIds: string[];
   /**
    * Numbered task refs this workspace owns, normalized without the leading `#` and in stable
    * order. Empty for a thread that has not been attached to any work yet.
@@ -59,7 +59,7 @@ export interface TicketWorkspaceContext {
 }
 
 export interface WorkspaceRegistryOptions {
-  /** JSON file remembering thread → tickets across daemon restarts. Omit to disable persistence. */
+  /** JSON file remembering thread → work across daemon restarts. Omit to disable persistence. */
   stateFile?: string;
   logger?: Logger;
 }
@@ -68,7 +68,7 @@ export interface WorkspaceRegistryOptions {
  * A thread NAME never binds work. This is a security boundary, not a style choice.
  *
  * We used to scrape "OPS-120" and "#12" out of the name and ground the workspace on them. But the
- * name is chosen by whoever opened the thread, and `channelForTask`/`channelForTicket` route real
+ * name is chosen by whoever opened the thread, and `channelForTask`/`channelForRun` route real
  * milestones, PR events and filed receipts by it. That made the name an attacker-controlled routing
  * table: anyone who could see a channel could open a thread called "#12 notes" and, the moment any
  * authorized person said anything in it, become the destination for task 12's updates.
@@ -81,7 +81,7 @@ export interface WorkspaceRegistryOptions {
 interface StoredWorkspace {
   parentChannelId: string;
   name: string;
-  ticketIdents: string[];
+  runIds: string[];
   /** Normalized (no leading `#`), deduped, stably ordered. Never undefined — empty means "none". */
   taskRefs: string[];
   branchRefs: string[];
@@ -148,7 +148,7 @@ export class WorkspaceRegistry {
     this.byThread.set(t.threadId, {
       parentChannelId: t.parentChannelId,
       name: t.name,
-      ticketIdents: [],
+      runIds: [],
       taskRefs: [],
       branchRefs: [],
     });
@@ -193,7 +193,7 @@ export class WorkspaceRegistry {
       this.byThread.set(thread.threadId, {
         parentChannelId: thread.parentChannelId,
         name: thread.name,
-        ticketIdents: [],
+        runIds: [],
         taskRefs: normalizeTaskRefs([normalizedTask]),
         branchRefs: normalizedBranches,
       });
@@ -266,58 +266,58 @@ export class WorkspaceRegistry {
   detachAll(threadId: string): void {
     const ws = this.byThread.get(threadId);
     if (!ws) return;
-    if (!ws.taskRefs.length && !ws.ticketIdents.length && !ws.branchRefs.length) return;
+    if (!ws.taskRefs.length && !ws.runIds.length && !ws.branchRefs.length) return;
     this.log.info("workspace detached from all work", {
       threadId,
       tasks: ws.taskRefs,
-      tickets: ws.ticketIdents,
+      runs: ws.runIds,
       branches: ws.branchRefs,
     });
     ws.taskRefs = [];
-    ws.ticketIdents = [];
+    ws.runIds = [];
     ws.branchRefs = [];
     this.saveState();
   }
 
-  /** Add a public branch ref (and optional internal ticket identifier) to a task workspace. */
-  bindBranch(channelId: string, branchRef: string, ticketIdent?: string): void {
+  /** Add a public branch ref (and the run executing it, when known) to a task workspace. */
+  bindBranch(channelId: string, branchRef: string, runId?: string): void {
     const ws = this.byThread.get(channelId);
     if (!ws) return;
     const normalized = normalizeRef(branchRef);
     if (normalized && !ws.branchRefs.includes(normalized)) ws.branchRefs.push(normalized);
-    if (ticketIdent && !ws.ticketIdents.includes(ticketIdent)) ws.ticketIdents.push(ticketIdent);
+    if (runId && !ws.runIds.includes(runId)) ws.runIds.push(runId);
     this.saveState();
   }
 
   /**
-   * Ground a filed ticket in the workspace it was filed from. No-op when `channelId` is not a
-   * registered workspace (a ticket filed from a plain channel has no workspace to bind to).
+   * Ground a deployed run in the workspace it was deployed from. No-op when `channelId` is not a
+   * registered workspace (a run deployed from a plain channel has no workspace to bind to).
    */
-  bindTicket(channelId: string, ticketIdent: string): void {
+  bindRun(channelId: string, runId: string): void {
     const ws = this.byThread.get(channelId);
-    if (!ws || ws.ticketIdents.includes(ticketIdent)) return;
-    ws.ticketIdents.push(ticketIdent);
-    this.log.info("ticket bound to workspace", { threadId: channelId, ticket: ticketIdent });
+    if (!ws || ws.runIds.includes(runId)) return;
+    ws.runIds.push(runId);
+    this.log.info("run bound to workspace", { threadId: channelId, run: runId });
     this.saveState();
   }
 
   /** Resolve an inbound Discord channel to its workspace context, if it is one. */
-  contextFor(channelId: string): TicketWorkspaceContext | null {
+  contextFor(channelId: string): WorkspaceContext | null {
     const ws = this.byThread.get(channelId);
     if (!ws) return null;
     return {
       parentChannelId: ws.parentChannelId,
       name: ws.name,
-      ticketIdents: [...ws.ticketIdents].sort(),
+      runIds: [...ws.runIds].sort(),
       taskRefs: [...ws.taskRefs],
       branchRefs: [...ws.branchRefs].sort(),
     };
   }
 
-  /** Prefer the dedicated task workspace when routing an internal ticket milestone. */
-  channelForTicket(ticketIdent: string): string | null {
+  /** Prefer the dedicated task workspace when routing a run milestone. */
+  channelForRun(runId: string): string | null {
     for (const [threadId, workspace] of this.byThread) {
-      if (workspace.ticketIdents.includes(ticketIdent)) return threadId;
+      if (workspace.runIds.includes(runId)) return threadId;
     }
     return null;
   }
@@ -348,8 +348,11 @@ export class WorkspaceRegistry {
         this.byThread.set(threadId, {
           parentChannelId: rec.parentChannelId,
           name: typeof rec.name === "string" ? rec.name : "",
-          ticketIdents: Array.isArray(rec.ticketIdents)
-            ? rec.ticketIdents.filter((x): x is string => typeof x === "string")
+          // Pre-v7 state files carry `ticketIdents` here. They are dead routing keys (the tracker
+          // is gone), so they are read and DROPPED rather than migrated — a tracker identifier can
+          // never match a run id, and keeping them would only make `channelForRun` scan noise.
+          runIds: Array.isArray(rec.runIds)
+            ? rec.runIds.filter((x): x is string => typeof x === "string")
             : [],
           taskRefs: normalizeTaskRefs(storedRefs),
           branchRefs: Array.isArray(rec.branchRefs)

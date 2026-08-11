@@ -9,7 +9,6 @@ import {
   reduceProgressCard,
   renderProgressCard,
   shouldObserveRunCard,
-  shouldObserveTicketCard,
   type ProgressCardState,
 } from "./cards.ts";
 
@@ -19,8 +18,8 @@ const STARTED = Date.parse(TS);
 function ev(stage: string, outcome: DispatchOutcome, message?: string, error?: string): DispatchEvent {
   return {
     ts: TS,
-    ticketId: "ticket-1",
-    ticketRef: "#2.1",
+    runId: "ticket-1",
+    runRef: "#2.1",
     branchRef: "beckett/task-2-1",
     stage,
     outcome,
@@ -82,7 +81,7 @@ function harness(
   overrides: {
     channel?: string | null;
     channelThrows?: Error;
-    specReader?: (ticketId: string) => { done: number; total: number } | null;
+    specReader?: (runId: string) => { done: number; total: number } | null;
   } = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), "beckett-cards-"));
@@ -400,8 +399,8 @@ describe("ProgressCardService", () => {
   function runEv(stage: string, outcome: DispatchOutcome, message?: string): DispatchEvent {
     return {
       ts: TS,
-      ticketId: "run-20260810-oauth",
-      ticketRef: "run-20260810-oauth",
+      runId: "run-20260810-oauth",
+      runRef: "run-20260810-oauth",
       branchRef: "beckett/run-oauth",
       stage,
       outcome,
@@ -483,17 +482,10 @@ describe("ProgressCardService", () => {
   });
 });
 
-describe("boot sink gating (src/shell/main.ts's two dispatchLiveSink wirings)", () => {
-  // Both lanes share one card service instance; each sink must check its OWN flag before
-  // forwarding, independent of whether the service itself exists. A regression that drops
-  // either flag check (reverting to a bare service-truthy null-check) fails here.
-  test("shouldObserveTicketCard requires both the service and progress.cards_as_code", () => {
-    expect(shouldObserveTicketCard({}, true)).toBe(true);
-    expect(shouldObserveTicketCard({}, false)).toBe(false);
-    expect(shouldObserveTicketCard(null, true)).toBe(false);
-    expect(shouldObserveTicketCard(null, false)).toBe(false);
-  });
-
+describe("boot sink gating (src/shell/main.ts's dispatchLiveSink wiring)", () => {
+  // The sink must check the flag before forwarding, independent of whether the service itself
+  // exists. A regression that drops the flag check (reverting to a bare service-truthy
+  // null-check) fails here.
   test("shouldObserveRunCard requires both the service and runs.cards — flag off skips observe()", () => {
     expect(shouldObserveRunCard({}, true)).toBe(true);
     expect(shouldObserveRunCard({}, false)).toBe(false); // runs.cards=false: the spec's "flag off" case
@@ -501,13 +493,4 @@ describe("boot sink gating (src/shell/main.ts's two dispatchLiveSink wirings)", 
     expect(shouldObserveRunCard(null, false)).toBe(false);
   });
 
-  test("the two lanes are independent: either can be on while the other is off", () => {
-    const service = {};
-    // runs.cards on, progress.cards_as_code off: the run lane observes, the ticket lane does not.
-    expect(shouldObserveRunCard(service, true)).toBe(true);
-    expect(shouldObserveTicketCard(service, false)).toBe(false);
-    // The reverse: progress.cards_as_code on, runs.cards off.
-    expect(shouldObserveTicketCard(service, true)).toBe(true);
-    expect(shouldObserveRunCard(service, false)).toBe(false);
-  });
 });

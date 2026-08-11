@@ -1,13 +1,12 @@
 /**
- * Beckett v3 — ticket-worker spawn helper (`src/dispatch/spawn.ts`)
+ * Beckett — the worker spawn helper (`src/dispatch/spawn.ts`)
  * =======================================================================================
- * The thin v3 spawn glue the {@link Dispatcher} (`./dispatcher.ts`) calls to stand up one
- * worker for a ticket stage (see `specs/_legacy-v3/V3.md` §6). v3.1: each ticket builds its OWN project repo
- * at `~/Projects/<slug>` (pushed to the configured GitHub owner), fully decoupled from Beckett's
- * own source.
- * The worker runs IN that repo — implement, review, and rework share the one checkout and edit in
- * place. Isolation between tickets is just "different project dirs," so `beckett plan` nodes still
- * run in parallel. The dispatcher provisions the repo (clone-or-init) before the first spawn.
+ * The thin glue {@link RunSupervisor} (`../run/supervisor.ts`) calls to stand up one worker for one
+ * stage. Each unit of work builds in its OWN project repo at `~/Projects/<slug>` (pushed to the
+ * configured GitHub owner), fully decoupled from Beckett's own source. The worker runs IN a
+ * worktree of that repo — implement, review, and rework share the one checkout and edit in place —
+ * so concurrent runs never stack on each other's base. The supervisor provisions the repo
+ * (clone-or-init) and the worktree before the first spawn.
  *
  * What it wires:
  *   1. Driver — `createDriver(harness, config, logger)` (claude today; codex once registered).
@@ -15,14 +14,12 @@
  *   3. Scope-guard — written to `<repo>/.beckett/worker-settings.json` and delivered via
  *      `claude --settings` (so the project's own `.claude` is never clobbered), plus the
  *      done-signal schema at `<repo>/.beckett/done-schema.json`; `.beckett/` is git-excluded.
- *   4. Spawn — a {@link SpawnSpec} built from the ticket (title/body/criteria), staged for the
- *      `implement` or `review` role (review diffs `<baseRef>..HEAD` to see the contribution).
+ *   4. Spawn — a {@link SpawnSpec} built from the {@link WorkItem} (title/body/criteria), staged for
+ *      the `implement` or `review` role (review diffs `<baseRef>..HEAD` to see the contribution).
  *
- * The returned {@link TicketWorkerHandle} exposes the control surface the dispatcher needs:
- * `nudge` (STEERING), `abort` (CANCEL), `onDone`/`onFinished` (advance the ticket), plus
- * `reap` (unsubscribe — the project repo persists). The handle
- * satisfies BOTH the task spec (`id`, `nudge`, `abort`, `onDone`, `state`) and the `specs/_legacy-v3/V3.md`
- * §6 contract (`workerId`, `ticketId`, `stage`, `onFinished`, `reap`).
+ * The returned {@link WorkerHandle} exposes the control surface the supervisor needs: `nudge`
+ * (STEERING), `abort` (CANCEL), `onDone`/`onFinished` (advance the run), plus `reap` (unsubscribe —
+ * the project repo persists).
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -43,7 +40,8 @@ import type {
   WorkerState,
   HarnessDriver,
 } from "../types.ts";
-import type { HarnessSpec, Ticket } from "../tracker/types.ts";
+import type { HarnessSpec } from "../run/cast.ts";
+import type { WorkItem } from "../run/work-item.ts";
 import { createDriver } from "../drivers/index.ts";
 import { workerId as mintWorkerId } from "../ids.ts";
 import { buildPaths } from "../paths.ts";
@@ -61,7 +59,7 @@ import { defaultEffortFor, stageRegistry, type StageView } from "./stages.ts";
 // =======================================================================================
 
 /** The terminal outcome of a worker run, captured from its `finished` event. */
-export interface TicketWorkerResult {
+export interface WorkerResult {
   status: "success" | "error";
   /** A short human summary (done-signal `summary`, else the last assistant text). */
   summary: string;
@@ -89,15 +87,13 @@ export type DoneCallback = (status: "success" | "error", summary: string) => voi
 /** Callback fired on each driver stall signal (issue #21) with idle time + consecutive strikes. */
 export type StallCallback = (idleMs: number, strikes: number) => void;
 
-/**
- * The live worker handle the dispatcher tracks per ticket. Superset of the task spec and the
- * `specs/_legacy-v3/V3.md` §6 contract so either caller's expectations hold.
- */
-export interface TicketWorkerHandle {
+/** The live worker handle the supervisor tracks per run. */
+export interface WorkerHandle {
   /** Beckett worker id (e.g. "wk_7f3a"). Alias: {@link workerId}. */
   readonly id: string;
   readonly workerId: string;
-  readonly ticketId: string;
+  /** The id of the work this worker is executing (the run id). */
+  readonly itemId: string;
   /** "implement" | "review" | future stage names. */
   readonly stage: string;
   /** The harness this worker actually ran on (post-substitution) — failure-policy input. */
@@ -113,7 +109,7 @@ export interface TicketWorkerHandle {
   /** Current lifecycle state (spawning→running→review/failed/aborted). */
   readonly state: WorkerState;
   /** The terminal result once finished; null while still live. */
-  readonly result: TicketWorkerResult | null;
+  readonly result: WorkerResult | null;
 
   /** Live spend counters off the driver (turns/tools/tokens/$) — for finish-comment telemetry. */
   telemetry(): WorkerSpend;
@@ -147,7 +143,7 @@ export interface TicketWorkerHandle {
 
 /** Arguments to {@link spawnWorker}. */
 export interface SpawnWorkerArgs {
-  ticket: Ticket;
+  item: WorkItem;
   /** "implement" | "review" | future stage names. */
   stage: string;
   /** The casting entry for this stage (which harness/model/effort). */
@@ -257,9 +253,9 @@ const SUMMARY_MAX = 1200;
 // Prompt + system-append builders live in the stage registry (`./stages.ts`, OPS-180): each
 // stage plugs in its own task brief and persona there, so spawning needs no stage branching.
 
-/** Resolve the worker's write scope. A ticket worker owns its whole project repo. */
-function buildScope(ticket: Ticket): FileScope {
-  return { ownedGlobs: [], readGlobs: null, description: `${ticket.identifier}: ${ticket.title}` };
+/** Resolve the worker's write scope. A worker owns its whole project repo. */
+function buildScope(item: WorkItem): FileScope {
+  return { ownedGlobs: [], readGlobs: null, description: `${item.identifier}: ${item.title}` };
 }
 
 /** Build the resource envelope from the casting effort (defaults to the configured harness effort). */
@@ -429,11 +425,10 @@ function summaryFrom(structured: unknown | null, lastAssistantText: string): str
  * it never clobbers the project's own `.claude`) bounds writes to the project repo. Throws if the
  * harness launch fails; the dispatcher surfaces that as a ticket comment.
  *
- * Exported under both names: `spawnWorker` (task spec) and `spawnTicketWorker` (specs/_legacy-v3/V3.md §6).
  */
-export async function spawnWorker(args: SpawnWorkerArgs): Promise<TicketWorkerHandle> {
+export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerHandle> {
   const {
-    ticket,
+    item,
     stage,
     harness,
     config,
@@ -448,14 +443,14 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<TicketWorkerHa
     settingsExtra,
     sessionName,
   } = args;
-  // v6 Phase 5: stage resolution rides the SAME registry view that staffed this ticket.
+  // Stage resolution rides the SAME registry view that staffed this run.
   const stages = args.stages ?? stageRegistry;
-  const logger = (args.logger ?? log.child("dispatch.spawn")).child(`ticket.${ticket.identifier}`);
+  const logger = (args.logger ?? log.child("dispatch.spawn")).child(`work.${item.identifier}`);
 
   const id = mintWorkerId();
   // workspace/branch: the ticket's own worktree (dispatcher-allocated off fresh origin/main, reused
   // across stages). repoRoot stays the shared project `.git` the worktree is attached to.
-  const scope = buildScope(ticket);
+  const scope = buildScope(item);
   const envelope = buildEnvelope(harness, config);
   const scopeGuardPath = join(import.meta.dir, "../hooks/scope-guard.ts");
   const runtimeAwarenessPath = join(import.meta.dir, "../hooks/runtime-awareness.ts");
@@ -470,7 +465,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<TicketWorkerHa
 
   // ── live-handle bookkeeping ──────────────────────────────────────────────────────────
   let state: WorkerState = "spawning";
-  let result: TicketWorkerResult | null = null;
+  let result: WorkerResult | null = null;
   let sessionId = ""; // captured from the driver's SpawnResult (crash-recovery ledger, issue #20)
   let pid = 0;
   let lastAssistantText = "";
@@ -542,7 +537,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<TicketWorkerHa
           unappliedNudges: driver.drainUnappliedNudges?.() ?? [],
         };
         state = e.status === "success" ? "review" : "failed";
-        logger.info("ticket worker finished", { workerId: id, stage, status: e.status });
+        logger.info("worker finished", { workerId: id, stage, status: e.status });
         fireDone(e.status, summary);
         break;
       }
@@ -583,9 +578,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<TicketWorkerHa
     const spec: SpawnSpec = {
       workerId: id,
       prompt: resumeSessionId
-        ? buildResumeBrief(ticket, stage, baseRef, steering)
-        : stages.prompt(stage, { ticket, baseRef, steering, reviewDiff, envBootstrap }),
-      systemAppend: stages.systemAppend(stage, { ticket, config, baseRef }),
+        ? buildResumeBrief(item, stage, baseRef, steering)
+        : stages.prompt(stage, { item, baseRef, steering, reviewDiff, envBootstrap }),
+      systemAppend: stages.systemAppend(stage, { item, config, baseRef }),
       workspace,
       scope,
       envelope,
@@ -603,7 +598,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<TicketWorkerHa
     sessionId = spawnResult.sessionId;
     pid = spawnResult.pid;
     state = "running";
-    logger.info("ticket worker dispatched", {
+    logger.info("worker dispatched", {
       workerId: id,
       stage,
       harness: harness.harness,
@@ -617,15 +612,15 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<TicketWorkerHa
   } catch (err) {
     state = "failed";
     unsubscribe();
-    logger.error("ticket worker spawn failed", { workerId: id, stage, error: (err as Error).message });
+    logger.error("worker spawn failed", { workerId: id, stage, error: (err as Error).message });
     throw err;
   }
 
   // ── the control handle ─────────────────────────────────────────────────────────────────
-  const handle: TicketWorkerHandle = {
+  const handle: WorkerHandle = {
     id,
     workerId: id,
-    ticketId: ticket.id,
+    itemId: item.id,
     stage,
     harness: harness.harness,
     workspace,
@@ -650,7 +645,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<TicketWorkerHa
     },
     async nudge(text: string): Promise<NudgeReceipt["accepted"]> {
       const receipt = await driver.sendNudge(text);
-      logger.info("ticket worker nudged", { workerId: id, accepted: receipt.accepted, len: text.length });
+      logger.info("worker nudged", { workerId: id, accepted: receipt.accepted, len: text.length });
       return receipt.accepted; // honest receipt — the dispatcher narrates anything but "delivered"
     },
     async abort(reason = "aborted"): Promise<void> {
@@ -674,15 +669,12 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<TicketWorkerHa
       // v3.1: nothing to tear down — the worker ran in the ticket's persistent project repo
       // (`~/Projects/<slug>`), which lives on as a real repo. Its committed work stays there; the
       // git-excluded `.beckett/` meta is harmless and overwritten by the next worker.
-      logger.info("ticket worker reaped", { workerId: id, stage });
+      logger.info("worker reaped", { workerId: id, stage });
     },
   };
 
   return handle;
 }
-
-/** specs/_legacy-v3/V3.md §6 alias for {@link spawnWorker}. */
-export const spawnTicketWorker = spawnWorker;
 
 /**
  * Canonical, bounded evidence for the repeat-stall guard. Use only fields that all drivers

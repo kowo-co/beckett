@@ -1,13 +1,11 @@
 /**
- * Run → Ticket adapter tests (`src/run/adapter.ts`).
- * The adapter is the wave-A seam: everything `stages.ts`/`spawn.ts` read off a Ticket must be
- * present and honest, and a run's lifecycle must project onto the ticket states the stage
- * registry keys off.
+ * Run → WorkItem projection tests (`src/run/adapter.ts`).
+ * Everything `stages.ts`/`spawn.ts` read off a work item must be present and honest.
  */
 import { describe, expect, test } from "bun:test";
-import { runAsTicket, runBody, ticketStateForRun } from "./adapter.ts";
+import { runAsWorkItem, runBody } from "./adapter.ts";
 import { parseSpecChecklist, renderSpecScaffold } from "./spec-file.ts";
-import type { Run, RunState } from "./types.ts";
+import type { Run } from "./types.ts";
 
 function makeRun(over: Partial<Run> = {}): Run {
   return {
@@ -36,71 +34,51 @@ function makeRun(over: Partial<Run> = {}): Run {
   };
 }
 
-describe("runAsTicket", () => {
-  test("maps identity, cast, branch and origin channel onto the Ticket shape", () => {
+describe("runAsWorkItem", () => {
+  test("maps identity, cast, branch and origin channel onto the WorkItem shape", () => {
     const run = makeRun({ cast: { implement: { harness: "codex" } }, repo: "gateway", channelId: "c9" });
-    const ticket = runAsTicket(run);
-    expect(ticket.id).toBe(run.id);
-    expect(ticket.identifier).toBe(run.id);
-    expect(ticket.title).toBe(run.title);
-    expect(ticket.casting).toEqual({ implement: { harness: "codex" } });
-    expect(ticket.branchRef).toBe(run.branch);
-    expect(ticket.project).toBe("gateway");
-    expect(ticket.originChannel).toBe("c9");
-    expect(ticket.createdAt).toBe(run.createdAt);
-    // A run has no board and no tracker URL — the adapter must not invent either.
-    expect(ticket.url).toBe("");
-    expect(ticket.assignees).toEqual([]);
-    expect(ticket.blockedBy).toEqual([]);
+    const item = runAsWorkItem(run);
+    expect(item.id).toBe(run.id);
+    expect(item.identifier).toBe(run.id);
+    expect(item.title).toBe(run.title);
+    expect(item.casting).toEqual({ implement: { harness: "codex" } });
+    expect(item.branchRef).toBe(run.branch);
+    expect(item.project).toBe("gateway");
+    expect(item.originChannel).toBe("c9");
+    expect(item.createdAt).toBe(run.createdAt);
+    expect(item.description).toBe(run.prompt);
+  });
+
+  test("the run's own state rides through — the stage registry keys off it directly", () => {
+    expect(runAsWorkItem(makeRun({ state: "implementing" })).state).toBe("implementing");
+    expect(runAsWorkItem(makeRun({ state: "reviewing" })).state).toBe("reviewing");
   });
 
   test("body carries the goal verbatim and no criteria before the worker writes a checklist", () => {
-    const ticket = runAsTicket(makeRun());
-    expect(ticket.body).toBe("## Goal\nAdd OAuth middleware to the API gateway.");
-    expect(ticket.criteria).toEqual([]);
+    const item = runAsWorkItem(makeRun());
+    expect(item.body).toBe("## Goal\nAdd OAuth middleware to the API gateway.");
+    expect(item.criteria).toEqual([]);
   });
 
   test("a written checklist becomes acceptance criteria in body AND criteria", () => {
     const spec = parseSpecChecklist(
       "## Checklist\n- [x] wire the middleware\n- [ ] add tests\n\n## Notes\n- [ ] scratch line",
     );
-    const ticket = runAsTicket(makeRun(), spec);
-    expect(ticket.criteria).toEqual(["wire the middleware", "add tests"]);
-    expect(ticket.body).toContain("## Acceptance criteria");
-    expect(ticket.body).toContain("- [x] wire the middleware");
-    expect(ticket.body).toContain("- [ ] add tests");
+    const item = runAsWorkItem(makeRun(), spec);
+    expect(item.criteria).toEqual(["wire the middleware", "add tests"]);
+    expect(item.body).toContain("## Acceptance criteria");
+    expect(item.body).toContain("- [x] wire the middleware");
+    expect(item.body).toContain("- [ ] add tests");
     // Notes bullets are scratch, never criteria.
-    expect(ticket.criteria).not.toContain("scratch line");
+    expect(item.criteria).not.toContain("scratch line");
   });
 
   test("the seeded placeholder never reaches the worker as a criterion", () => {
     const run = makeRun();
     const spec = parseSpecChecklist(renderSpecScaffold(run));
     expect(spec.hasPlaceholder).toBe(true);
-    const ticket = runAsTicket(run, spec);
-    expect(ticket.criteria).toEqual([]);
+    const item = runAsWorkItem(run, spec);
+    expect(item.criteria).toEqual([]);
     expect(runBody(run, spec)).toBe("## Goal\nAdd OAuth middleware to the API gateway.");
-  });
-});
-
-describe("ticketStateForRun", () => {
-  test("implementing→in_progress, reviewing/publishing→in_review, parked→todo", () => {
-    const cases: [RunState, string][] = [
-      ["queued", "todo"],
-      ["implementing", "in_progress"],
-      ["reviewing", "in_review"],
-      ["publishing", "in_review"],
-      ["done", "done"],
-      ["cancelled", "cancelled"],
-      ["parked", "todo"],
-      ["failed", "todo"],
-    ];
-    for (const [state, expected] of cases) expect(ticketStateForRun(state)).toBe(expected as never);
-  });
-
-  test("the mapped state staffs the stage the supervisor expects", () => {
-    // The stage registry keys off ticket state; this is the contract the adapter must honor.
-    expect(runAsTicket(makeRun({ state: "implementing" })).state).toBe("in_progress");
-    expect(runAsTicket(makeRun({ state: "reviewing" })).state).toBe("in_review");
   });
 });

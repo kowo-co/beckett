@@ -221,13 +221,13 @@ test("composePrompt interleaves caller-supplied extra blocks by the same priorit
 });
 
 test("composePrompt renders with the live config", () => {
-  const config = validateConfig({ tracker: { default_board: "ops" } });
+  const config = validateConfig({ runs: { max_live: 7 } });
   const registry = new CapabilityRegistry();
   registry.register(
     cap({
-      id: "boards",
-      promptBlock: { id: "boards", render: ({ config: c }) => `default board: ${c.tracker.default_board}` },
+      id: "runs",
+      promptBlock: { id: "runs", render: ({ config: c }) => `max live runs: ${c.runs.max_live}` },
     }),
   );
-  expect(registry.composePrompt({ config })).toBe("default board: ops");
+  expect(registry.composePrompt({ config })).toBe("max live runs: 7");
 });

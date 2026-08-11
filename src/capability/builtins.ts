@@ -162,75 +162,6 @@ const HarnessConfigSchema = z
   .default({});
 
 // =======================================================================================
-// tracker — the bored ticket queue (OPS-190/191)
-// =======================================================================================
-
-/**
- * The stock board-name set. Boards are just names now: bored serves one managed board per
- * instance and keeps its own workflow, so a board carries no per-board config. `[tracker]`
- * `boards = [...]` in config.toml overrides or extends the list.
- */
-const DEFAULT_BOARDS = ["ops", "int", "vid", "vidpip"] as const;
-
-/** The board the legacy shapes (and default_board's default) normalize into. */
-const LEGACY_FLAT_BOARD = "ops";
-
-/**
- * Accept the retired Plane-era board TABLE (`boards.<name> = { project_slug, state_map }`)
- * by collapsing it to its names — the per-board keys were Plane-only and bored needs none of
- * them. (The top-level `[plane]` → `[tracker]` fold happens in `src/config.ts` before this
- * fragment ever sees the object.)
- */
-function normalizeTrackerConfig(rawTracker: unknown): unknown {
-  const raw = cloneRecord(rawTracker);
-  const boards = Array.isArray(raw.boards)
-    ? raw.boards
-    : isRecord(raw.boards)
-      ? [...new Set([...DEFAULT_BOARDS, ...Object.keys(raw.boards)])]
-      : [...DEFAULT_BOARDS];
-  const out: Record<string, unknown> = { ...raw, boards };
-  // Plane-only keys a legacy section may still carry — dropped, never validated against.
-  delete out.base_url;
-  delete out.workspace_slug;
-  delete out.project_slug;
-  delete out.state_map;
-  if (!Object.prototype.hasOwnProperty.call(out, "default_board")) {
-    out.default_board = LEGACY_FLAT_BOARD;
-  }
-  return out;
-}
-
-const TrackerConfigSchema = z
-  .preprocess(
-    normalizeTrackerConfig,
-    z
-      .object({
-        // Master switch for the ticket board. Default ON (prod). A second, board-less instance
-        // (the #141 staging daemon) sets `enabled = false` so it never polls or dispatches a
-        // board — the board is a shared HTTP service (BECKETT_BORED_URL), NOT under BECKETT_DIR,
-        // so there is otherwise no way to run a Beckett that doesn't reach for the prod queue.
-        enabled: z.boolean().default(true),
-        // Perf: pickup/review/relay latency is bounded by this poll. The poller avoids
-        // unchanged-ticket comment reads, so a 5s default cuts average wait cheaply (bored is
-        // a loopback service — polls never leave the box).
-        poll_secs: posInt.default(5),
-        default_board: z.string().min(1).default(LEGACY_FLAT_BOARD),
-        boards: z.array(z.string().min(1)).default([...DEFAULT_BOARDS]),
-      })
-      .strict()
-      .superRefine((tracker, ctx) => {
-        if (!tracker.boards.includes(tracker.default_board)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ["default_board"],
-            message: `unknown default_board "${tracker.default_board}" (have: ${tracker.boards.join(", ") || "none"})`,
-          });
-        }
-      }),
-  )
-  .default({});
-
-// =======================================================================================
 // proactivity — ambient interjection policy
 // =======================================================================================
 
@@ -349,7 +280,7 @@ export const configFragments = {
       // worker's worktree as a WIP checkpoint, so a HARD daemon crash (SIGKILL/OOM/power) — where
       // the graceful shutdown drain never runs — loses at most one checkpoint window of on-disk
       // work instead of the whole session. Best-effort and side-effect-free beyond the worktree
-      // (never touches the tracker / the advance- or publish-outbox). 0 disables periodic checkpointing.
+      // (never touches the publish outbox). 0 disables periodic checkpointing.
       worker_checkpoint_s: nonNegInt.default(120),
       // Runtime-awareness threshold (seconds) for the per-worker PostToolUse hook
       // (src/hooks/runtime-awareness.ts): a tool call that runs at least this long gets a
@@ -420,10 +351,7 @@ export const configFragments = {
       gmail_address: z.string().default(""),
     })
     .default({}),
-  // The bored ticket queue (OPS-190/191). bored's loopback URL rides BECKETT_BORED_URL in env,
-  // not here; boards are plain names. Beckett keeps the canonical TicketStates.
-  tracker: TrackerConfigSchema,
-  // v7 RUNS — the ticketless execution unit (`beckett task deploy`). The RunSupervisor
+  // RUNS — the execution unit (`beckett task deploy`). The RunSupervisor
   // (`src/run/supervisor.ts`) is the engine; these are its only knobs. There is deliberately no
   // `claude_bin` here: worker harness config stays in `[harness.claude]`, one source of truth.
   runs: z
@@ -437,9 +365,7 @@ export const configFragments = {
       // 0 (the default) falls back to `[budget] per_task_usd_cap`, so an install that already
       // tuned the task cap keeps exactly that behavior.
       budget_usd_per_run: z.number().min(0).default(0),
-      // The deploy receipt (progress cards, `src/progress/cards.ts`). Default ON, and deliberately
-      // this lane's OWN switch — independent of `[progress] cards_as_code`, which stays the
-      // ticket-dispatcher's flag until that lane is removed.
+      // The deploy receipt (progress cards, `src/progress/cards.ts`). Default ON.
       cards: z.boolean().default(true),
     })
     .strict()
@@ -448,7 +374,7 @@ export const configFragments = {
   // org and relays review/CI/merge signal. The credential (the GitHub App key, or a legacy PAT)
   // lives in env, not here; the poller is active only when one is configured. GitHub's REST API
   // is rate-limited, so this polls far less
-  // aggressively than the ticket tracker (60s default is ample for review/CI latency).
+  // aggressively than the run engine (60s default is ample for review/CI latency).
   github: z
     .object({
       poll_secs: posInt.default(60),
@@ -681,16 +607,6 @@ export const configFragments = {
     })
     .strict()
     .default({}),
-  // Zero-token progress cards (docs/token-efficiency.md fix #1, v0 increment): the daemon posts
-  // and edits ONE Discord status message per active ticket in the ticket's origin channel,
-  // driven directly by dispatch events — no model turn involved. OFF by default: flag off is
-  // byte-identical current behavior (no card writer constructed, no channel stamped on events).
-  progress: z
-    .object({
-      cards_as_code: z.boolean().default(false),
-    })
-    .strict()
-    .default({}),
   // Free time (docs/freetime.md): one weekly, budgeted, unprompted session inside a scratch
   // directory, with structured memory writeback seeding the next one. Every value here is a WALL
   // the session runs INSIDE — the session's process has no write path back to this file, so it
@@ -751,17 +667,15 @@ const BUILTIN_CAPABILITY_INFO: {
   harness: { id: "harness", summary: "Coding-agent harnesses (claude/codex/pi): binaries, models, fallback order." },
   paths: { id: "paths", summary: "Filesystem layout: beckett dir, db, logs, events, socket." },
   identity: { id: "identity", summary: "Beckett's external identities (GitHub user, Gmail address)." },
-  tracker: { id: "tracker", summary: "bored ticket-queue: board names, polling." },
   runs: { id: "runs", summary: "v7 runs: live cap, rework cap, per-run budget." },
   github: { id: "github", summary: "GitHub sense: PR review/CI/merge poller + external-activity relay." },
   proactivity: { id: "proactivity", summary: "Ambient interjection policy (burst triage, cooldowns, channel modes)." },
   shared_context: { id: "shared-context", summary: "Channel-scoped shared context: attributed transcripts + server memory." },
   concierge: { id: "concierge", summary: "The Concierge chat seat: model, effort, session pooling." },
-  quick: { id: "quick", summary: "Quick agents (no-ticket lane) + the computer-use browser host." },
+  quick: { id: "quick", summary: "Quick agents (the short-lived lane) + the computer-use browser host." },
   announce: { id: "announce", summary: "Restart changelog announcements." },
   federation: { id: "federation", summary: "Peer-Beckett federation over Discord." },
   dream: { id: "dream", summary: "Nightly dream pass: token ceiling + model for the self-lane day replay." },
-  progress: { id: "progress", summary: "Zero-token per-ticket progress cards: code-edited Discord status messages." },
   free_time: { id: "free-time", summary: "Weekly self-directed session: trigger, walls, token ceiling, share channel." },
   social: { id: "social", summary: "Social-media agent's chilltext chill-pass toggle." },
 };

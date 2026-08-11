@@ -60,66 +60,8 @@ test("per-harness default efforts land where they should", () => {
   expect(config.harness.claude.default_effort).toBe("high"); // untouched default
 });
 
-test("tracker config parses with defaults and a custom board list", () => {
-  const config = loadToml(`
-[tracker]
-default_board = "vid"
-boards = ["ops", "vid"]
-`);
-  expect(config.tracker.default_board).toBe("vid");
-  expect(config.tracker.boards).toEqual(["ops", "vid"]);
-  expect(config.tracker.poll_secs).toBe(5);
-});
-
-test("an empty config yields the stock board set with ops as default", () => {
-  const config = loadToml("");
-  expect(config.tracker.default_board).toBe("ops");
-  expect(config.tracker.boards).toEqual(["ops", "int", "vid", "vidpip"]);
-});
-
-test("legacy [plane] section folds into [tracker] — an existing box keeps booting (OPS-191)", () => {
-  // The exact shape of a pre-cutover host config: flat [plane] with Plane-only keys.
-  const config = loadToml(`
-[plane]
-project_slug = "ops"
-base_url = "https://plane.0xbeckett.me"
-workspace_slug = "beckett"
-poll_secs = 3
-
-[plane.state_map]
-in_progress = "Doing"
-`);
-  expect(config).not.toHaveProperty("plane");
-  expect(config.tracker.poll_secs).toBe(3);
-  expect(config.tracker.default_board).toBe("ops");
-  expect(config.tracker.boards).toEqual(["ops", "int", "vid", "vidpip"]);
-});
-
-test("legacy [plane.boards.<name>] tables collapse to their names", () => {
-  const config = loadToml(`
-[plane]
-default_board = "web"
-
-[plane.boards.web]
-project_slug = "WEB"
-`);
-  expect(config.tracker.default_board).toBe("web");
-  expect(config.tracker.boards).toEqual(["ops", "int", "vid", "vidpip", "web"]);
-});
-
-test("an explicit [tracker] section wins over a lingering [plane] one", () => {
-  const config = loadToml(`
-[plane]
-poll_secs = 3
-
-[tracker]
-poll_secs = 9
-`);
-  expect(config.tracker.poll_secs).toBe(9);
-});
-
-test("unknown default board is a loud config error listing valid boards", () => {
-  expect(() => loadToml(`[tracker]\ndefault_board = "missing"\n`)).toThrow(/unknown default_board "missing" \(have: ops, int, vid, vidpip\)/);
+test("an unknown top-level section is a loud config error (the schema is strict)", () => {
+  expect(() => loadToml(`[tracker]\ndefault_board = "ops"\n`)).toThrow(/Unrecognized key|refusing to start/);
 });
 
 test("github activity relay is off until an instance configures its own repository and dev feed", () => {

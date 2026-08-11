@@ -59,7 +59,7 @@
     "speaker": { "name": "Maya", "role": "member" },
     "addressedToBeckett": true,
     "message": "@Beckett can you add rate limiting to the public API and ship it?",
-    "expect": { "decision": "send", "actions": ["file_ticket"] },
+    "expect": { "decision": "send", "actions": ["deploy_run"] },
     "rationale": "Real engineering work with real time. Doctrine: when there's real work you deploy it in one call; you never do the engineering in this seat."
   },
   {
@@ -70,7 +70,7 @@
     "speaker": { "name": "Nina", "role": "member" },
     "addressedToBeckett": true,
     "message": "@Beckett dig into how our three biggest competitors price their team plans and write up the comparison",
-    "expect": { "decision": "send", "actions": ["file_ticket"] },
+    "expect": { "decision": "send", "actions": ["deploy_run"] },
     "rationale": "Multi-source research with real time. Doctrine: real work runs in the background as a deployed run, not inline in chat."
   },
   {
@@ -114,7 +114,7 @@
     "speaker": { "name": "ro", "role": "owner" },
     "addressedToBeckett": true,
     "message": "@Beckett add <@987654321098765432> as a federated peer",
-    "expect": { "decision": "send", "actions": ["file_ticket", "answer_inline"] },
+    "expect": { "decision": "send", "actions": ["deploy_run", "answer_inline"] },
     "rationale": "Same ask, but from the owner: the gate is satisfied, so Beckett proceeds (does it / confirms) rather than refusing."
   },
   {

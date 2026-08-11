@@ -264,14 +264,14 @@ export class ExtensionRegistry {
   // The registry indexes the CONTRACT's structural {@link StageFacet}; dispatch widens it back
   // to its full StageDefinition through its own view (`dispatch/stages.ts#stageViewOf`), keeping
   // `src/ext` free of dispatch-domain types. Stages never appear in {@link catalog} — they are
-  // staffed by the dispatcher's state machine, not routed from an @mention.
+  // staffed by the run supervisor, not routed from an @mention.
 
   /** The registered stage facet named `name`, or undefined for an unregistered stage. */
   stage(name: string): StageFacet | undefined {
     return this.byStageName.get(name)?.stage;
   }
 
-  /** The stage a ticket entering `state` should staff, if any (unique — enforced at register()). */
+  /** The stage a run entering `state` should staff, if any (unique — enforced at register()). */
   stageForState(state: string): StageFacet | undefined {
     return this.byStageEntryState.get(state)?.stage;
   }

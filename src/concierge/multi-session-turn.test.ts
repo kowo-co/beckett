@@ -17,7 +17,7 @@ import { Concierge, type ConciergeSession, type TurnMessage } from "./index.ts";
 import { validateConfig } from "../config.ts";
 import type { IncomingMessage } from "../types.ts";
 import type { DiscordGateway } from "../discord/gateway.ts";
-import type { Ticket } from "../tracker/types.ts";
+import type { Run } from "../run/types.ts";
 import type { QuickRun } from "../quick/index.ts";
 
 const CHAN_A = "1097283746520174592";
@@ -306,26 +306,27 @@ test("tokenless correlation never falls back to a live turn in a DIFFERENT chann
   h.sessionFor(CHAN_A)!.finish("");
 });
 
-test("ticket updates run on the system session, grouped per destination channel", async () => {
+test("run updates run on the system session, grouped per destination channel", async () => {
   const h = harness();
-  const ticket = (id: string, channel: string): Ticket =>
+  const run = (id: string, channel: string): Run =>
     ({
       id,
-      identifier: id,
+      slug: id,
       title: `work ${id}`,
-      description: "",
-      body: "",
-      casting: {},
-      criteria: [],
-      state: "in_progress",
-      url: "",
-      originChannel: channel,
-    }) as unknown as Ticket;
+      prompt: "",
+      channelId: channel,
+      taskRef: null,
+      state: "cancelled",
+      cast: null,
+      repo: null,
+      prUrl: null,
+      error: null,
+    }) as unknown as Run;
 
   h.concierge.notify([
-    { kind: "cancelled", ticket: ticket("OPS-1", CHAN_A) },
-    { kind: "cancelled", ticket: ticket("OPS-2", CHAN_A) },
-    { kind: "cancelled", ticket: ticket("OPS-3", CHAN_B) },
+    { kind: "state_changed", run: run("run-1", CHAN_A), from: "implementing", to: "cancelled" },
+    { kind: "state_changed", run: run("run-2", CHAN_A), from: "implementing", to: "cancelled" },
+    { kind: "state_changed", run: run("run-3", CHAN_B), from: "implementing", to: "cancelled" },
   ]);
   await tick();
   await tick();
@@ -334,9 +335,9 @@ test("ticket updates run on the system session, grouped per destination channel"
   // A's two updates fold into one system turn and B's gets another; neither human channel gets
   // daemon chatter in its conversation transcript.
   expect(system.asks).toHaveLength(2);
-  expect(String(system.asks[0]!.message)).toContain("OPS-1");
-  expect(String(system.asks[0]!.message)).toContain("OPS-2");
-  expect(String(system.asks[1]!.message)).toContain("OPS-3");
+  expect(String(system.asks[0]!.message)).toContain("run-1");
+  expect(String(system.asks[0]!.message)).toContain("run-2");
+  expect(String(system.asks[1]!.message)).toContain("run-3");
   expect(h.sessionFor(CHAN_A)).toBeUndefined();
   expect(h.sessionFor(CHAN_B)).toBeUndefined();
 });

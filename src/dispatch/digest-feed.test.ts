@@ -8,8 +8,8 @@ const TS = "2026-08-04T21:34:00.000Z";
 function ev(stage: string, outcome: DispatchOutcome, message?: string, error?: string): DispatchEvent {
   return {
     ts: TS,
-    ticketId: "ticket-1",
-    ticketRef: "#2.1",
+    runId: "ticket-1",
+    runRef: "#2.1",
     branchRef: "beckett/task-2-1",
     stage,
     outcome,

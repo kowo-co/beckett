@@ -1,8 +1,7 @@
 /**
  * Beckett v7 — the RunSupervisor (`src/run/supervisor.ts`)
  * =======================================================================================
- * The engine. This is the ticket dispatcher's staffing loop rebuilt against the RUN model:
- * no board, no poller, no ticket ceremony. A run reaches it one of three ways —
+ * The engine. The daemon's one staffing loop: no board, no poller, no ticket ceremony. A run reaches it one of three ways —
  *
  *   1. the `run.deploy` control-bus ping (`beckett task deploy` just created it),
  *   2. the boot scan of {@link RunStore.live} (daemon restart / crash recovery),
@@ -13,9 +12,8 @@
  *
  * WHAT IS DELIBERATELY REUSED, NOT REBUILT. Every worker prompt, persona, done-signal parse,
  * and driver launch stays in `src/dispatch/stages.ts` + `src/dispatch/spawn.ts`, untouched.
- * The supervisor reaches them through {@link runAsTicket} (`./adapter.ts`), which projects a
- * Run into the exact Ticket shape they read. That is the whole wave-A bet: change the
- * engine, keep the worker machinery byte-identical, and rename the shapes in wave B.
+ * The supervisor reaches them through {@link runAsWorkItem} (`./adapter.ts`), which projects a
+ * Run onto the narrow {@link WorkItem} shape they read.
  *
  * BEHAVIORS PORTED VERBATIM FROM THE DISPATCHER (each is load-bearing, each was a bug once):
  *   - claim-before-dispatch: the reservation Symbol goes into {@link staffing} SYNCHRONOUSLY,
@@ -36,10 +34,11 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname, join } from "node:path";
 
 import type { Config, Harness, Logger, WorkerEvent } from "../types.ts";
-import type { HarnessSpec, Ticket } from "../tracker/types.ts";
+import type { HarnessSpec } from "./cast.ts";
+import type { WorkItem } from "./work-item.ts";
 import type { ProgressSink } from "../progress/journal.ts";
 import { log } from "../log.ts";
-import { projectSlug } from "../tracker/cast.ts";
+import { projectSlug } from "./cast.ts";
 import { sweepLedgeredWorker } from "../drivers/proc.ts";
 import {
   commitWorktree,
@@ -51,7 +50,7 @@ import {
   readDiff,
   removeWorktree,
 } from "../worker/worktree.ts";
-import { spawnTicketWorker, type TicketWorkerHandle } from "../dispatch/spawn.ts";
+import { spawnWorker, type WorkerHandle } from "../dispatch/spawn.ts";
 import {
   defaultEffortFor,
   parseDoneSignal,
@@ -69,9 +68,9 @@ import { appendSpendRecord, readSpendLedger, spendForTicket, type SpendOutcome }
 import { resolveProjectOwner, selfProjectSlug } from "../github/owner.ts";
 import { specGateSpec } from "../hooks/registry.ts";
 import { parseSpecChecklist, renderSpecScaffold, type ParsedSpecChecklist } from "./spec-file.ts";
-import { runAsTicket } from "./adapter.ts";
+import { runAsWorkItem } from "./adapter.ts";
 import type { RunStore } from "./store.ts";
-import type { Run, RunStage } from "./types.ts";
+import type { Run, RunStage, RunStateChange } from "./types.ts";
 import { RUN_TERMINAL } from "./types.ts";
 
 // =======================================================================================
@@ -134,7 +133,12 @@ export interface RunSupervisorDeps {
   /** Harness health probe (`preflightFor`); omitted → every harness is presumed healthy. */
   preflight?: (harness: Harness) => Promise<{ ok: boolean; problems: string[] }>;
   /** Fired when a run's PR opens, so the GitHub poller watches it keyed by run id. */
-  onPrOpened?: (info: { prUrl: string; run: Run; ticket: Ticket }) => void | Promise<void>;
+  onPrOpened?: (info: { prUrl: string; run: Run }) => void | Promise<void>;
+  /**
+   * Fired on every run state transition, so the concierge can surface milestones to the channel
+   * that asked. Best-effort by contract: a throwing listener is logged and never fails the patch.
+   */
+  onStateChange?: (event: RunStateChange) => void;
   /** Fired on every successful publication (push or PR). */
   onPublished?: (info: { url: string; kind: "pushed" | "pr"; prUrl?: string; run: Run }) => unknown;
   /** Test seam for the orphan sweep; default ps-verifies + kills. */
@@ -197,16 +201,16 @@ export function runProjectSlug(run: Pick<Run, "repo">, env: Record<string, strin
 
 /**
  * `progress/cards.ts`'s `specReader` adapter: reads a run's LIVE `## Checklist` progress off its
- * workspace, keyed by `DispatchEvent.ticketId` (the run id the supervisor stamps every trace
+ * workspace, keyed by `DispatchEvent.runId` (the id the supervisor stamps every trace
  * with). Exported standalone — `shell/main.ts` wires it into `createProgressCardService` — so
  * the card module itself never touches the filesystem. `store` is typed to the one method this
  * needs so a test can hand in a trivial fake instead of a real `RunStore`.
  */
 export function runSpecReader(
   store: Pick<RunStore, "get">,
-): (ticketId: string) => { done: number; total: number } | null {
-  return (ticketId) => {
-    const run = store.get(ticketId);
+): (runId: string) => { done: number; total: number } | null {
+  return (runId) => {
+    const run = store.get(runId);
     if (!run?.workspace) return null;
     const path = join(run.workspace, "spec.md");
     if (!existsSync(path)) return null;
@@ -241,6 +245,7 @@ export class RunSupervisor {
   private readonly progress?: ProgressSink;
   private readonly preflight?: RunSupervisorDeps["preflight"];
   private readonly onPrOpened?: RunSupervisorDeps["onPrOpened"];
+  private readonly onStateChange?: RunSupervisorDeps["onStateChange"];
   private readonly onPublished?: RunSupervisorDeps["onPublished"];
   private readonly sweepOrphan: (pid: number, expectedBin: string) => boolean;
   private readonly bus?: RunBusPort;
@@ -250,7 +255,7 @@ export class RunSupervisor {
   private readonly spendLedgerPath: string;
 
   /** Live worker handles, keyed by run id. */
-  private readonly workers = new Map<string, TicketWorkerHandle>();
+  private readonly workers = new Map<string, WorkerHandle>();
   /** Claim-before-dispatch reservations. The Symbol is the token a `finally` compares against. */
   private readonly staffing = new Map<string, symbol>();
   private readonly pending: PendingRunSpawn[] = [];
@@ -267,6 +272,8 @@ export class RunSupervisor {
 
   private watchdogTimer?: ReturnType<typeof setInterval>;
   private watchdogInFlight = false;
+  /** Epoch ms of the last completed staffing pass — the status dashboard's liveness signal. */
+  private lastTickAt: number | null = null;
   private publishDrainTimer?: ReturnType<typeof setInterval>;
   private checkpointTimer?: ReturnType<typeof setInterval>;
   private checkpointInFlight = false;
@@ -293,6 +300,7 @@ export class RunSupervisor {
     this.progress = deps.progress;
     this.preflight = deps.preflight;
     this.onPrOpened = deps.onPrOpened;
+    this.onStateChange = deps.onStateChange;
     this.onPublished = deps.onPublished;
     this.bus = deps.bus;
     this.sweepOrphan =
@@ -372,7 +380,16 @@ export class RunSupervisor {
     this.admitRun(run);
   }
 
-  /** Live status rows for `beckett status` (the tracker dashboard's replacement source). */
+  /**
+   * When the staffing watchdog last completed a pass, or null before its first. This is the
+   * dashboard's honest "is the engine still turning" signal: there is no out-of-process service
+   * left to ping, so liveness is the loop's own heartbeat.
+   */
+  lastReconcileAt(): number | null {
+    return this.lastTickAt;
+  }
+
+  /** Live status rows for `beckett status` (the run board's source). */
   live(): Array<{ runId: string; state: string; stage: string | null; workerId: string | null }> {
     const rows: Array<{ runId: string; state: string; stage: string | null; workerId: string | null }> = [];
     for (const run of this.store.live()) {
@@ -515,7 +532,7 @@ export class RunSupervisor {
     if (stage === "implement" && run.ultracode && !explicit) {
       return { harness: "claude", model: "claude-opus-5", effort: "ultracode" };
     }
-    return this.stages.resolveCast(stage, explicit, runAsTicket(run), this.config);
+    return this.stages.resolveCast(stage, explicit, runAsWorkItem(run), this.config);
   }
 
   /** The worker settings a v7 run adds on top of the rendered hooks. */
@@ -639,13 +656,13 @@ export class RunSupervisor {
     }
 
     const steering = this.takeSteers(run.id);
-    const ticket = runAsTicket(current, this.readSpec({ ...current, workspace }));
+    const item = runAsWorkItem(current, this.readSpec({ ...current, workspace }));
     const specGatePath = join(import.meta.dir, "../hooks/spec-gate.ts");
 
-    let handle: TicketWorkerHandle;
+    let handle: WorkerHandle;
     try {
-      handle = await spawnTicketWorker({
-        ticket,
+      handle = await spawnWorker({
+        item,
         stage,
         harness: spec,
         config: this.config,
@@ -769,7 +786,7 @@ export class RunSupervisor {
   private async onWorkerDone(
     runId: string,
     stage: RunStage,
-    handle: TicketWorkerHandle,
+    handle: WorkerHandle,
     status: "success" | "error",
     summary: string,
     spendMeta: SpendStageMeta,
@@ -808,7 +825,7 @@ export class RunSupervisor {
 
   private async finishImplement(
     run: Run,
-    handle: TicketWorkerHandle,
+    handle: WorkerHandle,
     status: "success" | "error",
     summary: string,
   ): Promise<void> {
@@ -833,7 +850,7 @@ export class RunSupervisor {
 
   private async finishReview(
     run: Run,
-    handle: TicketWorkerHandle,
+    handle: WorkerHandle,
     status: "success" | "error",
     summary: string,
   ): Promise<void> {
@@ -900,7 +917,7 @@ export class RunSupervisor {
       if (this.publishOutbox) {
         const op: PublishOperation = {
           id: randomUUID(),
-          ticket: runAsTicket(publishing),
+          item: runAsWorkItem(publishing),
           slug: runProjectSlug(publishing),
           repoRoot: publishing.workspace ?? this.resolveRepoRoot(publishing),
           messagePrefix: "Review passed → **done**.",
@@ -969,7 +986,7 @@ export class RunSupervisor {
     // Only PRs are watchable. The poller is keyed by the RUN id, so its relays land on the run.
     if (publication.kind === "pr" && publication.prUrl && this.onPrOpened) {
       try {
-        await this.onPrOpened({ prUrl: publication.prUrl, run, ticket: runAsTicket(run) });
+        await this.onPrOpened({ prUrl: publication.prUrl, run });
       } catch (err) {
         this.logger.warn("onPrOpened hook failed (publish still succeeded)", { run: run.id, error: String(err) });
       }
@@ -981,7 +998,7 @@ export class RunSupervisor {
   async replayPublishes(): Promise<number> {
     if (!this.publishOutbox) return 0;
     return this.publishOutbox.drain(async (op) => {
-      const run = this.store.get(op.ticket.id);
+      const run = this.store.get(op.item.id);
       if (!run || RUN_TERMINAL.has(run.state)) return { action: "remove" };
       const pub = await this.publishOnce(run, op.summary);
       if (pub.status === "failed") {
@@ -1176,6 +1193,7 @@ export class RunSupervisor {
         }
       }
       for (const id of [...this.unstaffedSince.keys()]) if (!wedged.has(id)) this.forgetWedgeClock(id);
+      this.lastTickAt = nowMs;
     } finally {
       this.watchdogInFlight = false;
     }
@@ -1287,7 +1305,16 @@ export class RunSupervisor {
     patch: Partial<Omit<Run, "id" | "slug" | "branch" | "sessionName" | "createdAt">>,
   ): Promise<Run | null> {
     try {
-      return await this.store.update(runId, patch);
+      const before = this.store.get(runId)?.state;
+      const updated = await this.store.update(runId, patch);
+      if (this.onStateChange && patch.state !== undefined && patch.state !== before) {
+        try {
+          this.onStateChange({ kind: "state_changed", run: updated, from: before ?? null, to: patch.state });
+        } catch (err) {
+          this.logger.warn("run state-change listener threw (ignored)", { run: runId, error: String(err) });
+        }
+      }
+      return updated;
     } catch (err) {
       this.logger.warn("run state patch skipped — the run is no longer in the ledger", {
         run: runId,
@@ -1315,7 +1342,7 @@ export class RunSupervisor {
     this.logger.warn("run parked for a human", { run: run.id, reason });
   }
 
-  private async commitWip(run: Run, handle: TicketWorkerHandle): Promise<string | null> {
+  private async commitWip(run: Run, handle: WorkerHandle): Promise<string | null> {
     try {
       const commit = await this.git.commitWorktree(handle.workspace, `beckett: ${run.id} WIP (${handle.workerId})`);
       return commit.sha ?? null;
@@ -1325,7 +1352,7 @@ export class RunSupervisor {
     }
   }
 
-  private async commitContribution(run: Run, handle: TicketWorkerHandle): Promise<boolean> {
+  private async commitContribution(run: Run, handle: WorkerHandle): Promise<boolean> {
     try {
       const commit = await this.git.commitWorktree(
         handle.workspace,
@@ -1342,7 +1369,7 @@ export class RunSupervisor {
   private recordSpend(
     run: Run,
     stage: RunStage,
-    handle: TicketWorkerHandle,
+    handle: WorkerHandle,
     status: "success" | "error",
     meta: SpendStageMeta,
   ): void {
@@ -1386,14 +1413,13 @@ export class RunSupervisor {
   }
 
   /**
-   * One persisted-before-live dispatch row. Emitted on the EXISTING bus with `ticketId`/
-   * `ticketRef` = the run id, so digests, progress cards, dream assembly, and telemetry harvest
+   * One persisted-before-live dispatch row. Emitted with `runId`/`runRef` = the run id, so digests, progress cards, dream assembly, and telemetry harvest
    * keep working with no change at all.
    */
   private trace(run: Run, stage: string, outcome: DispatchOutcome, message?: string, error?: string): void {
     this.events.emit({
-      ticketId: run.id,
-      ticketRef: run.id,
+      runId: run.id,
+      runRef: run.id,
       branchRef: run.branch,
       ...(run.channelId ? { channel: run.channelId } : {}),
       stage,

@@ -10,7 +10,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Config } from "../types.ts";
-import type { HarnessSpec } from "../tracker/types.ts";
+import type { HarnessSpec } from "./cast.ts";
 import { appendSpendRecord, type SpendRecord } from "../spend.ts";
 import type { DispatchEvent } from "../dispatch/events.ts";
 import type { RunGitOps } from "./supervisor.ts";
@@ -19,7 +19,7 @@ import type { Run } from "./types.ts";
 
 // ── controllable fake worker handle + spawn mock ────────────────────────────────────────────
 interface SpawnCall {
-  ticketId: string;
+  itemId: string;
   stage: string;
   harness: HarnessSpec;
   branch: string;
@@ -43,7 +43,7 @@ function makeHandle(args: any) {
   const h: any = {
     id: `wk_${++counter}`,
     workerId: `wk_${counter}`,
-    ticketId: args.ticket.id,
+    itemId: args.item.id,
     stage: args.stage,
     harness: args.harness.harness,
     workspace: args.workspace,
@@ -82,7 +82,7 @@ function makeHandle(args: any) {
 
 const fakeSpawn = async (args: any) => {
   spawnCalls.push({
-    ticketId: args.ticket.id,
+    itemId: args.item.id,
     stage: args.stage,
     harness: args.harness,
     branch: args.branch,
@@ -93,7 +93,7 @@ const fakeSpawn = async (args: any) => {
     resumeSessionId: args.resumeSessionId,
     steering: args.steering,
     reviewDiff: args.reviewDiff,
-    body: args.ticket.body,
+    body: args.item.body,
   });
   if (spawnThrows) throw spawnThrows;
   const h = makeHandle(args);
@@ -107,7 +107,6 @@ const realSpawnModule = await import("../dispatch/spawn.ts");
 mock.module("../dispatch/spawn.ts", () => ({
   ...realSpawnModule,
   spawnWorker: fakeSpawn,
-  spawnTicketWorker: fakeSpawn,
 }));
 
 const { RunSupervisor, runProjectSlug, runSpecReader } = await import("./supervisor.ts");
@@ -304,10 +303,10 @@ describe("admission", () => {
     const run = seedRun(store, makeRun());
     await supervisor.admit(run.id);
     await tick();
-    expect(events[0]).toMatchObject({ ticketId: run.id, stage: "run:deploy", outcome: "started", message: "queued" });
-    // Every event on this run's timeline is keyed by the run id, exactly like the ticket
-    // dispatcher's — cards/digests/telemetry need no run-specific handling to find it.
-    expect(events.every((e) => e.ticketId === run.id && e.ticketRef === run.id)).toBe(true);
+    expect(events[0]).toMatchObject({ runId: run.id, stage: "run:deploy", outcome: "started", message: "queued" });
+    // Every event on this run's timeline is keyed by the run id — cards, digests, and telemetry
+    // all find it with one key.
+    expect(events.every((e) => e.runId === run.id && e.runRef === run.id)).toBe(true);
   });
 
   test("claim-before-dispatch: a double admit produces exactly one spawn", async () => {
@@ -369,19 +368,19 @@ describe("admission", () => {
     await tick();
     await supervisor.admit(b.id);
     await tick();
-    expect(spawnCalls.map((c) => c.ticketId)).toEqual([a.id]);
+    expect(spawnCalls.map((c) => c.itemId)).toEqual([a.id]);
 
     // A's own next stage takes the freed slot first — b is still queued behind the cap.
     created[0]!.finish("success", "done", doneSignal("complete"));
     await settle();
-    expect(spawnCalls.map((c) => c.ticketId)).toEqual([a.id, a.id]);
+    expect(spawnCalls.map((c) => c.itemId)).toEqual([a.id, a.id]);
     expect(spawnCalls[1]!.stage).toBe("review");
 
     // Once a is genuinely finished, the queue pumps and b starts.
     created[1]!.finish("success", "pass", doneSignal("complete"));
     await settle();
     expect(store.get(a.id)!.state).toBe("done");
-    expect(spawnCalls.map((c) => c.ticketId)).toContain(b.id);
+    expect(spawnCalls.map((c) => c.itemId)).toContain(b.id);
   });
 });
 
@@ -482,7 +481,7 @@ describe("stage flow", () => {
     expect(store.get(run.id)!.state).toBe("publishing");
     const rows = readFileSync(outbox, "utf8").trim().split("\n").map((l) => JSON.parse(l));
     expect(rows).toHaveLength(1);
-    expect(rows[0].ticket.id).toBe(run.id);
+    expect(rows[0].item.id).toBe(run.id);
     expect(rows[0].purpose).toBe("done");
   });
 
@@ -557,7 +556,7 @@ describe("stage flow", () => {
       outbox,
       `${JSON.stringify({
         id: "op-1",
-        ticket: { id: run.id, identifier: run.id },
+        item: { id: run.id, identifier: run.id },
         slug: "gateway",
         repoRoot: join(dir, "wt"),
         messagePrefix: "Review passed → **done**.",
@@ -889,7 +888,7 @@ describe("steering", () => {
     expect(await supervisor.steer(idle.id, "later note")).toBe("buffered");
     await supervisor.admit(idle.id);
     await tick();
-    expect(spawnCalls.find((c) => c.ticketId === idle.id)!.steering).toEqual(["later note"]);
+    expect(spawnCalls.find((c) => c.itemId === idle.id)!.steering).toEqual(["later note"]);
   });
 });
 

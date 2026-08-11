@@ -55,8 +55,8 @@ function registryHoldingRefTwice(file: string): WorkspaceRegistry {
     file,
     JSON.stringify({
       // Insertion order is the tiebreak `channelForTask` uses, so A wins the routing to begin with.
-      A: { parentChannelId: "chan-1", name: "first attempt", ticketIdents: [], taskRefs: ["12"], branchRefs: [] },
-      B: { parentChannelId: "chan-1", name: "second attempt", ticketIdents: [], taskRefs: ["12"], branchRefs: [] },
+      A: { parentChannelId: "chan-1", name: "first attempt", runIds: [], taskRefs: ["12"], branchRefs: [] },
+      B: { parentChannelId: "chan-1", name: "second attempt", runIds: [], taskRefs: ["12"], branchRefs: [] },
     }),
     "utf8",
   );
@@ -72,11 +72,11 @@ test("a user thread registers a workspace that owns NO work, however it is named
   expect(reg.contextFor("t-1")).toEqual({
     parentChannelId: "chan-1",
     name: "OPS-120 auth rework",
-    ticketIdents: [],
+    runIds: [],
     taskRefs: [],
     branchRefs: [],
   });
-  expect(reg.channelForTicket("OPS-120")).toBeNull();
+  expect(reg.channelForRun("OPS-120")).toBeNull();
   // A channel that isn't a workspace resolves to nothing.
   expect(reg.contextFor("chan-1")).toBeNull();
 });
@@ -115,7 +115,7 @@ test("a thread name never binds work, however it is spelled", () => {
     expect(reg.contextFor(`t-${i}`)).toEqual({
       parentChannelId: "chan-1",
       name,
-      ticketIdents: [],
+      runIds: [],
       taskRefs: [],
       branchRefs: [],
     });
@@ -124,7 +124,7 @@ test("a thread name never binds work, however it is spelled", () => {
   for (const ref of ["1", "2", "7", "10", "12", "12.1", "12abc"]) {
     expect(reg.channelForTask(ref)).toBeNull();
   }
-  expect(reg.channelForTicket("OPS-120")).toBeNull();
+  expect(reg.channelForRun("OPS-120")).toBeNull();
 });
 
 test("an ungrounded thread is still a workspace, and a ticket filed from it grounds it", () => {
@@ -133,16 +133,16 @@ test("an ungrounded thread is still a workspace, and a ticket filed from it grou
   expect(reg.contextFor("t-2")).toEqual({
     parentChannelId: "chan-1",
     name: "brainstorm corner",
-    ticketIdents: [],
+    runIds: [],
     taskRefs: [],
     branchRefs: [],
   });
 
   // A ticket filed FROM the workspace grounds it.
-  reg.bindTicket("t-2", "OPS-7");
-  expect(reg.contextFor("t-2")?.ticketIdents).toEqual(["OPS-7"]);
+  reg.bindRun("t-2", "run-7");
+  expect(reg.contextFor("t-2")?.runIds).toEqual(["run-7"]);
   // Binding against a non-workspace channel is a no-op, not a registration.
-  reg.bindTicket("chan-1", "OPS-8");
+  reg.bindRun("chan-1", "OPS-8");
   expect(reg.contextFor("chan-1")).toBeNull();
 });
 
@@ -150,18 +150,18 @@ test("registration is idempotent and binds are deduped", () => {
   const reg = new WorkspaceRegistry({ logger: quietLog });
   reg.registerThread({ threadId: "t-3", parentChannelId: "chan-1", name: "auth rework", creatorId: "u-1" });
   // Grounding is seeded the only way it can be: tickets filed from inside the room.
-  reg.bindTicket("t-3", "OPS-1");
-  reg.bindTicket("t-3", "OPS-2");
+  reg.bindRun("t-3", "run-1");
+  reg.bindRun("t-3", "run-2");
 
   // A re-emitted create event (a rename, or the daemon seeing the thread twice) changes nothing —
   // not the parent channel, not the label, and above all not the work already bound here.
   reg.registerThread({ threadId: "t-3", parentChannelId: "chan-9", name: "renamed", creatorId: "u-2" });
-  reg.bindTicket("t-3", "OPS-1"); // …and a repeated bind does not duplicate
+  reg.bindRun("t-3", "run-1"); // …and a repeated bind does not duplicate
 
   expect(reg.contextFor("t-3")).toEqual({
     parentChannelId: "chan-1", // the first registration wins
     name: "auth rework",
-    ticketIdents: ["OPS-1", "OPS-2"],
+    runIds: ["run-1", "run-2"],
     taskRefs: [],
     branchRefs: [],
   });
@@ -212,7 +212,7 @@ test("attachTasks MOVES a ref: '&12' in thread B takes routing away from thread 
   expect(reg.contextFor("A")).toEqual({
     parentChannelId: "chan-1",
     name: "auth rework",
-    ticketIdents: [],
+    runIds: [],
     taskRefs: [],
     branchRefs: [],
   });
@@ -222,19 +222,19 @@ test("attachTasks moves only the named refs and leaves the loser's other work al
   const reg = new WorkspaceRegistry({ logger: quietLog });
   reg.registerThread({ threadId: "A", parentChannelId: "chan-1", name: "release cleanup", creatorId: "u-1" });
   reg.attachTasks("A", ["#12", "#13", "#14"]);
-  reg.bindBranch("A", "12.1", "OPS-9");
+  reg.bindBranch("A", "12.1", "run-9");
   reg.registerThread({ threadId: "B", parentChannelId: "chan-1", name: "the retry room", creatorId: "u-1" });
 
   reg.attachTasks("B", ["#12", "#14"]);
 
   expect(reg.contextFor("A")).toMatchObject({
     taskRefs: ["13"],
-    ticketIdents: ["OPS-9"],
+    runIds: ["run-9"],
     branchRefs: ["12.1"],
   });
   expect(reg.contextFor("B")?.taskRefs).toEqual(["12", "14"]);
   expect(reg.channelForTask("13")).toBe("A");
-  expect(reg.channelForTicket("OPS-9")).toBe("A");
+  expect(reg.channelForRun("run-9")).toBe("A");
 });
 
 test("re-attaching a ref the target ALREADY holds still withdraws it from the other workspace", () => {
@@ -322,12 +322,12 @@ test("detachAll clears the work but keeps the thread a workspace", () => {
   expect(reg.contextFor("t-det")).toEqual({
     parentChannelId: "chan-1",
     name: "OPS-5 room",
-    ticketIdents: [],
+    runIds: [],
     taskRefs: [],
     branchRefs: [],
   });
   expect(reg.channelForTask("#1")).toBeNull();
-  expect(reg.channelForTicket("OPS-5")).toBeNull();
+  expect(reg.channelForRun("OPS-5")).toBeNull();
   // Still registered, so a later `&ref` lands — and the clear was persisted.
   reg.attachTasks("t-det", ["#9"]);
   expect(new WorkspaceRegistry({ stateFile: file, logger: quietLog }).contextFor("t-det")?.taskRefs).toEqual(["9"]);
@@ -337,19 +337,19 @@ test("workspace routing survives a restart via the state file", () => {
   const file = stateFile();
   const first = new WorkspaceRegistry({ stateFile: file, logger: quietLog });
   first.registerThread({ threadId: "t-4", parentChannelId: "chan-1", name: "auth rework", creatorId: "u-1" });
-  first.bindTicket("t-4", "OPS-9");
-  first.bindTicket("t-4", "OPS-10");
+  first.bindRun("t-4", "run-9");
+  first.bindRun("t-4", "run-10");
   first.attachTasks("t-4", ["#12"]);
 
   const second = new WorkspaceRegistry({ stateFile: file, logger: quietLog });
   expect(second.contextFor("t-4")).toEqual({
     parentChannelId: "chan-1",
     name: "auth rework",
-    ticketIdents: ["OPS-10", "OPS-9"], // contextFor sorts idents lexicographically
+    runIds: ["run-10", "run-9"], // contextFor sorts idents lexicographically
     taskRefs: ["12"],
     branchRefs: [],
   });
-  expect(second.channelForTicket("OPS-9")).toBe("t-4");
+  expect(second.channelForRun("run-9")).toBe("t-4");
   expect(second.channelForTask("12")).toBe("t-4");
 });
 
@@ -361,7 +361,7 @@ test("a legacy scalar taskRef on disk migrates into taskRefs instead of being dr
       "old-thread": {
         parentChannelId: "chan-1",
         name: "#42 - Voting",
-        ticketIdents: ["OPS-143"],
+        runIds: ["run-a"],
         taskRef: "#42",
         branchRefs: ["42.1"],
       },
@@ -388,16 +388,16 @@ test("a Beckett-created task thread persists task/branch grounding and reverse t
     "#42",
     ["#42.1"],
   );
-  first.bindBranch("task-thread", "42.2", "OPS-143");
+  first.bindBranch("task-thread", "42.2", "run-a");
 
   const second = new WorkspaceRegistry({ stateFile: file, logger: quietLog });
   expect(second.contextFor("task-thread")).toMatchObject({
     taskRefs: ["42"],
     branchRefs: ["42.1", "42.2"],
-    ticketIdents: ["OPS-143"],
+    runIds: ["run-a"],
   });
   expect(second.channelForTask("#42")).toBe("task-thread");
-  expect(second.channelForTicket("OPS-143")).toBe("task-thread");
+  expect(second.channelForRun("run-a")).toBe("task-thread");
 });
 
 test("registerTaskThread withdraws only the one ref from another workspace, never the workspace", () => {
@@ -406,7 +406,7 @@ test("registerTaskThread withdraws only the one ref from another workspace, neve
   // A room a person opened, holding a wave.
   reg.registerThread({ threadId: "user-room", parentChannelId: "chan-1", name: "release cleanup", creatorId: "u-1" });
   reg.attachTasks("user-room", ["#42", "#43"]);
-  reg.bindBranch("user-room", "42.2", "OPS-143");
+  reg.bindBranch("user-room", "42.2", "run-a");
 
   reg.registerTaskThread({ threadId: "task-thread", parentChannelId: "chan-1", name: "#42 - Voting" }, "42", ["42.1"]);
 
@@ -415,11 +415,11 @@ test("registerTaskThread withdraws only the one ref from another workspace, neve
   expect(reg.contextFor("user-room")).toMatchObject({
     name: "release cleanup",
     taskRefs: ["43"],
-    ticketIdents: ["OPS-143"],
+    runIds: ["run-a"],
     branchRefs: ["42.2"],
   });
   expect(reg.channelForTask("43")).toBe("user-room");
-  expect(reg.channelForTicket("OPS-143")).toBe("user-room");
+  expect(reg.channelForRun("run-a")).toBe("user-room");
 
   const reloaded = new WorkspaceRegistry({ stateFile: file, logger: quietLog });
   expect(reloaded.contextFor("user-room")?.taskRefs).toEqual(["43"]);
@@ -450,4 +450,25 @@ test("a corrupt state file starts fresh instead of throwing", () => {
   // …and it can still register + persist going forward.
   second.registerThread({ threadId: "t-6", parentChannelId: "chan-1", name: "y", creatorId: "u-1" });
   expect(second.contextFor("t-6")).not.toBeNull();
+});
+
+test("a pre-v7 workspaces.json with ticketIdents loads, keeps its routing, and drops the dead keys", () => {
+  const file = stateFile();
+  writeFileSync(
+    file,
+    JSON.stringify({
+      "thread-1": {
+        parentChannelId: "chan-1", name: "voting corner",
+        // The dead half: tracker identifiers, which no run id can ever match.
+        ticketIdents: ["OPS-143", "OPS-9"],
+        taskRefs: ["12"], branchRefs: ["12.1"],
+      },
+    }),
+    "utf8",
+  );
+  const reg = new WorkspaceRegistry({ stateFile: file, logger: quietLog });
+  // The routing a human chose (`&12`) survives; the tracker identifiers do not.
+  expect(reg.channelForTask("12")).toBe("thread-1");
+  expect(reg.contextFor("thread-1")).toMatchObject({ taskRefs: ["12"], branchRefs: ["12.1"], runIds: [] });
+  expect(reg.channelForRun("OPS-143")).toBeNull();
 });

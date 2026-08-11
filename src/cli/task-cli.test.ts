@@ -69,75 +69,44 @@ test("task create, branch, show, and list share one durable public namespace", a
   ]);
 });
 
-test("task start files the public branch marker into the tracker and links the internal ticket", async () => {
+test("task start deploys a run for the branch and links the branch to it", async () => {
   const dir = mkdtempSync(join(tmpdir(), "beckett-task-cli-start-"));
   dirs.push(dir);
-  const createPayloads: Array<Record<string, unknown>> = [];
-  const tickets: Array<Record<string, unknown>> = [];
-  // A minimal fake of bored's HTTP surface: create files as `todo`; a staff call opens the run.
-  const server = Bun.serve({
-    port: 0,
-    async fetch(request) {
-      const url = new URL(request.url);
-      if (url.pathname === "/tickets" && request.method === "GET") {
-        return Response.json({ tickets });
-      }
-      if (url.pathname === "/tickets" && request.method === "POST") {
-        const createPayload = await request.json() as Record<string, unknown>;
-        createPayloads.push(createPayload);
-        const ticket = {
-          ref: "OPS-77",
-          title: createPayload.title,
-          body: createPayload.body,
-          criteria: createPayload.criteria ?? [],
-          state: "todo",
-          needs: createPayload.needs ?? [],
-          createdAt: "2026-07-12T00:00:00.000Z",
-          updatedAt: "2026-07-12T00:00:00.000Z",
-        };
-        tickets.push(ticket);
-        return Response.json({ ticket });
-      }
-      if (url.pathname === "/tickets/OPS-77" && request.method === "GET") {
-        return Response.json({ ticket: tickets[0] });
-      }
-      if (url.pathname === "/tickets/OPS-77/staff" && request.method === "POST") {
-        tickets[0]!.state = "in_progress";
-        return Response.json({ ok: true });
-      }
-      return new Response(`unexpected ${request.method} ${url.pathname}`, { status: 404 });
-    },
+
+  await cli(dir, ["task", "create", "--title", "Voting launch", "--project", "polls"]);
+  const started = await cli(dir, [
+    "task", "start", "#1.1",
+    "--body", "Build it",
+    "--criteria", "works;tested",
+    "--cast", '{"implement":{"harness":"pi","effort":"medium"}}',
+  ]) as any;
+
+  expect(started).toMatchObject({
+    taskRef: "#1",
+    branchRef: "#1.1",
+    state: "queued",
+    branch: "beckett/run-voting-launch",
   });
+  expect(String(started.runId)).toMatch(/^run-\d{8}-voting-launch$/);
 
-  try {
-    await cli(dir, ["task", "create", "--title", "Voting launch", "--project", "polls"]);
-    const started = await cli(
-      dir,
-      [
-        "task", "start", "#1.1",
-        "--body", "Build it",
-        "--criteria", "works;tested",
-        "--cast", '{"implement":{"harness":"pi","effort":"medium"}}',
-      ],
-      { BECKETT_BORED_URL: server.url.origin },
-    ) as any;
+  // The run carries the whole brief — body + criteria — and the branch it was started for.
+  const run = JSON.parse(readFileSync(join(dir, "runs.json"), "utf8")).runs[0];
+  expect(run.prompt).toBe("Build it\n\nAcceptance criteria:\n- works\n- tested");
+  expect(run.taskRef).toBe("#1.1");
+  expect(run.repo).toBe("polls");
+  expect(run.cast).toEqual({ implement: { harness: "pi", effort: "medium" } });
 
-    expect(started).toMatchObject({
-      taskRef: "#1",
-      branchRef: "#1.1",
-      identifier: "OPS-77",
-      state: "in_progress",
-    });
-    expect(String(createPayloads[0]?.body)).toContain("```beckett-branch\n1.1\n```");
-    const shown = await cli(dir, ["task", "show", "#1.1"]) as any;
-    expect(shown.branch).toMatchObject({
-      ref: "#1.1",
-      status: "running",
-      ticket: { id: "OPS-77", identifier: "OPS-77", board: "ops" },
-    });
-  } finally {
-    server.stop(true);
-  }
+  const shown = await cli(dir, ["task", "show", "#1.1"]) as any;
+  expect(shown.branch).toMatchObject({ ref: "#1.1", status: "ready", run: { runId: started.runId } });
+});
+
+test("task start refuses a cast naming a stage a run does not have", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-task-cli-badcast-"));
+  dirs.push(dir);
+  await cli(dir, ["task", "create", "--title", "Voting launch"]);
+  await expect(
+    cli(dir, ["task", "start", "#1.1", "--cast", '{"design":{"harness":"claude"}}']),
+  ).rejects.toThrow(/a run only casts implement\|review/);
 });
 
 /**
@@ -227,39 +196,11 @@ test("task start --ping overrides the branch's pings independent of the task-lev
   const dir = mkdtempSync(join(tmpdir(), "beckett-task-ping-start-"));
   dirs.push(dir);
   seedIdentities(dir);
-  const tickets: Array<Record<string, unknown>> = [];
-  const server = Bun.serve({
-    port: 0,
-    async fetch(request) {
-      const url = new URL(request.url);
-      if (url.pathname === "/tickets" && request.method === "GET") return Response.json({ tickets });
-      if (url.pathname === "/tickets" && request.method === "POST") {
-        const createPayload = await request.json() as Record<string, unknown>;
-        const ticket = {
-          ref: "OPS-1", title: createPayload.title, body: createPayload.body,
-          criteria: createPayload.criteria ?? [], state: "todo", needs: createPayload.needs ?? [],
-          createdAt: "2026-07-12T00:00:00.000Z", updatedAt: "2026-07-12T00:00:00.000Z",
-        };
-        tickets.push(ticket);
-        return Response.json({ ticket });
-      }
-      if (url.pathname === "/tickets/OPS-1" && request.method === "GET") return Response.json({ ticket: tickets[0] });
-      if (url.pathname === "/tickets/OPS-1/staff" && request.method === "POST") {
-        tickets[0]!.state = "in_progress";
-        return Response.json({ ok: true });
-      }
-      return new Response(`unexpected ${request.method} ${url.pathname}`, { status: 404 });
-    },
-  });
 
-  try {
-    await cli(dir, ["task", "create", "--title", "Voting launch", "--ping", "ro"]);
-    await cli(dir, ["task", "start", "#1.1", "--body", "Build it", "--ping", "alice"], { BECKETT_BORED_URL: server.url.origin });
+  await cli(dir, ["task", "create", "--title", "Voting launch", "--ping", "ro"]);
+  await cli(dir, ["task", "start", "#1.1", "--body", "Build it", "--ping", "alice"]);
 
-    const shown = await cli(dir, ["task", "show", "#1.1"]) as any;
-    expect(shown.task.pings).toEqual([RO]);
-    expect(shown.branch.pings).toEqual([ALICE]);
-  } finally {
-    server.stop(true);
-  }
+  const shown = await cli(dir, ["task", "show", "#1.1"]) as any;
+  expect(shown.task.pings).toEqual([RO]);
+  expect(shown.branch.pings).toEqual([ALICE]);
 });

@@ -148,9 +148,9 @@ function transitionsSection(deps: AssembleDreamDeps, cutoff: number, notes: stri
     if (rows.length > kept.length) notes.push(`transitions: ${rows.length - kept.length} older rows elided`);
     const ids = new Set<string>();
     const lines = kept.map((r) => {
-      ids.add(`ticket:${r.ticketRef}`);
+      ids.add(`run:${r.runRef}`);
       const detail = r.error ?? r.message ?? "";
-      return `${r.ts.slice(0, 16)} ${r.ticketRef} ${r.stage} ${r.outcome}${detail ? ` — ${detail}` : ""}`;
+      return `${r.ts.slice(0, 16)} ${r.runRef} ${r.stage} ${r.outcome}${detail ? ` — ${detail}` : ""}`;
     });
     section.sourceIds = [...ids];
     section.text = lines.join("\n");

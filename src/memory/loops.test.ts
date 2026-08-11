@@ -192,11 +192,7 @@ test("linking stamps a deduped task ref and resolves its live status without cac
 
   // Status resolves live, never from a cached copy: move the branch and the SAME loop entry (not
   // re-read from the loop node, whose linkedTasks never change) reports the new status.
-  await tasks.linkTicket(
-    `${task.number}.1`,
-    { id: "t1", identifier: "OPS-1", board: "ops", projectId: "p1", url: "https://example.test/t1" },
-    "cancelled",
-  );
+  await tasks.linkRun(`${task.number}.1`, { runId: "run-20260810-loop" }, "cancelled");
   expect(resolveLinkedTasks(tasks, again)).toContainEqual({ ref: `#${task.number}.1`, status: "cancelled" });
 });
 

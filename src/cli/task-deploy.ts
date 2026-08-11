@@ -1,10 +1,9 @@
 /**
  * Beckett — `beckett task deploy` (`src/cli/task-deploy.ts`)
  * =======================================================================================
- * v7's ONE call that replaces ticket ceremony: the concierge (or a human) hands this a prompt,
- * it files a Run (state "queued") in the run ledger and pings the bus once — no tracker, no
- * poller. `RunSupervisor` (daemon-side, a separate lane) picks the ping up and does the rest
- * (worktree, spec.md, worker spawn).
+ * The ONE call that stands up work: the concierge (or a human) hands this a prompt, it files a Run
+ * (state "queued") in the run ledger and pings the bus once. `RunSupervisor` (daemon-side) picks
+ * the ping up and does the rest (worktree, spec.md, worker spawn).
  *
  * Testability mirrors `finish.ts`'s split: `parseTaskDeployArgs`/`deployRun` are pure(ish) and
  * throw `TaskDeployUsageError` on a bad invocation; `runTaskDeploy` is the thin `out()`/`fail()`
@@ -20,8 +19,8 @@
  * slug is taken by then — that is the store's dedupe doing its job, not a contract mismatch.
  */
 import { readFileSync } from "node:fs";
-import type { Casting } from "../tracker/types.ts";
-import { validateCasting } from "../tracker/cast.ts";
+import type { Casting } from "../run/cast.ts";
+import { validateCasting } from "../run/cast.ts";
 import type { CreateRunInput } from "../run/store.ts";
 import type { Run, RunStage } from "../run/types.ts";
 import { fail, out, parse } from "./io.ts";
@@ -92,16 +91,15 @@ function defaultTitle(prompt: string): string {
   return words.slice(0, TITLE_WORD_COUNT).join(" ");
 }
 
-/** Cast validation reuses the existing zod-backed `Casting` path (`tracker/cast.ts`) and layers
- * on ONE more rule specific to runs: a run only ever casts `implement`/`review`, so an
- * otherwise-valid ticket-style cast naming e.g. `design` is refused, not silently dropped.
+/** Cast validation reuses the existing zod-backed `Casting` path (`run/cast.ts`) and layers on
+ * ONE more rule specific to runs: a run only ever casts `implement`/`review`, so an
+ * otherwise-valid cast naming e.g. `design` is refused, not silently dropped.
  *
- * Unlike `parseCastJson` (the ticket-hydration reader, deliberately tolerant so a corrupted
- * ticket body never crashes a poller), `--cast` is a fresh, human-typed invocation: bad JSON, a
- * typo'd harness, or an invalid effort must be REJECTED, not silently degraded to `{}` and
- * deployed on defaults. So this parses the raw string itself and runs `validateCasting` directly
- * on the parsed value — it already returns per-path zod shape errors — instead of routing through
- * the tolerant reader first. */
+ * Unlike `parseCastJson` (the deliberately tolerant reader, so a corrupted persisted cast never
+ * crashes a read), `--cast` is a fresh, human-typed invocation: bad JSON, a typo'd harness, or an
+ * invalid effort must be REJECTED, not silently degraded to `{}` and deployed on defaults. So this
+ * parses the raw string itself and runs `validateCasting` directly on the parsed value — it already
+ * returns per-path zod shape errors — instead of routing through the tolerant reader first. */
 function resolveCast(raw: string | boolean | undefined): Casting | null {
   if (raw === undefined) return null;
   let parsed: unknown;

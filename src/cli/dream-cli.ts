@@ -157,11 +157,12 @@ async function runProposals(argv: string[]): Promise<void> {
   if (sub === "accept") {
     const id = _[0]?.trim();
     if (!id) fail("usage: beckett dream proposals accept <id> [--board <name>] [--project <slug>] [--confirm-beckett]");
-    // Loaded here, not at module scope: the tracker client and task store are the two front
+    // Loaded here, not at module scope: the run ledger and the task store are the two front
     // doors an accept walks through, and `ls`/`show` must never pay for them.
     const { TaskStore } = await import("../task/store.ts");
-    const { createTrackerClient } = await import("../tracker/client.ts");
-    const { resolveBoardName } = await import("../config.ts");
+    const { RunStore } = await import("../run/store.ts");
+    const { deployRun } = await import("./task-deploy.ts");
+    const { notifyBus } = await import("./core.ts");
     const { guardRestrictedProject } = await import("./core.ts");
     const { join } = await import("node:path");
     // Accepting a doctrine proposal is exactly the case that wants to build against Beckett's
@@ -170,19 +171,25 @@ async function runProposals(argv: string[]): Promise<void> {
     guardRestrictedProject(flags.project ? String(flags.project) : undefined, flags["confirm-beckett"] === true);
     const store = new TaskStore(join(paths.beckettDir, "tasks.json"));
     try {
-      const board = resolveBoardName(config, flags.board ? String(flags.board) : undefined);
       const result = await acceptProposal(
         {
           proposalsDir: paths.proposalsDir,
-          fileTicket: async (input) => {
-            const client = createTrackerClient({ config, board, logger: quietLogger });
-            const ticket = await client.createIssue({
-              title: input.title,
-              body: input.body,
-              criteria: input.criteria,
-              ...(flags.project ? { project: String(flags.project) } : {}),
-            });
-            return { identifier: ticket.identifier, id: ticket.id, url: ticket.url };
+          deployRun: async (input) => {
+            // The proposal's claim IS the acceptance criterion, so it rides into the prompt
+            // rather than into a separate criteria field the run model no longer has: the
+            // worker authors its own spec.md checklist from this brief.
+            const prompt = [input.body.trim(), "", "Acceptance criteria:", ...input.criteria.map((c) => `- ${c}`)]
+              .join("\n")
+              .trim();
+            const deployed = await deployRun(
+              [
+                "--title", input.title,
+                "--prompt", prompt,
+                ...(flags.project ? ["--repo", String(flags.project)] : []),
+              ],
+              { store: new RunStore(join(paths.beckettDir, "runs.json")), notifyBus },
+            );
+            return { runId: "runId" in deployed ? deployed.runId : deployed.id };
           },
           createTaskBranch: async (input) => {
             const created = await store.createTask({

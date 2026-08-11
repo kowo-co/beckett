@@ -36,7 +36,7 @@ export type SpendStage = "implement" | "review" | "free-time";
 const SPEND_STAGES: readonly string[] = ["implement", "review", "free-time"];
 
 /**
- * The synthetic `ticketId` every `free-time` row carries. Free time has no ticket, and the
+ * The synthetic `ticketId` every `free-time` row carries. Free time has no run, and the
  * per-task rollups group by this field, so it needs a STABLE stand-in: one "free-time" line on the
  * weekly bill totalling every session beats one line per session id masquerading as a task nobody
  * can look up. The session's own id rides along in `sessionId`, which is where a row is traced

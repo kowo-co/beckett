@@ -5,7 +5,7 @@ exports[`cli: bare invocation prints the unknown-command help 1`] = `
   "exit": 1,
   "stderr": 
 "error: unknown command: beckett  
-commands: status [--pretty] | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|deploy|ask|steer|show|list | ticket create|comment|state|list|show|trace | preset ls|show | plan | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | dream ls|show <date> | dream propose|proposals ls|show|accept|reject | dream spikes ls|show | free-time run [--dry] | free-time ls|show <id>
+commands: status [--pretty] | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|deploy|ask|steer|show|list|trace | preset ls|show | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | dream ls|show <date> | dream propose|proposals ls|show|accept|reject | dream spikes ls|show | free-time run [--dry] | free-time ls|show <id>
 "
 ,
   "stdout": "",
@@ -17,7 +17,7 @@ exports[`cli: unknown group prints the unknown-command help 1`] = `
   "exit": 1,
   "stderr": 
 "error: unknown command: beckett wat 
-commands: status [--pretty] | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|deploy|ask|steer|show|list | ticket create|comment|state|list|show|trace | preset ls|show | plan | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | dream ls|show <date> | dream propose|proposals ls|show|accept|reject | dream spikes ls|show | free-time run [--dry] | free-time ls|show <id>
+commands: status [--pretty] | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|deploy|ask|steer|show|list|trace | preset ls|show | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | dream ls|show <date> | dream propose|proposals ls|show|accept|reject | dream spikes ls|show | free-time run [--dry] | free-time ls|show <id>
 "
 ,
   "stdout": "",
@@ -29,7 +29,7 @@ exports[`cli: bare discord group falls through to the help 1`] = `
   "exit": 1,
   "stderr": 
 "error: unknown command: beckett discord 
-commands: status [--pretty] | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|deploy|ask|steer|show|list | ticket create|comment|state|list|show|trace | preset ls|show | plan | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | dream ls|show <date> | dream propose|proposals ls|show|accept|reject | dream spikes ls|show | free-time run [--dry] | free-time ls|show <id>
+commands: status [--pretty] | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|deploy|ask|steer|show|list|trace | preset ls|show | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | dream ls|show <date> | dream propose|proposals ls|show|accept|reject | dream spikes ls|show | free-time run [--dry] | free-time ls|show <id>
 "
 ,
   "stdout": "",
@@ -465,7 +465,7 @@ exports[`cli: spend: bad --since is rejected 1`] = `
 }
 `;
 
-exports[`cli: journal: no ticket prints usage 1`] = `
+exports[`cli: journal: no ident prints usage 1`] = `
 {
   "exit": 1,
   "stderr": 
@@ -476,12 +476,12 @@ exports[`cli: journal: no ticket prints usage 1`] = `
 }
 `;
 
-exports[`cli: journal: unknown ticket reports no journal 1`] = `
+exports[`cli: journal: unknown ident reports no journal 1`] = `
 {
   "exit": 0,
   "stderr": "",
   "stdout": 
-"(no journal for OPS-999 — no worker has run for it on this host)
+"(no journal for run-20260810-ghost — no worker has run for it on this host)
 "
 ,
 }
@@ -1464,7 +1464,7 @@ exports[`cli: task: create against the restricted self-project is bounced 1`] = 
 {
   "exit": 1,
   "stderr": 
-"error: "--project beckett" targets Beckett's OWN source repo (beckett) — a RESTRICTED project. This is a ROUTING check, not a permission ask: most work should build in its own repo, NOT edit Beckett itself. If the request explicitly targets Beckett ("update yourself", "change your doctrine"), the routing is already answered — re-file the exact same command with --confirm-beckett now, without asking again. Only if it's genuinely ambiguous whether this belongs in the beckett codebase do you confirm with the user first.
+"error: "--project beckett" targets Beckett's OWN source repo (beckett) — a RESTRICTED project. This is a ROUTING check, not a permission ask: most work should build in its own repo, NOT edit Beckett itself. If the request explicitly targets Beckett ("update yourself", "change your doctrine"), the routing is already answered — re-run the exact same command with --confirm-beckett now, without asking again. Only if it's genuinely ambiguous whether this belongs in the beckett codebase do you confirm with the user first.
 "
 ,
   "stdout": "",
@@ -1497,7 +1497,7 @@ exports[`cli: task: start without a ref prints usage 1`] = `
 {
   "exit": 1,
   "stderr": 
-"error: usage: beckett task start <#N|#N.x> [--board <name>|--intensive] [--body <b>|--body-stdin] [--project <slug>] [--state <state>] [--preset <name>] [--cast <json>] [--criteria "a;b"] [--channel <id>] [--ping <target>]...
+"error: usage: beckett task start <#N|#N.x> [--body <b>|--body-stdin] [--project <slug>] [--preset <name>] [--cast <json>] [--criteria "a;b"] [--channel <id>] [--ultracode] [--ping <target>]...
 "
 ,
   "stdout": "",
@@ -1576,150 +1576,75 @@ exports[`cli: task: unknown sub prints usage 1`] = `
 {
   "exit": 1,
   "stderr": 
-"error: usage: beckett task create|branch|start|deploy|ask|steer|show|list <...>
+"error: usage: beckett task create|branch|start|deploy|ask|steer|show|list|trace <...>
 "
 ,
   "stdout": "",
 }
 `;
 
-exports[`cli: ticket: trace without an id prints usage 1`] = `
+exports[`cli: task: trace without an id prints usage 1`] = `
 {
   "exit": 1,
   "stderr": 
-"error: usage: beckett ticket trace <id>
+"error: usage: beckett task trace <run-id>
 "
 ,
   "stdout": "",
 }
 `;
 
-exports[`cli: ticket: trace with no events file 1`] = `
+exports[`cli: task: trace with no events file 1`] = `
 {
   "exit": 0,
   "stderr": "",
   "stdout": 
-"No dispatch trace for OPS-1.
+"No dispatch trace for run-20260810-x.
 "
 ,
 }
 `;
 
-exports[`cli: ticket: create without a title prints usage 1`] = `
+exports[`cli: task: deploy without a prompt prints usage 1`] = `
 {
   "exit": 1,
   "stderr": 
-"error: usage: beckett ticket create --title <t> [--board <name>|--intensive] [--body <b>|--body-stdin] [--project <slug>] [--state backlog|todo|design|design_review|in_progress|in_review|done|cancelled] [--preset <name>] [--cast <json>] [--criteria "a;b;c"] [--channel <discord-channel-id>]
-"
-,
-  "stdout": "",
-}
-`;
-
-exports[`cli: ticket: create against the restricted self-project is bounced 1`] = `
-{
-  "exit": 1,
-  "stderr": 
-"error: "--project beckett" targets Beckett's OWN source repo (beckett) — a RESTRICTED project. This is a ROUTING check, not a permission ask: most work should build in its own repo, NOT edit Beckett itself. If the request explicitly targets Beckett ("update yourself", "change your doctrine"), the routing is already answered — re-file the exact same command with --confirm-beckett now, without asking again. Only if it's genuinely ambiguous whether this belongs in the beckett codebase do you confirm with the user first.
+"error: --prompt <text> or --prompt-file <path> is required
+usage: beckett task deploy --prompt <text>|--prompt-file <path> [--title <t>] [--channel <id>] [--requester <id>] [--ultracode] [--cast <json>] [--repo <slug>] [--task <#N.x>] [--dry]
 "
 ,
   "stdout": "",
 }
 `;
 
-exports[`cli: ticket: create with --intensive plus a different --board is rejected 1`] = `
+exports[`cli: task: deploy with a broken cast is refused 1`] = `
 {
   "exit": 1,
   "stderr": 
-"error: --intensive selects the INT board; do not combine it with a different --board
+"error: --cast is not valid JSON: JSON Parse error: Expected '}'
+usage: beckett task deploy --prompt <text>|--prompt-file <path> [--title <t>] [--channel <id>] [--requester <id>] [--ultracode] [--cast <json>] [--repo <slug>] [--task <#N.x>] [--dry]
 "
 ,
   "stdout": "",
 }
 `;
 
-exports[`cli: ticket: create on an unknown board is rejected 1`] = `
+exports[`cli: task: steer without a note prints usage 1`] = `
 {
   "exit": 1,
   "stderr": 
-"error: unknown board "nope" (have: ops, int, vid, vidpip)
+"error: usage: beckett task steer <run-id|slug> "<note>" [--note <text>]
 "
 ,
   "stdout": "",
 }
 `;
 
-exports[`cli: ticket: comment without an id prints usage 1`] = `
+exports[`cli: task: steer of an unknown run fails 1`] = `
 {
   "exit": 1,
   "stderr": 
-"error: usage: beckett ticket comment <id> <text> | --body <b> | --body-stdin
-"
-,
-  "stdout": "",
-}
-`;
-
-exports[`cli: ticket: state without args prints usage 1`] = `
-{
-  "exit": 1,
-  "stderr": 
-"error: usage: beckett ticket state <id> <backlog|todo|design|design_review|in_progress|in_review|done|cancelled> [--board int]
-"
-,
-  "stdout": "",
-}
-`;
-
-exports[`cli: ticket: restaff without an id prints usage 1`] = `
-{
-  "exit": 1,
-  "stderr": 
-"error: usage: beckett ticket restaff <id> [--harness claude|codex|pi]
-"
-,
-  "stdout": "",
-}
-`;
-
-exports[`cli: ticket: restaff with the daemon down fails on the bus 1`] = `
-{
-  "exit": 1,
-  "stderr": 
-"error: shell not running (socket <BECKETT_DIR>/control.sock): <CONNECT_ERROR>
-"
-,
-  "stdout": "",
-}
-`;
-
-exports[`cli: ticket: courier without an id prints usage 1`] = `
-{
-  "exit": 1,
-  "stderr": 
-"error: usage: beckett ticket courier <id>
-"
-,
-  "stdout": "",
-}
-`;
-
-exports[`cli: ticket: show without an id prints usage 1`] = `
-{
-  "exit": 1,
-  "stderr": 
-"error: usage: beckett ticket show <id>
-"
-,
-  "stdout": "",
-}
-`;
-
-exports[`cli: ticket: unknown sub prints usage 1`] = `
-{
-  "exit": 1,
-  "stderr": 
-"error: usage: beckett ticket create|comment|state|list|show|trace|restaff|courier <...> (use --board int or --intensive for intensive tickets)
+"error: no such run: ghost-run
 "
 ,
   "stdout": "",
@@ -1828,128 +1753,6 @@ exports[`cli: preset: unknown sub prints usage 1`] = `
 }
 `;
 
-exports[`cli: plan: non-JSON stdin is rejected 1`] = `
-{
-  "exit": 1,
-  "stderr": 
-"error: plan: input is not valid JSON (JSON Parse error: Unexpected identifier "not")
-"
-,
-  "stdout": "",
-}
-`;
-
-exports[`cli: plan: empty ticket list prints usage 1`] = `
-{
-  "exit": 1,
-  "stderr": 
-"error: usage: beckett plan [--file <f>] < dag.json
-  dag.json = { "channel"?: "<id>", "board"?: "ops|vid|vidpip", "tickets": [ { "key", "title", "board"?, "body"?, "criteria"?: string[], "preset"?: "<name>", "cast"?: {...}, "needs"?: ["key", ...] }, ... ] }
-"
-,
-  "stdout": "",
-}
-`;
-
-exports[`cli: plan: a ticket without a key is rejected 1`] = `
-{
-  "exit": 1,
-  "stderr": 
-"error: plan: every ticket needs a string "key" (got undefined)
-"
-,
-  "stdout": "",
-}
-`;
-
-exports[`cli: plan: duplicate keys are rejected 1`] = `
-{
-  "exit": 1,
-  "stderr": 
-"error: plan: duplicate key "a"
-"
-,
-  "stdout": "",
-}
-`;
-
-exports[`cli: plan: a ticket without a title is rejected 1`] = `
-{
-  "exit": 1,
-  "stderr": 
-"error: plan: ticket "a" needs a "title"
-"
-,
-  "stdout": "",
-}
-`;
-
-exports[`cli: plan: an unknown needs edge is rejected 1`] = `
-{
-  "exit": 1,
-  "stderr": 
-"error: plan: ticket "a" needs unknown key "z"
-"
-,
-  "stdout": "",
-}
-`;
-
-exports[`cli: plan: a self-dependency is rejected 1`] = `
-{
-  "exit": 1,
-  "stderr": 
-"error: plan: ticket "a" cannot depend on itself
-"
-,
-  "stdout": "",
-}
-`;
-
-exports[`cli: plan: a dependency cycle is rejected 1`] = `
-{
-  "exit": 1,
-  "stderr": 
-"error: plan: dependency cycle among [a, b] — a plan must be a DAG
-"
-,
-  "stdout": "",
-}
-`;
-
-exports[`cli: plan: an unknown board is rejected 1`] = `
-{
-  "exit": 1,
-  "stderr": 
-"error: unknown board "nope" (have: ops, int, vid, vidpip)
-"
-,
-  "stdout": "",
-}
-`;
-
-exports[`cli: plan: the restricted self-project is bounced 1`] = `
-{
-  "exit": 1,
-  "stderr": 
-"error: "--project beckett" targets Beckett's OWN source repo (beckett) — a RESTRICTED project. This is a ROUTING check, not a permission ask: most work should build in its own repo, NOT edit Beckett itself. If the request explicitly targets Beckett ("update yourself", "change your doctrine"), the routing is already answered — re-file the exact same command with --confirm-beckett now, without asking again. Only if it's genuinely ambiguous whether this belongs in the beckett codebase do you confirm with the user first.
-"
-,
-  "stdout": "",
-}
-`;
-
-exports[`cli: plan: INT tickets without a channel are rejected 1`] = `
-{
-  "exit": 1,
-  "stderr": 
-"error: plan: INT tickets require a top-level "channel" so Review (Design) can ask the owner for approval
-"
-,
-  "stdout": "",
-}
-`;
-
 exports[`cli: status: daemon down fails with the service hint 1`] = `
 {
   "exit": 1,
@@ -2034,12 +1837,6 @@ spend = "/home/beckett/.beckett/spend.jsonl"
 [identity]
 github_user = ""
 gmail_address = ""
-
-[tracker]
-enabled = true
-poll_secs = 5
-default_board = "ops"
-boards = ["ops", "int", "vid", "vidpip"]
 
 [runs]
 max_live = 3
@@ -2141,9 +1938,6 @@ output_token_budget = 150000
 model = ""
 spike_output_token_budget = 60000
 spike_repo = ""
-
-[progress]
-cards_as_code = false
 
 [free_time]
 enabled = true

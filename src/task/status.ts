@@ -2,7 +2,7 @@
 import { existsSync } from "node:fs";
 import type { GitHubBranchCardReader, BranchCardCheckSummary, PrLifecycle } from "../github/types.ts";
 import { readLocalBranchStats, type LocalBranchStats } from "../git/branch-stats.ts";
-import { gitBranchForTicket } from "../git/branch-name.ts";
+import { gitBranchForWork } from "../git/branch-name.ts";
 import type { TaskBranch, TaskBranchStatus, TaskStatus, TaskStore, WorkTask } from "./store.ts";
 
 export interface BranchCardSnapshot {
@@ -103,8 +103,8 @@ export class BranchStatusService {
     const found = this.opts.store.getBranch(ref);
     if (!found) throw new Error(`no such task branch: #${ref.replace(/^#/, "")}`);
     const { task, branch } = found;
-    const gitRef = branch.git?.gitRef ?? (branch.ticket
-      ? gitBranchForTicket({ identifier: branch.ticket.identifier, branchRef: branch.ref })
+    const gitRef = branch.git?.gitRef ?? (branch.run
+      ? gitBranchForWork({ identifier: branch.run.runId, branchRef: branch.ref })
       : undefined);
 
     if (branch.pullRequest) {

@@ -1,42 +1,42 @@
 /** Snapshot collector for the status dashboard. All network/disk work stays here, never in renderers. */
-import { boredBaseUrl } from "../bored/client.ts";
 import { readSpendLedger, summarizeSpendWindows } from "../spend.ts";
 import type { SystemMetrics } from "../system-metrics.ts";
-import type { TrackerPoller } from "../tracker/poll.ts";
-import type { TrackerClient } from "../tracker/client.ts";
+import type { RunState } from "../run/types.ts";
 import { readUptimeSnapshot } from "../uptime.ts";
 import { CcusageSource } from "./ccusage.ts";
 import { SubscriptionLimitsSource } from "./subscriptions.ts";
-import type { CcusageSpend, CoreOperationHealth, HarnessUsage, StatusDashboardSnapshot, SubscriptionLimits } from "./types.ts";
+import type { CcusageSpend, CoreOperationHealth, HarnessUsage, RunBoard, StatusDashboardSnapshot, SubscriptionLimits } from "./types.ts";
+
+/**
+ * What the collector needs to see of the run engine. Deliberately the narrowest shape that answers
+ * the dashboard's question — how much work is in flight, and is the supervisor still ticking — so a
+ * test hands in two closures instead of standing up a RunStore and a supervisor.
+ */
+export interface RunEngineView {
+  /** Every non-terminal run (the store's `live()`), each with its lifecycle state. */
+  live(): Array<{ state: RunState }>;
+  /** Epoch ms of the supervisor's last staffing reconciliation, or null before its first tick. */
+  lastTickAt(): number | null;
+}
 
 export interface StatusSnapshotCollectorDeps {
   version: string;
+  /** The supervisor's staffing-watchdog cadence — what gives health staleness a concrete meaning. */
   pollIntervalMs: number;
-  poller: Pick<TrackerPoller, "stats">;
-  tracker: Pick<TrackerClient, "stats">;
+  runs: RunEngineView;
   metrics: { read(): Promise<SystemMetrics> };
   lifecycleLedgerPath: string;
   spendPath: string;
-  boredUrl?: string;
   fetch?: typeof fetch;
   now?: () => number;
   subscriptions?: Pick<SubscriptionLimitsSource, "collect">;
   ccusage?: Pick<CcusageSource, "collect">;
 }
 
-interface HealthProbe {
-  reachable: boolean;
-  status: number | null;
-  version: string | null;
-}
-
-/** Long-lived collector: it retains /health's last known success between 60-second snapshots. */
+/** Long-lived collector: it retains the last observed supervisor tick between 60-second snapshots. */
 export class StatusSnapshotCollector {
   private readonly now: () => number;
   private readonly fetchImpl: typeof fetch;
-  private healthLastOkAt: number | null = null;
-  private healthFailures = 0;
-  private healthVersion: string | null = null;
   private readonly subscriptions: Pick<SubscriptionLimitsSource, "collect">;
   private readonly ccusage: Pick<CcusageSource, "collect">;
 
@@ -49,37 +49,22 @@ export class StatusSnapshotCollector {
 
   async collect(): Promise<StatusDashboardSnapshot> {
     const now = this.now();
-    const [system, probe, subscriptionLimits, ccusage] = await Promise.all([
-      this.deps.metrics.read(), this.probeHealth(), this.collectSubscriptions(), this.collectCcusage(),
+    const [system, subscriptionLimits, ccusage] = await Promise.all([
+      this.deps.metrics.read(), this.collectSubscriptions(), this.collectCcusage(),
     ]);
-    const poll = this.deps.poller.stats();
-    const tracker = this.deps.tracker.stats();
-    const trackerFailedAfterSuccess = tracker.lastErrorAt !== null &&
-      (tracker.lastOkAt === null || tracker.lastErrorAt > tracker.lastOkAt);
+    const runs = this.collectRuns();
+    const lastTickAt = this.readTick();
+    // ONE core-operation row now: the run supervisor IS the engine. There is no out-of-process
+    // tracker to be reachable or unreachable, so the honest liveness signal is "did the staffing
+    // watchdog tick recently" — the same staleness question the old poller row answered.
     const health: CoreOperationHealth[] = [
       {
-        name: "Tracker poll",
-        reachable: poll.lastPollAt === null ? null : poll.consecutiveFailures === 0,
-        lastSuccessAt: poll.lastPollAt,
-        lastSuccessAgeMs: poll.lastPollAgeMs,
-        consecutiveFailures: poll.consecutiveFailures,
-        detail: poll.consecutiveFailures ? `${poll.consecutiveFailures} consecutive failures` : undefined,
-      },
-      {
-        name: "Bored API",
-        reachable: tracker.lastOkAt === null ? null : !trackerFailedAfterSuccess && isSuccess(tracker.lastHttpStatus),
-        lastSuccessAt: tracker.lastOkAt,
-        lastSuccessAgeMs: age(now, tracker.lastOkAt),
-        consecutiveFailures: trackerFailedAfterSuccess ? 1 : 0,
-        detail: tracker.lastHttpStatus === null ? undefined : `HTTP ${tracker.lastHttpStatus}`,
-      },
-      {
-        name: "Bored /health",
-        reachable: probe.reachable,
-        lastSuccessAt: this.healthLastOkAt,
-        lastSuccessAgeMs: age(now, this.healthLastOkAt),
-        consecutiveFailures: this.healthFailures,
-        detail: probe.status === null ? "request failed" : `HTTP ${probe.status}`,
+        name: "Run supervisor",
+        reachable: lastTickAt === null ? null : true,
+        lastSuccessAt: lastTickAt,
+        lastSuccessAgeMs: age(now, lastTickAt),
+        consecutiveFailures: 0,
+        detail: `${runs.live} live · ${runs.queued} queued · ${runs.parked} parked`,
       },
     ];
     return {
@@ -88,10 +73,10 @@ export class StatusSnapshotCollector {
       versions: {
         beckett: this.deps.version,
         bun: process.versions.bun ?? "unknown",
-        bored: probe.version ?? this.healthVersion,
       },
       uptime: readUptimeSnapshot(this.deps.lifecycleLedgerPath, now),
       system,
+      runs,
       health,
       harnessUsage: usage(this.deps.spendPath, now),
       subscriptionLimits,
@@ -109,28 +94,28 @@ export class StatusSnapshotCollector {
     catch { return { available: false, sessionCostUsd: null, dailyCostUsd: null, observedAt: null }; }
   }
 
-  private async probeHealth(): Promise<HealthProbe> {
+  /**
+   * The run board: what is actually in flight right now. A store read failure degrades to zeroes
+   * rather than failing the whole snapshot — the dashboard's other rows are still worth posting.
+   */
+  private collectRuns(): RunBoard {
     try {
-      const response = await this.fetchImpl(`${(this.deps.boredUrl ?? boredBaseUrl()).replace(/\/$/, "")}/health`, {
-        headers: { Accept: "application/json" },
-        signal: AbortSignal.timeout(2_000),
-      });
-      const status = response.status;
-      if (!response.ok) {
-        this.healthFailures++;
-        return { reachable: false, status, version: null };
-      }
-      // A healthy HTTP endpoint remains reachable even if an older bored build has no JSON body.
-      let body: Record<string, unknown> | null = null;
-      try { body = await response.json() as Record<string, unknown>; } catch { /* version is optional */ }
-      const version = typeof body?.version === "string" ? body.version : null;
-      this.healthLastOkAt = this.now();
-      this.healthFailures = 0;
-      if (version) this.healthVersion = version;
-      return { reachable: true, status, version };
+      const live = this.deps.runs.live();
+      return {
+        live: live.length,
+        queued: live.filter((run) => run.state === "queued").length,
+        parked: live.filter((run) => run.state === "parked").length,
+      };
     } catch {
-      this.healthFailures++;
-      return { reachable: false, status: null, version: null };
+      return { live: 0, queued: 0, parked: 0 };
+    }
+  }
+
+  private readTick(): number | null {
+    try {
+      return this.deps.runs.lastTickAt();
+    } catch {
+      return null;
     }
   }
 }
@@ -152,10 +137,6 @@ function compact(row: { records: number; turns: number; tokensIn: number; tokens
 
 function age(now: number, at: number | null): number | null {
   return at === null ? null : Math.max(0, now - at);
-}
-
-function isSuccess(status: number | null): boolean {
-  return status !== null && status >= 200 && status < 300;
 }
 
 export function createStatusSnapshotCollector(deps: StatusSnapshotCollectorDeps): StatusSnapshotCollector {
