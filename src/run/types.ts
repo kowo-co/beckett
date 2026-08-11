@@ -31,6 +31,17 @@ export type RunState =
   | "parked";
 
 /**
+ * States the supervisor must NOT act on: the three genuinely terminal ones plus `parked`, which is
+ * a run deliberately held for a human — re-staffing it is exactly what parking exists to stop.
+ *
+ * Deliberately WIDER than `RunStore.live()`'s complement: the store keeps parked runs in `live()`
+ * so `beckett status` and the run dashboard still show a held run (it has not left the board). The
+ * supervisor's own `stageFor()` returns null for `parked`, so the two views never disagree about
+ * whether a parked run gets a worker.
+ */
+export const RUN_TERMINAL: ReadonlySet<RunState> = new Set<RunState>(["done", "failed", "cancelled", "parked"]);
+
+/**
  * The execution unit. One row per `beckett task deploy` call (or plan-filed run). Durable at
  * `<beckettDir>/runs.json` via {@link ./store.ts}'s `RunStore`.
  */

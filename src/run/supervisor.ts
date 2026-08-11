@@ -1,0 +1,1428 @@
+/**
+ * Beckett v7 — the RunSupervisor (`src/run/supervisor.ts`)
+ * =======================================================================================
+ * The engine. This is the ticket dispatcher's staffing loop rebuilt against the RUN model:
+ * no board, no poller, no ticket ceremony. A run reaches it one of three ways —
+ *
+ *   1. the `run.deploy` control-bus ping (`beckett task deploy` just created it),
+ *   2. the boot scan of {@link RunStore.live} (daemon restart / crash recovery),
+ *   3. the staffing watchdog (a live run that has sat workerless past its grace),
+ *
+ * — and from there it drives implement → review → publish → done, with a bounded rework
+ * loop and a park for anything a human has to look at.
+ *
+ * WHAT IS DELIBERATELY REUSED, NOT REBUILT. Every worker prompt, persona, done-signal parse,
+ * and driver launch stays in `src/dispatch/stages.ts` + `src/dispatch/spawn.ts`, untouched.
+ * The supervisor reaches them through {@link runAsTicket} (`./adapter.ts`), which projects a
+ * Run into the exact Ticket shape they read. That is the whole wave-A bet: change the
+ * engine, keep the worker machinery byte-identical, and rename the shapes in wave B.
+ *
+ * BEHAVIORS PORTED VERBATIM FROM THE DISPATCHER (each is load-bearing, each was a bug once):
+ *   - claim-before-dispatch: the reservation Symbol goes into {@link staffing} SYNCHRONOUSLY,
+ *     before any await, and a retiring spawn's `finally` can only release ITS OWN token.
+ *   - the per-run budget ceiling, which excludes spend rows older than `run.createdAt`.
+ *   - the staffing watchdog: re-staff once, then park with a message.
+ *   - periodic worktree checkpointing + the crash-recovery ledger (`--resume <sessionId>`,
+ *     park when a restart-interrupted worker cannot resume).
+ *   - the durable publish outbox: the row owns the worktree until it publishes or a human
+ *     takes it, so a GitHub hiccup can never turn finished work back into work.
+ *
+ * WHAT IS NEW IN V7: the spec.md scaffold + spec-gate Stop hook are written BEFORE the
+ * implement worker spawns; workers carry `--name <run.sessionName>` and accept cross-session
+ * messages; and an `--ultracode` run's implement stage is cast onto opus at the deepest tier.
+ */
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+
+import type { Config, Harness, Logger, WorkerEvent } from "../types.ts";
+import type { HarnessSpec, Ticket } from "../tracker/types.ts";
+import type { ProgressSink } from "../progress/journal.ts";
+import { log } from "../log.ts";
+import { projectSlug } from "../tracker/cast.ts";
+import { sweepLedgeredWorker } from "../drivers/proc.ts";
+import {
+  commitWorktree,
+  createWorktree,
+  ensureProjectRepo,
+  fetchRemote,
+  hasDiffSince,
+  headSha,
+  readDiff,
+  removeWorktree,
+} from "../worker/worktree.ts";
+import { spawnTicketWorker, type TicketWorkerHandle } from "../dispatch/spawn.ts";
+import {
+  defaultEffortFor,
+  parseDoneSignal,
+  stageRegistry,
+  type StageView,
+} from "../dispatch/stages.ts";
+import { DispatchEventBus, type DispatchEventBusOptions, type DispatchOutcome } from "../dispatch/events.ts";
+import {
+  PublishOutbox,
+  PUBLISH_RETRY_DELAYS_MS,
+  classifyPublishError,
+  type PublishOperation,
+} from "../dispatch/publish-outbox.ts";
+import { appendSpendRecord, readSpendLedger, spendForTicket, type SpendOutcome } from "../spend.ts";
+import { resolveProjectOwner, selfProjectSlug } from "../github/owner.ts";
+import { specGateSpec } from "../hooks/registry.ts";
+import { parseSpecChecklist, renderSpecScaffold, type ParsedSpecChecklist } from "./spec-file.ts";
+import { runAsTicket } from "./adapter.ts";
+import type { RunStore } from "./store.ts";
+import type { Run, RunStage } from "./types.ts";
+import { RUN_TERMINAL } from "./types.ts";
+
+// =======================================================================================
+// Collaborators
+// =======================================================================================
+
+/** The git ops the supervisor performs; injectable so tests never touch real git. */
+export interface RunGitOps {
+  commitWorktree: typeof commitWorktree;
+  headSha: typeof headSha;
+  hasDiffSince: typeof hasDiffSince;
+  ensureProjectRepo: typeof ensureProjectRepo;
+  readDiff: typeof readDiff;
+  createWorktree: typeof createWorktree;
+  removeWorktree: typeof removeWorktree;
+  fetchRemote: typeof fetchRemote;
+}
+
+/**
+ * The control-bus subscription port. Production wires the concierge's bus (the `run.deploy`
+ * ping `beckett task deploy` sends); tests hand in a trivial fake. Absent → the supervisor
+ * still works, driven by its boot scan + watchdog alone.
+ */
+export interface RunBusPort {
+  on(verb: string, handler: (args: Record<string, unknown>) => void | Promise<void>): void;
+}
+
+export interface RunSupervisorDeps {
+  store: RunStore;
+  config: Config;
+  /** Absolute path of a run's own project repo (`~/Projects/<slug>`). */
+  resolveRepoRoot: (run: Run) => string;
+  /** Control-bus subscription for `run.deploy` / `run.steer`. Omitted in tests. */
+  bus?: RunBusPort;
+  /** Override any git op (tests inject fakes); unset ops use the real worktree.ts impl. */
+  gitOps?: Partial<RunGitOps>;
+  /** Stage lookup; defaults to the shared built-in view (implement/review live there). */
+  stages?: StageView;
+  /** Publish a finished run's branch to GitHub. Omitted → publishing is skipped (local-only). */
+  publishRepo?: (args: {
+    slug: string;
+    repoRoot: string;
+    description: string;
+    ticket?: string;
+    baseSha?: string;
+    commitMessage?: string;
+  }) => Promise<{ url: string; kind: "pushed" | "pr"; prUrl?: string }>;
+  /** Granular worker events → the run's private journal (keyed by run id). */
+  progress?: ProgressSink;
+  /** Central telemetry bus; digests/cards/dream all read these rows unchanged. */
+  dispatchEvents?: DispatchEventBus;
+  dispatchEventsPath?: string;
+  dispatchLiveSink?: DispatchEventBusOptions["liveSink"];
+  /** `<beckettDir>/run-publish-outbox.jsonl` — durable publish retries, one row per run. */
+  publishOutboxPath?: string;
+  /** `<beckettDir>/run-state.json` — the crash-recovery ledger + buffered steering. */
+  runtimeStatePath?: string;
+  /** Append-only spend JSONL; defaults to `[paths] spend`. */
+  spendLedgerPath?: string;
+  /** Harness health probe (`preflightFor`); omitted → every harness is presumed healthy. */
+  preflight?: (harness: Harness) => Promise<{ ok: boolean; problems: string[] }>;
+  /** Fired when a run's PR opens, so the GitHub poller watches it keyed by run id. */
+  onPrOpened?: (info: { prUrl: string; run: Run; ticket: Ticket }) => void | Promise<void>;
+  /** Fired on every successful publication (push or PR). */
+  onPublished?: (info: { url: string; kind: "pushed" | "pr"; prUrl?: string; run: Run }) => unknown;
+  /** Test seam for the orphan sweep; default ps-verifies + kills. */
+  sweepOrphan?: (pid: number, expectedBin: string) => boolean;
+  logger?: Logger;
+}
+
+/** A spawn deferred because the live-run cap was reached. */
+interface PendingRunSpawn {
+  runId: string;
+  stage: RunStage;
+}
+
+/** One live worker's crash-recovery ledger entry (the dispatcher's `LedgeredWorker`, re-keyed). */
+interface LedgeredRunWorker {
+  stage: RunStage;
+  workerId: string;
+  sessionId: string;
+  pid: number;
+  workspace: string;
+  harness: string;
+  spawnedAt: number;
+  lastCheckpointAt?: number;
+  lastCheckpointSha?: string;
+}
+
+interface RunRuntimeState {
+  version: 1;
+  liveLedger: Record<string, LedgeredRunWorker>;
+  pendingSteers: Record<string, string[]>;
+}
+
+interface SpendStageMeta {
+  harness: string;
+  model: string;
+  effort: string;
+  startedAt: number;
+}
+
+type PublishOutcome =
+  | { status: "skipped" }
+  | { status: "published"; url: string; kind: "pushed" | "pr"; prUrl?: string }
+  | { status: "failed"; error: string };
+
+/**
+ * The project slug a run's code lives in.
+ *
+ * `run.repo === null` means BECKETT ITSELF — that is the binding Run contract (`src/run/types.ts`,
+ * architecture.md §"The run model"), and it is the DEFAULT path: `beckett task deploy "…"` with no
+ * `--repo` is a change to Beckett. Falling back to the run id instead (the ticket dispatcher's
+ * per-ticket-sandbox precedent) would `git init` a brand-new empty `~/Projects/run-2026…` and let
+ * the worker implement into a void, so the fallback here is the self-project slug and nothing else.
+ *
+ * Exported because `shell/main.ts` resolves the repo ROOT from the same slug — the two must never
+ * disagree about which checkout a run owns.
+ */
+export function runProjectSlug(run: Pick<Run, "repo">, env: Record<string, string | undefined> = process.env): string {
+  return projectSlug(run.repo?.trim() || selfProjectSlug(env));
+}
+
+/** Watchdog grace: reuse the dispatcher's `[supervise] staffing_watchdog_s` (default 120s). */
+const DEFAULT_WATCHDOG_GRACE_S = 120;
+/** The watchdog tick, mirroring the dispatcher: never slower than half the grace, floor 15s. */
+const WATCHDOG_MIN_INTERVAL_MS = 15_000;
+/** Publish-outbox drain cadence — the shortest retry delay, so a due row waits at most one tick. */
+const PUBLISH_DRAIN_INTERVAL_MS = PUBLISH_RETRY_DELAYS_MS[0];
+
+// =======================================================================================
+// RunSupervisor
+// =======================================================================================
+
+export class RunSupervisor {
+  private readonly store: RunStore;
+  private readonly config: Config;
+  private readonly git: RunGitOps;
+  private readonly stages: StageView;
+  private readonly logger: Logger;
+  private readonly resolveRepoRoot: (run: Run) => string;
+  private readonly publishRepo?: RunSupervisorDeps["publishRepo"];
+  private readonly progress?: ProgressSink;
+  private readonly preflight?: RunSupervisorDeps["preflight"];
+  private readonly onPrOpened?: RunSupervisorDeps["onPrOpened"];
+  private readonly onPublished?: RunSupervisorDeps["onPublished"];
+  private readonly sweepOrphan: (pid: number, expectedBin: string) => boolean;
+  private readonly bus?: RunBusPort;
+  private readonly events: DispatchEventBus;
+  private readonly publishOutbox?: PublishOutbox;
+  private readonly runtimeStatePath?: string;
+  private readonly spendLedgerPath: string;
+
+  /** Live worker handles, keyed by run id. */
+  private readonly workers = new Map<string, TicketWorkerHandle>();
+  /** Claim-before-dispatch reservations. The Symbol is the token a `finally` compares against. */
+  private readonly staffing = new Map<string, symbol>();
+  private readonly pending: PendingRunSpawn[] = [];
+  private readonly liveLedger = new Map<string, LedgeredRunWorker>();
+  private readonly pendingSteers = new Map<string, string[]>();
+  private readonly resumables = new Map<string, { stage: RunStage; sessionId: string; harness: string }>();
+  private readonly restartInterrupted = new Map<string, RunStage>();
+  private readonly finishing = new Set<string>();
+  private readonly spendMetaByWorker = new Map<string, SpendStageMeta>();
+  private readonly unstaffedSince = new Map<string, number>();
+  private readonly watchdogRestaffed = new Set<string>();
+  private readonly budgetBlocked = new Set<string>();
+  private recoveredWorkers: Record<string, LedgeredRunWorker> | null = null;
+
+  private watchdogTimer?: ReturnType<typeof setInterval>;
+  private watchdogInFlight = false;
+  private publishDrainTimer?: ReturnType<typeof setInterval>;
+  private checkpointTimer?: ReturnType<typeof setInterval>;
+  private checkpointInFlight = false;
+  private started = false;
+
+  constructor(deps: RunSupervisorDeps) {
+    this.store = deps.store;
+    this.config = deps.config;
+    this.resolveRepoRoot = deps.resolveRepoRoot;
+    this.git = {
+      commitWorktree,
+      headSha,
+      hasDiffSince,
+      ensureProjectRepo,
+      readDiff,
+      createWorktree,
+      removeWorktree,
+      fetchRemote,
+      ...deps.gitOps,
+    };
+    this.stages = deps.stages ?? stageRegistry;
+    this.logger = deps.logger ?? log.child("run.supervisor");
+    this.publishRepo = deps.publishRepo;
+    this.progress = deps.progress;
+    this.preflight = deps.preflight;
+    this.onPrOpened = deps.onPrOpened;
+    this.onPublished = deps.onPublished;
+    this.bus = deps.bus;
+    this.sweepOrphan =
+      deps.sweepOrphan ?? ((pid, expectedBin) => sweepLedgeredWorker(pid, expectedBin, this.logger));
+    this.events =
+      deps.dispatchEvents ??
+      new DispatchEventBus({
+        path: deps.dispatchEventsPath,
+        liveSink: deps.dispatchLiveSink,
+        onSinkError: (error) =>
+          this.logger.warn("run event sink failed (persisted timeline is intact)", { error: String(error) }),
+      });
+    this.publishOutbox = deps.publishOutboxPath
+      ? new PublishOutbox(deps.publishOutboxPath, this.logger.child("run-publish-outbox"))
+      : undefined;
+    this.runtimeStatePath = deps.runtimeStatePath;
+    this.spendLedgerPath =
+      deps.spendLedgerPath ??
+      this.config.paths?.spend ??
+      join(process.env.HOME ?? "/home/beckett", ".beckett", "spend.jsonl");
+    this.loadRuntimeState();
+  }
+
+  // ── lifecycle ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Arm the engine. Subscribes the `run.deploy` bus ping, recovers whatever the previous
+   * daemon left mid-flight, re-admits every live run, then arms the checkpoint + watchdog
+   * loops. Idempotent — a second call is a no-op.
+   */
+  async start(): Promise<void> {
+    if (this.started) return;
+    this.started = true;
+    this.bus?.on("run.deploy", async (args) => {
+      const runId = typeof args.runId === "string" ? args.runId : "";
+      if (runId) await this.admit(runId);
+    });
+    this.bus?.on("run.steer", async (args) => {
+      const runId = typeof args.runId === "string" ? args.runId : "";
+      const note = typeof args.note === "string" ? args.note : "";
+      if (runId && note.trim()) await this.steer(runId, note);
+    });
+    await this.recoverFromCrash();
+    await this.replayPublishes();
+    await this.resumeInterruptedPublishes();
+    for (const run of this.store.live()) this.admitRun(run);
+    this.startCheckpointLoop();
+    this.startStaffingWatchdog();
+    this.startPublishDrainLoop();
+    this.logger.info("run supervisor started", { live: this.store.live().length });
+  }
+
+  /** Tear down the timers (daemon shutdown). Idempotent; live workers are left to their drain. */
+  stop(): void {
+    if (this.checkpointTimer) clearInterval(this.checkpointTimer);
+    if (this.watchdogTimer) clearInterval(this.watchdogTimer);
+    if (this.publishDrainTimer) clearInterval(this.publishDrainTimer);
+    this.checkpointTimer = undefined;
+    this.watchdogTimer = undefined;
+    this.publishDrainTimer = undefined;
+    this.started = false;
+  }
+
+  /** The `run.deploy` entry point: staff this run's current stage if it isn't already staffed. */
+  async admit(runId: string): Promise<void> {
+    const run = this.store.get(runId);
+    if (!run) {
+      this.logger.warn("run.deploy for an unknown run", { runId });
+      return;
+    }
+    this.admitRun(run);
+  }
+
+  /** Live status rows for `beckett status` (the tracker dashboard's replacement source). */
+  live(): Array<{ runId: string; state: string; stage: string | null; workerId: string | null }> {
+    const rows: Array<{ runId: string; state: string; stage: string | null; workerId: string | null }> = [];
+    for (const run of this.store.live()) {
+      const handle = this.workers.get(run.id);
+      rows.push({
+        runId: run.id,
+        state: run.state,
+        stage: handle ? (handle.stage as RunStage) : this.stageFor(run),
+        workerId: handle?.id ?? null,
+      });
+    }
+    return rows;
+  }
+
+  // ── admission ─────────────────────────────────────────────────────────────────────────
+
+  /** The stage a run in this state wants staffed, or null when nothing should run. */
+  private stageFor(run: Run): RunStage | null {
+    switch (run.state) {
+      case "queued":
+      case "implementing":
+        return "implement";
+      case "reviewing":
+        return "review";
+      default:
+        // `publishing` is owned by the publish outbox row; terminal states staff nothing.
+        return null;
+    }
+  }
+
+  private admitRun(run: Run): void {
+    if (RUN_TERMINAL.has(run.state)) return;
+    const stage = this.stageFor(run);
+    if (!stage) return;
+    this.spawnGuarded(run, stage);
+  }
+
+  /** True if a worker is live, OR a spawn is mid-flight, for this run (airtight dedup). */
+  private isStaffed(runId: string): boolean {
+    return this.workers.has(runId) || this.staffing.has(runId);
+  }
+
+  private isPending(runId: string): boolean {
+    return this.pending.some((p) => p.runId === runId);
+  }
+
+  /** True when live workers + admitted-but-not-yet-live spawns already fill `runs.max_live`. */
+  private atCap(): boolean {
+    return this.workers.size + this.staffing.size >= (this.config.runs?.max_live ?? 3);
+  }
+
+  /**
+   * Per-run spend ceiling. Sums this run's accrued cost from the spend ledger, EXCLUDING rows
+   * that predate `run.createdAt` — run ids are date-stamped and unique, but the guard keeps the
+   * dispatcher's posture so a re-created id can never inherit a prior incarnation's bill. A cap
+   * of 0 disables it; a ledger read failure reads as "not over" so observability can never wedge
+   * staffing.
+   */
+  private budgetCeiling(run: Run): { over: boolean; spentUsd: number; capUsd: number } {
+    const capUsd = this.config.runs?.budget_usd_per_run || this.config.budget?.per_task_usd_cap || 0;
+    if (capUsd <= 0) return { over: false, spentUsd: 0, capUsd: 0 };
+    const createdAt = Date.parse(run.createdAt ?? "");
+    if (!Number.isFinite(createdAt)) {
+      this.logger.warn("budget ceiling run creation time unavailable — allowing staffing", { run: run.id });
+      return { over: false, spentUsd: 0, capUsd };
+    }
+    try {
+      const spentUsd = spendForTicket(readSpendLedger(this.spendLedgerPath), run.id, createdAt);
+      return { over: spentUsd >= capUsd, spentUsd, capUsd };
+    } catch (err) {
+      this.logger.warn("budget ceiling read failed — allowing staffing", { run: run.id, error: String(err) });
+      return { over: false, spentUsd: 0, capUsd };
+    }
+  }
+
+  /** Spawn immediately if a slot is free, else enqueue for {@link pump}. */
+  private spawnGuarded(run: Run, stage: RunStage): void {
+    // `finishing` is deliberately NOT consulted here: the stage-advance call comes FROM inside a
+    // finish handler, and the flag exists only to keep the watchdog from reading a mid-finish run
+    // as wedged. `isStaffed` is the real dedup.
+    if (this.isStaffed(run.id)) return;
+    const budget = this.budgetCeiling(run);
+    if (budget.over) {
+      this.trace(run, `${stage}:staff`, "held", `per-run budget reached ($${budget.spentUsd.toFixed(2)} ≥ $${budget.capUsd.toFixed(2)})`);
+      if (!this.budgetBlocked.has(run.id)) {
+        this.budgetBlocked.add(run.id);
+        this.logger.warn("staffing blocked: per-run budget ceiling reached", {
+          run: run.id,
+          spentUsd: budget.spentUsd,
+          capUsd: budget.capUsd,
+        });
+      }
+      return;
+    }
+    if (this.atCap()) {
+      if (!this.isPending(run.id)) this.pending.push({ runId: run.id, stage });
+      this.trace(run, `${stage}:staff`, "held", "queued at live-run cap");
+      return;
+    }
+    this.launchSpawn(run, stage);
+  }
+
+  /**
+   * Reserve the run's slot SYNCHRONOUSLY BEFORE the async spawn, so two admissions racing
+   * through {@link spawnGuarded} cannot both pass the dedup/cap checks. The token makes a
+   * retiring spawn's `finally` harmless: it releases only its OWN reservation, never one a
+   * replacement established while it was reaping.
+   */
+  private launchSpawn(run: Run, stage: RunStage): void {
+    const reservation = Symbol(`${run.id}:${stage}`);
+    this.staffing.set(run.id, reservation);
+    this.trace(run, `${stage}:staff`, "started", "staffing admitted");
+    void this.doSpawn(run, stage, reservation)
+      .catch(() => {
+        /* doSpawn handles its own failures */
+      })
+      .finally(() => {
+        if (this.staffing.get(run.id) === reservation) this.staffing.delete(run.id);
+        this.pump();
+      });
+  }
+
+  /** Admit queued spawns while slots are free (FIFO). */
+  private pump(): void {
+    while (this.pending.length > 0 && !this.atCap()) {
+      const next = this.pending.shift()!;
+      const run = this.store.get(next.runId);
+      if (!run || RUN_TERMINAL.has(run.state) || this.isStaffed(run.id)) continue;
+      this.launchSpawn(run, next.stage);
+    }
+  }
+
+  // ── the spawn path ────────────────────────────────────────────────────────────────────
+
+  /** Resolve the cast for a stage, applying the ultracode override. */
+  private castFor(run: Run, stage: RunStage): HarnessSpec {
+    const explicit = run.cast?.[stage];
+    // Ultracode is an IMPLEMENT-stage override and never overrides an explicit cast — a human
+    // who named a harness for this stage meant it.
+    if (stage === "implement" && run.ultracode && !explicit) {
+      return { harness: "claude", model: "claude-opus-5", effort: "ultracode" };
+    }
+    return this.stages.resolveCast(stage, explicit, runAsTicket(run), this.config);
+  }
+
+  /** The worker settings a v7 run adds on top of the rendered hooks. */
+  private settingsExtraFor(run: Run, stage: RunStage): Record<string, unknown> {
+    return {
+      // Cross-session messaging: the concierge asks a live worker for status by name.
+      crossSessionInbound: "accept",
+      ...(stage === "implement" && run.ultracode ? { workflowSizeGuideline: "large" } : {}),
+    };
+  }
+
+  /** Read the run's committed spec.md checklist, if it has one yet. */
+  private readSpec(run: Run): ParsedSpecChecklist | undefined {
+    if (!run.workspace) return undefined;
+    const path = join(run.workspace, "spec.md");
+    if (!existsSync(path)) return undefined;
+    try {
+      return parseSpecChecklist(readFileSync(path, "utf8"));
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async doSpawn(run: Run, stage: RunStage, reservation: symbol): Promise<void> {
+    const stageStartedAt = Date.now();
+    const repoRoot = this.resolveRepoRoot(run);
+    const slug = runProjectSlug(run);
+
+    // 1. The run's own project repo (clone-or-init). A provisioning failure parks rather than
+    //    spawning a worker with nowhere to work.
+    this.trace(run, "repo", "started", "provisioning/cloning project repository");
+    try {
+      await this.git.ensureProjectRepo(repoRoot, slug, this.projectOwner(slug));
+      this.trace(run, "repo", "passed", "repository ready (cloned or initialized)");
+    } catch (err) {
+      this.trace(run, "repo", "failed", undefined, (err as Error).message);
+      await this.noteSpawnFailure(run, `could not provision the project repo at \`${repoRoot}\`: ${(err as Error).message}`);
+      return;
+    }
+
+    // 2. The run's own worktree on `run.branch`, cut from a freshly fetched origin/main the
+    //    first time and reused by every later stage (so review sees the in-progress work).
+    let workspace: string;
+    try {
+      workspace = await this.prepareWorktree(run, repoRoot);
+    } catch (err) {
+      this.trace(run, "worktree", "failed", undefined, (err as Error).message);
+      await this.noteSpawnFailure(run, `could not allocate a worktree under \`${repoRoot}\`: ${(err as Error).message}`);
+      return;
+    }
+
+    // 3. The spec scaffold — written BEFORE the worker exists, so its very first read of
+    //    spec.md finds the goal and the placeholder the Stop hook will hold it to.
+    const specPath = join(workspace, "spec.md");
+    if (!existsSync(specPath)) {
+      try {
+        writeFileSync(specPath, renderSpecScaffold(run), "utf8");
+      } catch (err) {
+        this.logger.warn("spec.md scaffold write failed (worker still starts)", {
+          run: run.id,
+          error: (err as Error).message,
+        });
+      }
+    }
+
+    // 4. The review diff base: HEAD-before-any-new-work, captured once per run.
+    let baseSha = run.baseSha;
+    if (stage === "implement" && !baseSha) {
+      try {
+        baseSha = (await this.git.headSha(workspace)) ?? null;
+      } catch (err) {
+        this.logger.warn("base-sha capture failed; review will diff HEAD", {
+          run: run.id,
+          error: (err as Error).message,
+        });
+      }
+    }
+    const baseRef = baseSha ?? "HEAD";
+    const current =
+      (await this.patchRun(run.id, {
+        workspace,
+        baseSha,
+        state: stage === "implement" ? "implementing" : "reviewing",
+      })) ?? { ...run, workspace, baseSha };
+
+    // 5. Cast + preflight. A dead harness produces ONE clear substitution, never a wedged run.
+    let spec = this.castFor(current, stage);
+    spec = await this.pickHealthyHarness(current, stage, spec);
+
+    // Crash recovery: a restart-interrupted same-stage worker left a persisted session — resume
+    // it rather than re-paying the whole run's exploration. Consumed here (one attempt).
+    const hint = this.resumables.get(run.id);
+    let resumeSessionId: string | undefined;
+    if (hint && hint.stage === stage) {
+      this.resumables.delete(run.id);
+      resumeSessionId = hint.sessionId;
+      if (hint.harness !== spec.harness) spec = { harness: hint.harness, effort: spec.effort };
+    }
+    const interrupted = this.restartInterrupted.get(run.id);
+    if (interrupted === stage && !resumeSessionId) {
+      this.restartInterrupted.delete(run.id);
+      await this.park(
+        current,
+        `a ${stage} worker was mid-run when the daemon restarted and no harness session survived to ` +
+          "resume from — parked rather than silently restarting the in-flight work from scratch",
+      );
+      return;
+    }
+
+    // 6. Review economics: hand the reviewer the diff instead of making it rediscover it.
+    let reviewDiff: string | undefined;
+    if (stage === "review") {
+      try {
+        reviewDiff = await this.git.readDiff(workspace, baseRef);
+      } catch (err) {
+        this.logger.warn("review diff pre-read failed (reviewer will diff itself)", {
+          run: run.id,
+          error: (err as Error).message,
+        });
+      }
+    }
+
+    const steering = this.takeSteers(run.id);
+    const ticket = runAsTicket(current, this.readSpec({ ...current, workspace }));
+    const specGatePath = join(import.meta.dir, "../hooks/spec-gate.ts");
+
+    let handle: TicketWorkerHandle;
+    try {
+      handle = await spawnTicketWorker({
+        ticket,
+        stage,
+        harness: spec,
+        config: this.config,
+        repoRoot,
+        workspace,
+        branch: current.branch,
+        baseRef,
+        ...(resumeSessionId ? { resumeSessionId } : {}),
+        steering,
+        ...(reviewDiff ? { reviewDiff } : {}),
+        stages: this.stages,
+        sessionName: current.sessionName,
+        settingsExtra: this.settingsExtraFor(current, stage),
+        // The spec gate is an IMPLEMENT-stage contract: a reviewer authors no checklist and must
+        // never be blocked by the implementer's.
+        ...(stage === "implement" ? { extraHooks: [specGateSpec(specGatePath, workspace)] } : {}),
+        onProgress: (ev: WorkerEvent, ctx: { stage: string; workerId: string }) =>
+          this.progress?.event(current.id, ev, ctx),
+        logger: this.logger,
+      });
+    } catch (err) {
+      // The steering was CONSUMED above (taken and persisted-as-removed) for a worker that never
+      // existed. Put it back before anything else: on a rework spawn those notes ARE the reviewer's
+      // findings, and the watchdog's re-staff would otherwise re-run implement with no idea why.
+      this.returnSteers(run.id, steering);
+      this.trace(run, stage, "failed", "worker could not start", (err as Error).message);
+      await this.noteSpawnFailure(current, `the ${stage} worker could not start: ${(err as Error).message}`);
+      return;
+    }
+    this.restartInterrupted.delete(run.id);
+
+    // A cancel/park that landed while we were provisioning has already dropped the reservation.
+    // Do not register a worker for a run nobody wants any more.
+    const fresh = this.store.get(run.id);
+    if (this.staffing.get(run.id) !== reservation || !fresh || RUN_TERMINAL.has(fresh.state)) {
+      this.logger.info("run no longer staffed mid-spawn — discarding worker", {
+        run: run.id,
+        stage,
+        workerId: handle.id,
+      });
+      // Same contract as the spawn-failure path: a discarded worker never read these notes, so a
+      // still-live run must get them back. A terminal run keeps none (nothing will ever read them).
+      if (fresh && !RUN_TERMINAL.has(fresh.state)) this.returnSteers(run.id, steering);
+      await handle.abort("run no longer active");
+      await handle.reap();
+      return;
+    }
+
+    this.workers.set(run.id, handle);
+    // `sessionIds` is a Run-contract field only this lane writes: the crash-resume ledger is
+    // in-process state cleared on recovery, so without this a sibling reader sees `{}` forever.
+    if (handle.sessionId) {
+      await this.patchRun(run.id, { sessionIds: { ...fresh.sessionIds, [stage]: handle.sessionId } });
+    }
+    this.liveLedger.set(run.id, {
+      stage,
+      workerId: handle.id,
+      sessionId: handle.sessionId ?? "",
+      pid: handle.pid ?? 0,
+      workspace,
+      harness: spec.harness,
+      spawnedAt: Date.now(),
+    });
+    this.persistRuntimeState();
+    const spendMeta: SpendStageMeta = {
+      harness: spec.harness,
+      model: spec.model || this.defaultModelFor(spec),
+      effort: spec.effort ?? defaultEffortFor(spec.harness, this.config),
+      startedAt: stageStartedAt,
+    };
+    this.spendMetaByWorker.set(handle.id, spendMeta);
+    handle.onDone((status, summary) => {
+      void this.onWorkerDone(run.id, stage, handle, status, summary, spendMeta);
+    });
+    this.trace(current, stage, "started", `worker ${handle.id} on ${spec.harness}`);
+    this.logger.info("worker spawned for run", { run: run.id, stage, workerId: handle.id, harness: spec.harness });
+  }
+
+  /** Allocate (or reuse) the run's worktree on its own branch. */
+  private async prepareWorktree(run: Run, repoRoot: string): Promise<string> {
+    const firstTouch = !run.workspace;
+    const workspace = run.workspace ?? join(repoRoot, ".beckett", "worktrees", run.id);
+    this.trace(run, "worktree", "started", firstTouch ? "creating isolated worktree" : "reusing isolated worktree");
+    if (firstTouch) await this.git.fetchRemote(repoRoot);
+    await this.git.createWorktree({
+      repoRoot,
+      workspace,
+      branch: run.branch,
+      baseRef: "origin/main",
+      reuseIfExists: true,
+    });
+    this.trace(run, "worktree", "passed", workspace);
+    return workspace;
+  }
+
+  /**
+   * Substitute a healthy harness when the cast one cannot start (issue #17's posture, minus the
+   * dispatcher's ticket comments). No preflight wired → the cast is used as-is.
+   */
+  private async pickHealthyHarness(run: Run, stage: RunStage, spec: HarnessSpec): Promise<HarnessSpec> {
+    if (!this.preflight) return spec;
+    try {
+      const verdict = await this.preflight(spec.harness as Harness);
+      if (verdict.ok) return spec;
+      if (spec.harness === "claude") return spec; // nothing healthier to fall back to
+      this.logger.warn("cast harness failed preflight — substituting claude", {
+        run: run.id,
+        stage,
+        harness: spec.harness,
+        problems: verdict.problems,
+      });
+      this.trace(run, `${stage}:cast`, "info", `${spec.harness} failed preflight — substituting claude`);
+      return { harness: "claude", ...(spec.effort ? { effort: spec.effort } : {}) };
+    } catch {
+      return spec; // a probe fault must never block dispatch
+    }
+  }
+
+  // ── finish handling ───────────────────────────────────────────────────────────────────
+
+  private async onWorkerDone(
+    runId: string,
+    stage: RunStage,
+    handle: TicketWorkerHandle,
+    status: "success" | "error",
+    summary: string,
+    spendMeta: SpendStageMeta,
+  ): Promise<void> {
+    const run = this.store.get(runId);
+    if (!run) return;
+    this.trace(
+      run,
+      stage,
+      status === "success" ? "passed" : "failed",
+      status === "success" ? "worker finished" : "worker exited with error",
+      status === "success" ? undefined : summary,
+    );
+    this.recordSpend(run, stage, handle, status, spendMeta);
+    this.spendMetaByWorker.delete(handle.id);
+    // Mark the run mid-finish BEFORE freeing its slot: the commit/publish below can outlive a
+    // watchdog grace window, and for its whole duration the run is workerless.
+    this.finishing.add(runId);
+    if (this.workers.get(runId) === handle) this.workers.delete(runId);
+    if (this.liveLedger.delete(runId)) this.persistRuntimeState();
+
+    // Steering the driver buffered but never applied — carry it into the next stage's brief.
+    for (const note of handle.result?.unappliedNudges ?? []) this.bufferSteer(runId, note);
+
+    try {
+      if (stage === "implement") await this.finishImplement(run, handle, status, summary);
+      else await this.finishReview(run, handle, status, summary);
+    } catch (err) {
+      this.logger.error("post-finish handling failed", { run: runId, stage, error: (err as Error).message });
+    } finally {
+      this.finishing.delete(runId);
+      await handle.reap();
+      this.pump();
+    }
+  }
+
+  private async finishImplement(
+    run: Run,
+    handle: TicketWorkerHandle,
+    status: "success" | "error",
+    summary: string,
+  ): Promise<void> {
+    if (status !== "success") {
+      await this.commitWip(run, handle);
+      await this.park(run, `the implement worker exited with an error.\n\n${summary}`);
+      return;
+    }
+    const signal = parseDoneSignal(handle.result?.structured);
+    if (signal && (signal.status === "blocked" || signal.status === "partial")) {
+      await this.commitWip(run, handle);
+      await this.park(run, `the implement worker reported **${signal.status}**.\n\n${summary}`);
+      return;
+    }
+    // Safety net: capture anything the worker left uncommitted so review sees the whole change.
+    await this.commitContribution(run, handle);
+    await this.patchRun(run.id, { state: "reviewing" });
+    this.trace(run, "implement:verdict", "passed", "implementation complete → review");
+    const next = this.store.get(run.id);
+    if (next) this.spawnGuarded(next, "review");
+  }
+
+  private async finishReview(
+    run: Run,
+    handle: TicketWorkerHandle,
+    status: "success" | "error",
+    summary: string,
+  ): Promise<void> {
+    const signal = status === "success" ? parseDoneSignal(handle.result?.structured) : null;
+    if (!signal) {
+      await this.park(
+        run,
+        status === "success"
+          ? `the reviewer finished without a schema-valid structured verdict.\n\n${summary}`
+          : `the reviewer exited with an error.\n\n${summary}`,
+      );
+      return;
+    }
+    if (signal.status === "complete") {
+      this.trace(run, "review:verdict", "passed", "review passed");
+      await this.publishRun(run, summary);
+      return;
+    }
+
+    const cycles = run.reviewCycles + 1;
+    const cap = this.config.runs?.review_cycles_max ?? 2;
+    await this.patchRun(run.id, { reviewCycles: cycles });
+    this.trace(run, "review:verdict", "bounced", `review requested rework (cycle ${cycles}/${cap})`);
+    if (cycles >= cap) {
+      const parked = this.store.get(run.id) ?? run;
+      await this.park(
+        parked,
+        `review found issues, and this is rework cycle ${cycles}/${cap} — stopping automatic rework ` +
+          `and leaving it for a human.\n\n${summary}`,
+      );
+      return;
+    }
+    // Rework: the reviewer's notes become the next implement worker's steering, so its first
+    // model turn provably carries the reasons it is running again.
+    this.bufferSteer(run.id, `Review found issues (cycle ${cycles}/${cap}):\n${summary}`);
+    await this.patchRun(run.id, { state: "implementing" });
+    const next = this.store.get(run.id);
+    if (next) this.spawnGuarded(next, "implement");
+  }
+
+  // ── publishing ────────────────────────────────────────────────────────────────────────
+
+  /**
+   * GitHub owner for a slug — the dispatcher's resolver verbatim, so the self-project's per-repo
+   * override (`beckett` lives under `kowo-co`, #114) applies to runs too. Getting this wrong on a
+   * `repo: null` run would clone nothing and `git init` an empty checkout, which is exactly the
+   * failure {@link runProjectSlug} exists to prevent.
+   */
+  private projectOwner(slug: string): string {
+    return resolveProjectOwner(slug, this.config);
+  }
+
+  /**
+   * Publish, THEN mark done — publish success gates the `done` state, which is the OPS-30
+   * false-done fix carried into v7. A failure appends a durable outbox row that owns the
+   * worktree until it publishes or a human takes it.
+   */
+  private async publishRun(run: Run, summary: string): Promise<void> {
+    await this.patchRun(run.id, { state: "publishing" });
+    const publishing = this.store.get(run.id) ?? run;
+    this.trace(publishing, "publish", "started", "git push/publish starting");
+    const outcome = await this.publishOnce(publishing, summary);
+    if (outcome.status === "failed") {
+      if (this.publishOutbox) {
+        const op: PublishOperation = {
+          id: randomUUID(),
+          ticket: runAsTicket(publishing),
+          slug: runProjectSlug(publishing),
+          repoRoot: publishing.workspace ?? this.resolveRepoRoot(publishing),
+          messagePrefix: "Review passed → **done**.",
+          summary,
+          purpose: "done",
+          attempt: 1,
+          nextAttemptAt:
+            classifyPublishError(outcome.error) === "permanent"
+              ? Number.MAX_SAFE_INTEGER
+              : Date.now() + PUBLISH_RETRY_DELAYS_MS[0],
+          createdAt: new Date().toISOString(),
+        };
+        this.publishOutbox.append(op);
+        this.trace(publishing, "publish", "held", `publish failed (${outcome.error}) — durable retry queued`);
+        return;
+      }
+      await this.park(publishing, `the work is complete but could not be published (${outcome.error}).`);
+      return;
+    }
+    await this.patchRun(run.id, {
+      state: "done",
+      prUrl: outcome.status === "published" ? outcome.prUrl ?? outcome.url : null,
+      error: null,
+    });
+    this.trace(publishing, "done", "passed", summary);
+    this.logger.info("run done", { run: run.id });
+  }
+
+  /** One publish attempt; never throws. */
+  private async publishOnce(run: Run, summary: string): Promise<PublishOutcome> {
+    if (!this.publishRepo) {
+      this.trace(run, "publish", "passed", "publishing unavailable; local-only completion");
+      return { status: "skipped" };
+    }
+    try {
+      const result = await this.publishRepo({
+        slug: runProjectSlug(run),
+        repoRoot: run.workspace ?? this.resolveRepoRoot(run),
+        description: run.title,
+        ticket: run.id,
+        ...(run.baseSha ? { baseSha: run.baseSha } : {}),
+        ...(summary.trim() ? { commitMessage: summary } : {}),
+      });
+      return await this.recordPublication(run, result);
+    } catch (err) {
+      this.trace(run, "publish", "failed", "push/publish failed", (err as Error).message);
+      return { status: "failed", error: (err as Error).message };
+    }
+  }
+
+  private async recordPublication(
+    run: Run,
+    publication: { url: string; kind: "pushed" | "pr"; prUrl?: string },
+  ): Promise<PublishOutcome> {
+    this.trace(run, publication.kind === "pr" ? "pr" : "git-push", "passed", publication.prUrl ?? publication.url);
+    if (this.onPublished) {
+      try {
+        await this.onPublished({ ...publication, run });
+      } catch (err) {
+        this.logger.warn("onPublished hook failed (publish still succeeded)", { run: run.id, error: String(err) });
+      }
+    }
+    // Only PRs are watchable. The poller is keyed by the RUN id, so its relays land on the run.
+    if (publication.kind === "pr" && publication.prUrl && this.onPrOpened) {
+      try {
+        await this.onPrOpened({ prUrl: publication.prUrl, run, ticket: runAsTicket(run) });
+      } catch (err) {
+        this.logger.warn("onPrOpened hook failed (publish still succeeded)", { run: run.id, error: String(err) });
+      }
+    }
+    return { status: "published", ...publication };
+  }
+
+  /** Drain due publish retry rows. Idempotent — `publishRepo` is safe to re-run. */
+  async replayPublishes(): Promise<number> {
+    if (!this.publishOutbox) return 0;
+    return this.publishOutbox.drain(async (op) => {
+      const run = this.store.get(op.ticket.id);
+      if (!run || RUN_TERMINAL.has(run.state)) return { action: "remove" };
+      const pub = await this.publishOnce(run, op.summary);
+      if (pub.status === "failed") {
+        const delay = PUBLISH_RETRY_DELAYS_MS[Math.min(op.attempt, PUBLISH_RETRY_DELAYS_MS.length - 1)]!;
+        return {
+          action: "keep",
+          operation: { ...op, attempt: op.attempt + 1, nextAttemptAt: Date.now() + delay },
+        };
+      }
+      await this.patchRun(run.id, {
+        state: "done",
+        prUrl: pub.status === "published" ? pub.prUrl ?? pub.url : null,
+        error: null,
+      });
+      this.trace(run, "done", "passed", "durable publish retry succeeded");
+      return { action: "remove" };
+    });
+  }
+
+  /**
+   * Boot repair for the one window the outbox cannot cover: the daemon died BETWEEN
+   * `state = "publishing"` and the failed attempt that would have written the durable row. Such a
+   * run has no outbox row, staffs nothing ({@link stageFor} returns null for `publishing`), and is
+   * skipped by the watchdog — a silent permanent wedge. Re-attempting is safe: `publishRepo` is
+   * idempotent by contract (a re-push of the same branch returns the same PR), and a second failure
+   * lands the run in the outbox where the normal drain owns it.
+   */
+  async resumeInterruptedPublishes(): Promise<number> {
+    let resumed = 0;
+    for (const run of this.store.live()) {
+      if (run.state !== "publishing") continue;
+      if (this.publishOutbox?.has(run.id)) continue; // the row already owns it
+      resumed++;
+      this.logger.warn("run was mid-publish when the daemon stopped — re-attempting", { run: run.id });
+      this.trace(run, "publish", "info", "daemon restarted mid-publish — re-attempting (idempotent)");
+      // No summary: the reviewer's words did not survive the restart, and inventing a commit
+      // message here would put fiction in the history. The publish path handles the empty case.
+      await this.publishRun(run, "");
+    }
+    return resumed;
+  }
+
+  // ── steering ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Deliver a note to a run. A live worker gets it as a nudge; otherwise it is buffered in the
+   * runtime state so the NEXT stage's brief carries it (the words provably reach a model turn).
+   */
+  async steer(runId: string, note: string): Promise<"delivered" | "buffered"> {
+    const handle = this.workers.get(runId);
+    if (handle) {
+      try {
+        const accepted = await handle.nudge(note);
+        if (accepted !== "dropped") return "delivered";
+      } catch (err) {
+        this.logger.warn("nudge failed — buffering steer", { run: runId, error: String(err) });
+      }
+    }
+    this.bufferSteer(runId, note);
+    return "buffered";
+  }
+
+  private bufferSteer(runId: string, note: string): void {
+    const list = this.pendingSteers.get(runId) ?? [];
+    list.push(note);
+    this.pendingSteers.set(runId, list);
+    this.persistRuntimeState();
+  }
+
+  /**
+   * Give back steering that was consumed for a brief no model ever read. Notes go BACK IN FRONT of
+   * anything buffered since, so the run's next worker sees them in the order they were written.
+   */
+  private returnSteers(runId: string, notes: string[]): void {
+    if (notes.length === 0) return;
+    this.pendingSteers.set(runId, [...notes, ...(this.pendingSteers.get(runId) ?? [])]);
+    this.persistRuntimeState();
+  }
+
+  private takeSteers(runId: string): string[] {
+    const list = this.pendingSteers.get(runId) ?? [];
+    if (list.length === 0) return [];
+    this.pendingSteers.delete(runId);
+    this.persistRuntimeState();
+    return list;
+  }
+
+  // ── watchdog + checkpointing ──────────────────────────────────────────────────────────
+
+  startStaffingWatchdog(): void {
+    if (this.watchdogTimer) return;
+    const graceS = this.config.supervise?.staffing_watchdog_s ?? DEFAULT_WATCHDOG_GRACE_S;
+    if (!graceS || graceS <= 0) return;
+    const intervalMs = Math.max(WATCHDOG_MIN_INTERVAL_MS, Math.round((graceS * 1000) / 2));
+    this.watchdogTimer = setInterval(() => {
+      void this.reconcileStaffing().catch((err) =>
+        this.logger.warn("run staffing reconciliation failed", { error: (err as Error).message }),
+      );
+    }, intervalMs);
+    this.watchdogTimer.unref?.();
+  }
+
+  /**
+   * The publish outbox's own heartbeat. {@link reconcileStaffing} already drains on every watchdog
+   * tick, but that tick is configurable to nothing (`[supervise] staffing_watchdog_s = 0`) and a
+   * durable retry schedule that an unrelated knob can switch off is not durable. Both callers are
+   * safe together: `PublishOutbox.drain` is single-flight in-process, so an overlapping tick is a
+   * no-op rather than a double publish.
+   */
+  startPublishDrainLoop(): void {
+    if (this.publishDrainTimer || !this.publishOutbox) return;
+    this.publishDrainTimer = setInterval(() => {
+      void this.replayPublishes().catch((err) =>
+        this.logger.warn("publish outbox drain failed", { error: (err as Error).message }),
+      );
+    }, PUBLISH_DRAIN_INTERVAL_MS);
+    this.publishDrainTimer.unref?.();
+  }
+
+  startCheckpointLoop(): void {
+    if (this.checkpointTimer) return;
+    const seconds = this.config.supervise?.worker_checkpoint_s ?? 0;
+    if (!seconds || seconds <= 0) return;
+    this.checkpointTimer = setInterval(() => {
+      void this.checkpointLiveRuns().catch((err) =>
+        this.logger.warn("run checkpoint pass failed", { error: (err as Error).message }),
+      );
+    }, seconds * 1000);
+    this.checkpointTimer.unref?.();
+  }
+
+  /**
+   * One staffing reconciliation pass. Every live run that is NOT being handled — no worker, no
+   * mid-spawn reservation, not queued, not finishing, no publish row — has its workerless clock
+   * ticked. Past the grace it is re-staffed ONCE; if it is still workerless a grace later it is
+   * parked with a message. This is the catch-all that guarantees a wedged run never sits silent.
+   */
+  async reconcileStaffing(nowMs: number = Date.now()): Promise<{ restaffed: string[]; parked: string[] }> {
+    if (this.watchdogInFlight) return { restaffed: [], parked: [] };
+    this.watchdogInFlight = true;
+    const restaffed: string[] = [];
+    const parked: string[] = [];
+    try {
+      // Drain the durable publish outbox FIRST. The ticket dispatcher got this for free — it drained
+      // on every poll tick — but the run engine has no poller, so without this the 1m/5m/30m retry
+      // schedule would only ever run at daemon boot and a transiently-failed publish would sit in
+      // `publishing` (skipped below via `publishOutbox.has`) until the next restart. An outbox fault
+      // must never block staffing recovery, hence the local catch.
+      try {
+        await this.replayPublishes();
+      } catch (err) {
+        this.logger.warn("publish outbox drain failed (staffing pass continues)", { error: String(err) });
+      }
+      const graceMs = (this.config.supervise?.staffing_watchdog_s ?? DEFAULT_WATCHDOG_GRACE_S) * 1000;
+      const wedged = new Set<string>();
+      for (const run of this.store.live()) {
+        const stage = this.stageFor(run);
+        if (
+          !stage ||
+          this.isStaffed(run.id) ||
+          this.isPending(run.id) ||
+          this.finishing.has(run.id) ||
+          (this.publishOutbox?.has(run.id) ?? false) ||
+          this.budgetCeiling(run).over
+        ) {
+          this.forgetWedgeClock(run.id);
+          continue;
+        }
+        wedged.add(run.id);
+        const since = this.unstaffedSince.get(run.id);
+        if (since === undefined) {
+          this.unstaffedSince.set(run.id, nowMs);
+          continue; // first sighting — give normal staffing a full grace window
+        }
+        if (nowMs - since < graceMs) continue;
+        if (!this.watchdogRestaffed.has(run.id)) {
+          this.watchdogRestaffed.add(run.id);
+          this.unstaffedSince.set(run.id, nowMs);
+          this.trace(run, "watchdog", "started", `no live worker for ${Math.round((nowMs - since) / 1000)}s — re-staffing`);
+          this.logger.warn("run staffable with no live worker — re-staffing", { run: run.id, stage });
+          this.spawnGuarded(run, stage);
+          restaffed.push(run.id);
+        } else {
+          this.trace(run, "watchdog", "held", "re-staff did not take — parked for a human");
+          this.forgetWedgeClock(run.id);
+          await this.park(
+            run,
+            "a worker for this run was never established, and an automatic re-staff did not take.",
+          );
+          parked.push(run.id);
+        }
+      }
+      for (const id of [...this.unstaffedSince.keys()]) if (!wedged.has(id)) this.forgetWedgeClock(id);
+    } finally {
+      this.watchdogInFlight = false;
+    }
+    return { restaffed, parked };
+  }
+
+  private forgetWedgeClock(runId: string): void {
+    this.unstaffedSince.delete(runId);
+    this.watchdogRestaffed.delete(runId);
+  }
+
+  /**
+   * Commit every live run's worktree as a WIP checkpoint, so a HARD crash (SIGKILL/OOM) loses at
+   * most one window of on-disk work. Best-effort per run: one failure never blocks the others.
+   */
+  async checkpointLiveRuns(): Promise<number> {
+    if (this.checkpointInFlight) return 0;
+    this.checkpointInFlight = true;
+    let checkpointed = 0;
+    try {
+      for (const [runId, handle] of [...this.workers.entries()]) {
+        if (handle.result) continue; // finishing — its onDone path owns the commit
+        const ledger = this.liveLedger.get(runId);
+        try {
+          const commit = await this.git.commitWorktree(
+            handle.workspace,
+            `beckett: ${runId} checkpoint (${handle.workerId})`,
+          );
+          if (!commit.committed) continue;
+          checkpointed++;
+          if (ledger) {
+            ledger.lastCheckpointAt = Date.now();
+            if (commit.sha) ledger.lastCheckpointSha = commit.sha;
+          }
+        } catch (err) {
+          this.logger.warn("run checkpoint failed (skipping)", { run: runId, error: (err as Error).message });
+        }
+      }
+      if (checkpointed > 0) this.persistRuntimeState();
+    } finally {
+      this.checkpointInFlight = false;
+    }
+    return checkpointed;
+  }
+
+  // ── crash recovery ────────────────────────────────────────────────────────────────────
+
+  /**
+   * For every worker the previous daemon left in the ledger: sweep its orphaned process group,
+   * commit whatever ghost WIP it left, and record a resume hint so the re-staffed same-stage
+   * worker continues its session instead of re-running the run from scratch. A run whose worker
+   * left no session is flagged interrupted — its next spawn parks rather than silently
+   * restarting in-flight work.
+   */
+  async recoverFromCrash(): Promise<void> {
+    const recovered = this.recoveredWorkers;
+    this.recoveredWorkers = null;
+    if (!recovered) return;
+    const entries = Object.entries(recovered);
+    if (entries.length === 0) return;
+    for (const [runId, worker] of entries) {
+      if (worker.pid > 0) {
+        try {
+          this.sweepOrphan(worker.pid, this.harnessBin(worker.harness));
+        } catch (err) {
+          this.logger.warn("orphan sweep failed", { pid: worker.pid, error: (err as Error).message });
+        }
+      }
+      try {
+        await this.git.commitWorktree(worker.workspace, `beckett: ${runId} restart WIP (${worker.workerId})`);
+      } catch (err) {
+        this.logger.warn("restart WIP commit failed", { run: runId, error: (err as Error).message });
+      }
+      if (worker.sessionId) {
+        this.resumables.set(runId, {
+          stage: worker.stage,
+          sessionId: worker.sessionId,
+          harness: worker.harness,
+        });
+      }
+      this.restartInterrupted.set(runId, worker.stage);
+    }
+    this.liveLedger.clear();
+    this.persistRuntimeState();
+    this.logger.info("run crash recovery complete", { interrupted: entries.length, resumable: this.resumables.size });
+  }
+
+  private harnessBin(harness: string): string {
+    const h = this.config.harness as unknown as Record<string, { bin?: string } | undefined>;
+    return h?.[harness]?.bin || harness;
+  }
+
+  private defaultModelFor(spec: HarnessSpec): string {
+    const cfg = this.config.harness as unknown as Record<string, { default_model?: string } | undefined>;
+    return cfg?.[spec.harness]?.default_model ?? "";
+  }
+
+  // ── shared helpers ────────────────────────────────────────────────────────────────────
+
+  /**
+   * `RunStore.update` for a run that may have been cancelled/removed out from under us. The store
+   * THROWS on an unknown id (its fail-loud contract for a caller that should know better), but a
+   * supervisor patch is always racing a concurrent cancel — losing a state write on a run that no
+   * longer exists is correct, while letting it escape would abort a live worker's completion path.
+   * Returns the updated run, or null when there was nothing to update.
+   */
+  private async patchRun(
+    runId: string,
+    patch: Partial<Omit<Run, "id" | "slug" | "branch" | "sessionName" | "createdAt">>,
+  ): Promise<Run | null> {
+    try {
+      return await this.store.update(runId, patch);
+    } catch (err) {
+      this.logger.warn("run state patch skipped — the run is no longer in the ledger", {
+        run: runId,
+        error: (err as Error).message,
+      });
+      return null;
+    }
+  }
+
+  /**
+   * A spawn that could not even start. Deliberately NOT a park: the run stays live with the
+   * reason recorded, and the staffing watchdog owns recovery — it re-staffs once (giving a
+   * transient cause, a network blip or box load, a full grace window to clear) and parks only if
+   * that second attempt also leaves the run workerless. One recovery ladder instead of two.
+   */
+  private async noteSpawnFailure(run: Run, reason: string): Promise<void> {
+    await this.patchRun(run.id, { error: reason });
+    this.logger.warn("run spawn failed — leaving it to the staffing watchdog", { run: run.id, reason });
+  }
+
+  /** Park a run for a human: terminal-ish state, the reason recorded, one `held` event emitted. */
+  private async park(run: Run, reason: string): Promise<void> {
+    await this.patchRun(run.id, { state: "parked", error: reason });
+    this.trace(run, "park", "held", reason);
+    this.logger.warn("run parked for a human", { run: run.id, reason });
+  }
+
+  private async commitWip(run: Run, handle: TicketWorkerHandle): Promise<string | null> {
+    try {
+      const commit = await this.git.commitWorktree(handle.workspace, `beckett: ${run.id} WIP (${handle.workerId})`);
+      return commit.sha ?? null;
+    } catch (err) {
+      this.logger.warn("WIP commit failed", { run: run.id, error: (err as Error).message });
+      return null;
+    }
+  }
+
+  private async commitContribution(run: Run, handle: TicketWorkerHandle): Promise<boolean> {
+    try {
+      const commit = await this.git.commitWorktree(
+        handle.workspace,
+        `beckett: ${run.id} implement (${handle.workerId})`,
+      );
+      return commit.committed;
+    } catch (err) {
+      this.logger.warn("commit of implementation failed", { run: run.id, error: (err as Error).message });
+      return false;
+    }
+  }
+
+  /** Persist a stage's telemetry. Keyed by RUN id — `spendForTicket` is generic over id strings. */
+  private recordSpend(
+    run: Run,
+    stage: RunStage,
+    handle: TicketWorkerHandle,
+    status: "success" | "error",
+    meta: SpendStageMeta,
+  ): void {
+    if (typeof handle.telemetry !== "function") return;
+    try {
+      const t = handle.telemetry();
+      const signal = status === "success" ? parseDoneSignal(handle.result?.structured) : null;
+      const tokens = t.tokens.input + t.tokens.cacheRead + t.tokens.cacheCreate + t.tokens.output;
+      const outcome: SpendOutcome =
+        status !== "success"
+          ? t.toolCalls === 0 && tokens === 0
+            ? "launch_failed"
+            : "failed"
+          : stage === "review" && signal?.status !== "complete"
+            ? "rework"
+            : stage === "implement" && (signal?.status === "blocked" || signal?.status === "partial")
+              ? "rework"
+              : "done";
+      appendSpendRecord(this.spendLedgerPath, {
+        ticketId: run.id,
+        project: run.repo ?? null,
+        stage,
+        harness: meta.harness,
+        model: meta.model,
+        effort: meta.effort,
+        turns: t.turns,
+        toolCalls: t.toolCalls,
+        tokensIn: t.tokens.input + t.tokens.cacheRead + t.tokens.cacheCreate,
+        tokensOut: t.tokens.output,
+        costUsd: t.usdEstimate ?? null,
+        durationMs: Math.max(0, Date.now() - meta.startedAt),
+        outcome,
+        reviewTier: "fresh",
+        ts: new Date().toISOString(),
+        ...(handle.result?.errorClass ? { errorClass: handle.result.errorClass } : {}),
+        ...(handle.sessionId ? { sessionId: handle.sessionId } : {}),
+      });
+    } catch (err) {
+      this.logger.warn("spend ledger append failed", { run: run.id, stage, error: String(err) });
+    }
+  }
+
+  /**
+   * One persisted-before-live dispatch row. Emitted on the EXISTING bus with `ticketId`/
+   * `ticketRef` = the run id, so digests, progress cards, dream assembly, and telemetry harvest
+   * keep working with no change at all.
+   */
+  private trace(run: Run, stage: string, outcome: DispatchOutcome, message?: string, error?: string): void {
+    this.events.emit({
+      ticketId: run.id,
+      ticketRef: run.id,
+      branchRef: run.branch,
+      ...(run.channelId ? { channel: run.channelId } : {}),
+      stage,
+      outcome,
+      ...(message ? { message } : {}),
+      ...(error ? { error } : {}),
+    });
+  }
+
+  // ── runtime state ─────────────────────────────────────────────────────────────────────
+
+  private loadRuntimeState(): void {
+    if (!this.runtimeStatePath || !existsSync(this.runtimeStatePath)) return;
+    try {
+      const raw = JSON.parse(readFileSync(this.runtimeStatePath, "utf8")) as Partial<RunRuntimeState>;
+      if (raw.version !== 1) return;
+      const ledger: Record<string, LedgeredRunWorker> = {};
+      for (const [runId, value] of Object.entries(raw.liveLedger ?? {})) {
+        const w = value as Partial<LedgeredRunWorker>;
+        if (w.stage !== "implement" && w.stage !== "review") continue;
+        if (typeof w.workspace !== "string") continue;
+        ledger[runId] = {
+          stage: w.stage,
+          workerId: typeof w.workerId === "string" ? w.workerId : "",
+          sessionId: typeof w.sessionId === "string" ? w.sessionId : "",
+          pid: Number.isInteger(w.pid) ? (w.pid as number) : 0,
+          workspace: w.workspace,
+          harness: typeof w.harness === "string" ? w.harness : "claude",
+          spawnedAt: typeof w.spawnedAt === "number" ? w.spawnedAt : 0,
+          ...(typeof w.lastCheckpointAt === "number" ? { lastCheckpointAt: w.lastCheckpointAt } : {}),
+          ...(typeof w.lastCheckpointSha === "string" ? { lastCheckpointSha: w.lastCheckpointSha } : {}),
+        };
+      }
+      this.recoveredWorkers = ledger;
+      for (const [runId, steers] of Object.entries(raw.pendingSteers ?? {})) {
+        const list = (steers as unknown[]).filter((s): s is string => typeof s === "string" && s.trim().length > 0);
+        if (list.length) this.pendingSteers.set(runId, list);
+      }
+    } catch (err) {
+      // A malformed ledger is best-effort recovery data, never a boot blocker.
+      this.logger.warn("run runtime state unreadable — starting with none", { error: String(err) });
+    }
+  }
+
+  private persistRuntimeState(): void {
+    if (!this.runtimeStatePath) return;
+    const state: RunRuntimeState = {
+      version: 1,
+      liveLedger: Object.fromEntries(this.liveLedger),
+      pendingSteers: Object.fromEntries(this.pendingSteers),
+    };
+    try {
+      mkdirSync(dirname(this.runtimeStatePath), { recursive: true });
+      const tmp = `${this.runtimeStatePath}.tmp`;
+      writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+      renameSync(tmp, this.runtimeStatePath);
+    } catch (err) {
+      this.logger.warn("run runtime state persist failed", { error: String(err) });
+    }
+  }
+}
+
+/** Factory mirroring `createDispatcher` — the shape `shell/main.ts` wires. */
+export function createRunSupervisor(deps: RunSupervisorDeps): RunSupervisor {
+  return new RunSupervisor(deps);
+}

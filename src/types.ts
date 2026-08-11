@@ -911,6 +911,15 @@ export interface Config {
     /** Board name used when a caller omits --board. */
     default_board: string;
   };
+  /** v7 runs — the ticketless execution unit driven by `src/run/supervisor.ts`. */
+  runs: {
+    /** Concurrent live runs; over-cap admissions queue FIFO. Default 3. */
+    max_live: number;
+    /** Implement↔review round-trips before the supervisor parks the run for a human. Default 2. */
+    review_cycles_max: number;
+    /** Per-run USD ceiling; 0 falls back to `[budget] per_task_usd_cap`. Default 0. */
+    budget_usd_per_run: number;
+  };
   /** OPS-124 — GitHub PR poller. The credential lives in env; active only when one is set. */
   github: {
     /** How often to re-read watched PRs' review/CI/merge signal (seconds). */

@@ -51,7 +51,7 @@ import { log } from "../log.ts";
 import { excludeFromGit, installScaffoldingGuardHook, SCAFFOLDING_DIR } from "../worker/worktree.ts";
 import { scopeGuardSpec } from "../hooks/scope-guard.ts";
 import { runtimeAwarenessSpec } from "../hooks/runtime-awareness.ts";
-import { renderClaudeSettings } from "../hooks/registry.ts";
+import { renderClaudeSettings, type HookSpec } from "../hooks/registry.ts";
 import { buildResumeBrief } from "./resume-brief.ts";
 import { gatherEnvBootstrap } from "./env-bootstrap.ts";
 import { defaultEffortFor, stageRegistry, type StageView } from "./stages.ts";
@@ -197,19 +197,21 @@ export interface SpawnWorkerArgs {
    * diverging stage tables. Absent (tests / embedders) → the shared default view.
    */
   stages?: StageView;
-  logger?: Logger;
   /**
-   * Extra top-level `--settings` keys merged on top of the driver's own (`crossSessionInbound:
-   * "accept"` is always added regardless — see {@link writeWorkerMeta}). Absent for every stage
-   * today; a future caller (e.g. an ultracode run) can request `workflowSizeGuideline` etc.
-   */
-  settingsExtra?: Record<string, unknown>;
-  /**
-   * Cross-session address (claude `--name`, ≥2.1.224): threaded straight through to the built
-   * {@link SpawnSpec} so the concierge/other live sessions can SendMessage this worker by name.
-   * Unset = the harness's auto-name. No supervisor naming policy lives here — the caller decides.
+   * v7 cross-session addressing: the stable name this worker's harness session registers under
+   * (`claude --name`), so the concierge can ask a LIVE worker for status by handle. Absent →
+   * no `--name` flag, exactly as before.
    */
   sessionName?: string;
+  /**
+   * v7: extra top-level keys merged UNDER the worker's rendered `--settings` (notably
+   * `crossSessionInbound: "accept"` and `workflowSizeGuideline`) — the rendered keys win, so this
+   * can never clobber the hooks. Absent → the settings file is exactly the rendered hook settings.
+   */
+  settingsExtra?: Record<string, unknown>;
+  /** Extra hooks registered into the worker's `--settings` (v7: the spec-gate Stop hook). */
+  extraHooks?: HookSpec[];
+  logger?: Logger;
 }
 
 // =======================================================================================
@@ -246,7 +248,7 @@ const ENVELOPE_BY_EFFORT: Record<Effort, { turnCap: number; wallClockS: number }
   xhigh: { turnCap: 100, wallClockS: 3600 },
   // ultracode plans + runs a workflow per substantive task on top of xhigh reasoning — a wider
   // SOFT estimate than xhigh, still never a hard kill (only worker_hard_cap_s is).
-  ultracode: { turnCap: 150, wallClockS: 5400 },
+  ultracode: { turnCap: 160, wallClockS: 7200 },
 };
 
 /** Max chars of fallback assistant text used as a summary. */
@@ -350,6 +352,11 @@ export function writeWorkerMeta(
   /** `<beckettDir>/worker-browser` when the shared worker browser home is enabled, else null. */
   sharedBrowserHome: string | null,
   settingsExtra?: Record<string, unknown>,
+  /**
+   * v7 (optional, absent ⇒ byte-identical hook table to pre-v7): extra hooks to register beyond
+   * the scope guard + runtime awareness — the run supervisor passes the spec-gate Stop hook here.
+   */
+  extraHooks?: HookSpec[],
 ): { doneSchemaPath: string; settingsPath: string; mcpConfigPath: string } {
   const metaDir = join(repoRoot, SCAFFOLDING_DIR);
   mkdirSync(metaDir, { recursive: true });
@@ -358,6 +365,7 @@ export function writeWorkerMeta(
   // Runtime awareness (PostToolUse): only registered when enabled — 0 means no hook at all,
   // so a disabled install pays zero subprocess overhead per tool call.
   if (slowToolMs > 0) hookSpecs.push(runtimeAwarenessSpec(runtimeAwarenessPath, slowToolMs));
+  if (extraHooks?.length) hookSpecs.push(...extraHooks);
   const settingsPath = join(metaDir, "worker-settings.json");
   writeFileSync(
     settingsPath,
@@ -559,6 +567,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<TicketWorkerHa
         ? join(buildPaths(config).beckettDir, "worker-browser")
         : null,
       settingsExtra,
+      args.extraHooks,
     );
 
     // Environment bootstrap: a spawn-time workspace snapshot appended to implement/rework (and

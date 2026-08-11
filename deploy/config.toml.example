@@ -30,9 +30,6 @@ reviewer = "claude-sonnet-5"
 fallback_order = ["claude"]
 
 [harness.claude]
-# Prod: point this at the user-native install (e.g. "/home/beckett/.local/bin/claude") whenever
-# /usr/bin/claude (first on PATH) is a pinned wrapper — an older wrapper build can silently lack
-# newer flags (e.g. --name for cross-session messaging) that the daemon's own claude relies on.
 bin = "claude"
 default_model = "claude-sonnet-5"
 default_effort = "high"
@@ -75,6 +72,11 @@ enabled = true
 poll_secs = 5
 default_board = "ops"
 boards = ["ops", "int", "vid", "vidpip"]
+
+[runs]
+max_live = 3
+review_cycles_max = 2
+budget_usd_per_run = 0
 
 [github]
 poll_secs = 60

@@ -2017,6 +2017,11 @@ poll_secs = 5
 default_board = "ops"
 boards = ["ops", "int", "vid", "vidpip"]
 
+[runs]
+max_live = 3
+review_cycles_max = 2
+budget_usd_per_run = 0
+
 [github]
 poll_secs = 60
 

@@ -3148,6 +3148,17 @@ export class Concierge {
     return renderProposalsBlock(buildPaths(this.config).proposalsDir);
   }
 
+  /**
+   * Register one more control-bus capability after construction (v7). The daemon builds the
+   * {@link RunSupervisor} AFTER the concierge (it needs the progress sink), so the run verbs
+   * — `run.deploy`, `run.steer` — cannot be declared in {@link buildBusCapabilities}. This is
+   * the same post-construction wiring shape as {@link setDispatcherOps}, expressed on the bus
+   * registry instead of a field. Duplicate ids/commands still fail loudly in the registry.
+   */
+  registerBusCapability(capability: Capability): void {
+    this.busRegistry.register(capability);
+  }
+
   /** Wire the instant-tick hook for freshly-filed tickets (v4-main, issue #33). See {@link ticketFiledListener}. */
   setTicketFiledListener(fn: NonNullable<Concierge["ticketFiledListener"]>): void {
     this.ticketFiledListener = fn;
