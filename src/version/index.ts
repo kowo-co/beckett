@@ -60,9 +60,11 @@ export function writeVersion(newVersion: string, repoRoot: string = defaultRepoR
   }
   const path = packageJsonPath(repoRoot);
   const raw = readFileSync(path, "utf8");
-  const versionField = /("version"\s*:\s*")(\d+\.\d+\.\d+)(")/;
+  // Match the full version token — MAJOR.MINOR.PATCH plus any pre-release / build metadata tail —
+  // so a prerelease value like "7.0.0-rc.1" is replaced in full rather than left dangling.
+  const versionField = /("version"\s*:\s*")(\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)(")/;
   if (!versionField.test(raw)) {
-    throw new Error("could not locate a version field to update in package.json");
+    throw new Error('could not find a "version" field with a valid semver value in package.json');
   }
   const replaced = raw.replace(versionField, `$1${next}$3`);
   writeFileSync(path, replaced);

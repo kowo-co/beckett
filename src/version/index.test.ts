@@ -77,6 +77,48 @@ describe("readVersion / writeVersion (source of truth)", () => {
     writeFileSync(join(dir, "package.json"), `{\n  "version": "1.0.0"\n}\n`);
     expect(() => writeVersion("banana", dir)).toThrow();
   });
+
+  test("prerelease current version -> another prerelease succeeds, formatting preserved", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beckett-ver-"));
+    const original = `{\n  "name": "x",\n  "version": "7.0.0-rc.1",\n  "type": "module"\n}\n`;
+    writeFileSync(join(dir, "package.json"), original);
+    expect(readVersion(dir)).toBe("7.0.0-rc.1");
+    expect(writeVersion("7.0.0-rc.2", dir)).toBe("7.0.0-rc.2");
+    expect(readVersion(dir)).toBe("7.0.0-rc.2");
+    expect(readFileSync(join(dir, "package.json"), "utf8")).toBe(
+      `{\n  "name": "x",\n  "version": "7.0.0-rc.2",\n  "type": "module"\n}\n`,
+    );
+  });
+
+  test("prerelease current version -> release version succeeds, formatting preserved", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beckett-ver-"));
+    const original = `{\n  "name": "x",\n  "version": "7.0.0-rc.1",\n  "type": "module"\n}\n`;
+    writeFileSync(join(dir, "package.json"), original);
+    expect(writeVersion("7.0.0", dir)).toBe("7.0.0");
+    expect(readVersion(dir)).toBe("7.0.0");
+    expect(readFileSync(join(dir, "package.json"), "utf8")).toBe(
+      `{\n  "name": "x",\n  "version": "7.0.0",\n  "type": "module"\n}\n`,
+    );
+  });
+
+  test("writing an earlier prerelease than the current prerelease is refused as a downgrade", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beckett-ver-"));
+    const original = `{\n  "name": "x",\n  "version": "7.0.0-rc.2",\n  "type": "module"\n}\n`;
+    writeFileSync(join(dir, "package.json"), original);
+    expect(() => writeVersion("7.0.0-rc.1", dir)).toThrow(/refusing to write/);
+    // A rejected write is byte-for-byte non-destructive.
+    expect(readFileSync(join(dir, "package.json"), "utf8")).toBe(original);
+  });
+
+  test("release current version -> release version still succeeds (no regression)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beckett-ver-"));
+    const original = `{\n  "name": "x",\n  "version": "7.0.0",\n  "type": "module"\n}\n`;
+    writeFileSync(join(dir, "package.json"), original);
+    expect(writeVersion("7.0.1", dir)).toBe("7.0.1");
+    expect(readFileSync(join(dir, "package.json"), "utf8")).toBe(
+      `{\n  "name": "x",\n  "version": "7.0.1",\n  "type": "module"\n}\n`,
+    );
+  });
 });
 
 describe("cutChangelog (fold the Unreleased cut into the version bump — issue #147)", () => {
