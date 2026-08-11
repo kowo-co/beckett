@@ -198,6 +198,12 @@ export interface SpawnWorkerArgs {
    */
   stages?: StageView;
   logger?: Logger;
+  /**
+   * Extra top-level `--settings` keys merged on top of the driver's own (`crossSessionInbound:
+   * "accept"` is always added regardless — see {@link writeWorkerMeta}). Absent for every stage
+   * today; a future caller (e.g. an ultracode run) can request `workflowSizeGuideline` etc.
+   */
+  settingsExtra?: Record<string, unknown>;
 }
 
 // =======================================================================================
@@ -232,6 +238,9 @@ const ENVELOPE_BY_EFFORT: Record<Effort, { turnCap: number; wallClockS: number }
   medium: { turnCap: 30, wallClockS: 1200 },
   high: { turnCap: 60, wallClockS: 2400 },
   xhigh: { turnCap: 100, wallClockS: 3600 },
+  // ultracode plans + runs a workflow per substantive task on top of xhigh reasoning — a wider
+  // SOFT estimate than xhigh, still never a hard kill (only worker_hard_cap_s is).
+  ultracode: { turnCap: 150, wallClockS: 5400 },
 };
 
 /** Max chars of fallback assistant text used as a summary. */
@@ -320,6 +329,11 @@ export function workerMcpServerConfig(options: {
  * boundary is the repo root, so the worker may edit the whole repo but nothing outside it. Also
  * delivers the runtime-awareness PostToolUse hook (when enabled), which notices slow tool calls
  * back into the worker's own context.
+ *
+ * Every worker also gets `crossSessionInbound: "accept"` (cross-session messaging, Claude Code
+ * ≥2.1.224): without it a bypassPermissions `-p` worker HOLDS an inbound SendMessage rather than
+ * receiving it, so the concierge could never reach a live worker for a status check. `settingsExtra`
+ * (caller-supplied, e.g. a future ultracode run's `workflowSizeGuideline`) merges on top.
  */
 export function writeWorkerMeta(
   repoRoot: string,
@@ -329,6 +343,7 @@ export function writeWorkerMeta(
   slowToolMs: number,
   /** `<beckettDir>/worker-browser` when the shared worker browser home is enabled, else null. */
   sharedBrowserHome: string | null,
+  settingsExtra?: Record<string, unknown>,
 ): { doneSchemaPath: string; settingsPath: string; mcpConfigPath: string } {
   const metaDir = join(repoRoot, SCAFFOLDING_DIR);
   mkdirSync(metaDir, { recursive: true });
@@ -338,7 +353,14 @@ export function writeWorkerMeta(
   // so a disabled install pays zero subprocess overhead per tool call.
   if (slowToolMs > 0) hookSpecs.push(runtimeAwarenessSpec(runtimeAwarenessPath, slowToolMs));
   const settingsPath = join(metaDir, "worker-settings.json");
-  writeFileSync(settingsPath, JSON.stringify(renderClaudeSettings(hookSpecs), null, 2));
+  writeFileSync(
+    settingsPath,
+    JSON.stringify(
+      renderClaudeSettings(hookSpecs, { crossSessionInbound: "accept", ...settingsExtra }),
+      null,
+      2,
+    ),
+  );
 
   const doneSchemaPath = join(metaDir, "done-schema.json");
   writeFileSync(doneSchemaPath, JSON.stringify(DONE_SCHEMA, null, 2));
@@ -396,8 +418,21 @@ function summaryFrom(structured: unknown | null, lastAssistantText: string): str
  * Exported under both names: `spawnWorker` (task spec) and `spawnTicketWorker` (specs/_legacy-v3/V3.md §6).
  */
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<TicketWorkerHandle> {
-  const { ticket, stage, harness, config, repoRoot, workspace, branch, baseRef, resumeSessionId, onProgress, steering, reviewDiff } =
-    args;
+  const {
+    ticket,
+    stage,
+    harness,
+    config,
+    repoRoot,
+    workspace,
+    branch,
+    baseRef,
+    resumeSessionId,
+    onProgress,
+    steering,
+    reviewDiff,
+    settingsExtra,
+  } = args;
   // v6 Phase 5: stage resolution rides the SAME registry view that staffed this ticket.
   const stages = args.stages ?? stageRegistry;
   const logger = (args.logger ?? log.child("dispatch.spawn")).child(`ticket.${ticket.identifier}`);
@@ -516,6 +551,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<TicketWorkerHa
       config.supervise.worker_browser_shared_home
         ? join(buildPaths(config).beckettDir, "worker-browser")
         : null,
+      settingsExtra,
     );
 
     // Environment bootstrap: a spawn-time workspace snapshot appended to implement/rework (and
@@ -543,6 +579,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<TicketWorkerHa
       doneSchemaPath,
       settingsPath,
       mcpConfigPath,
+      settingsExtra,
     };
 
     const spawnResult = await driver.spawn(spec);

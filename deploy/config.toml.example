@@ -30,6 +30,9 @@ reviewer = "claude-sonnet-5"
 fallback_order = ["claude"]
 
 [harness.claude]
+# Prod: point this at the user-native install (e.g. "/home/beckett/.local/bin/claude") whenever
+# /usr/bin/claude (first on PATH) is a pinned wrapper — an older wrapper build can silently lack
+# newer flags (e.g. --name for cross-session messaging) that the daemon's own claude relies on.
 bin = "claude"
 default_model = "claude-sonnet-5"
 default_effort = "high"

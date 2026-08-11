@@ -40,8 +40,12 @@ export type Harness = "claude" | "codex" | "pi" | (string & {});
 /** Which concrete driver runs a harness process (Spec 02 §2). */
 export type DriverKind = "claude-cli-stream" | "codex-exec-oneshot" | "pi-cli-stream";
 
-/** Reasoning depth; mapped per-harness at spawn (Spec 02 §9.1). */
-export type Effort = "low" | "medium" | "high" | "xhigh";
+/**
+ * Reasoning depth; mapped per-harness at spawn (Spec 02 §9.1). `ultracode` (claude 2.1.203+,
+ * `--effort ultracode`) combines xhigh reasoning with automatic workflow orchestration — only
+ * claude honors it; other drivers treat it like any other configured effort string.
+ */
+export type Effort = "low" | "medium" | "high" | "xhigh" | "ultracode";
 
 /** Worker runtime lifecycle (Spec 02 §2, §10.1). `done` is set by GATE, not the driver. */
 export type WorkerState =
@@ -1204,6 +1208,20 @@ export interface SpawnSpec {
   // worker runs IN the project checkout (no worktree) so we never clobber the project's own
   // .claude/settings.json — claude layers --settings on top rather than replacing it.
   settingsPath?: string;
+  /**
+   * Cross-session address (claude `--name`, ≥2.1.224): lets the concierge and other live sessions
+   * message this worker by name (ListAgents/SendMessage). Unset = the harness's auto-name (cwd
+   * folder). Omitted entirely (never passed as an empty flag) when the installed claude binary
+   * doesn't advertise `--name` support (see {@link ClaudeDriver}'s cached `--help` probe).
+   */
+  sessionName?: string;
+  /**
+   * Extra top-level keys merged into the worker's `--settings` JSON on top of the driver's own
+   * (e.g. `crossSessionInbound: "accept"`) — an escape hatch for callers (ultracode's
+   * `workflowSizeGuideline`, future run-scoped knobs). Must not contain `hooks` (see
+   * {@link renderClaudeSettings}); `writeWorkerMeta`/`renderClaudeSettings` ignore that key if present.
+   */
+  settingsExtra?: Record<string, unknown>;
 }
 
 export interface SpawnResult {

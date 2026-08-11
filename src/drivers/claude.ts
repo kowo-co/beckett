@@ -86,6 +86,18 @@ interface PendingNudge {
  */
 const PREFLIGHT_BUDGETS_MS = [30_000, 60_000] as const;
 
+/** Escalating budgets for the (much cheaper) `--help` flag-support probe below. */
+const HELP_PROBE_BUDGETS_MS = [10_000, 20_000] as const;
+
+/**
+ * Cached "does this installed claude binary advertise `--name`?" probe, keyed by bin path
+ * (Claude Code ≥2.1.224). Computed once per bin — like the version preflight — since a binary's
+ * flag surface can't change between spawns of the same install. Falls open: an unreadable/timed-
+ * out/erroring probe reads as unsupported so a stale install never fails a spawn over a missing
+ * flag; the warn is logged once (on the cache-filling call), not once per spawn.
+ */
+const nameFlagSupportCache = new Map<string, boolean>();
+
 /**
  * Static "is claude usable right now?" check (issue #17): binary resolves and reports a version
  * (catches PATH/node drift), and the subscription login artifact exists. Linux keeps credentials
@@ -344,6 +356,28 @@ export class ClaudeDriver extends BaseDriver implements HarnessDriver {
     return mode && mode.trim().length > 0 ? mode : DEFAULT_PERMISSION_MODE;
   }
 
+  /**
+   * Probe (and cache) whether the configured claude binary supports `--name` — checked lazily,
+   * only when a caller actually asked for one (`spec.sessionName` set), so a fleet that never
+   * uses cross-session addressing pays zero extra subprocess cost.
+   */
+  private supportsNameFlag(): boolean {
+    const bin = this.binName();
+    const cached = nameFlagSupportCache.get(bin);
+    if (cached !== undefined) return cached;
+
+    const r = probeCommand([bin, "--help"], childEnv(), { budgets: HELP_PROBE_BUDGETS_MS });
+    const supported = r.ok && /--name\b/.test(r.stdout);
+    nameFlagSupportCache.set(bin, supported);
+    if (!supported) {
+      this.log.warn(
+        "claude binary does not advertise --name in --help — omitting session name (cross-session addressing unavailable)",
+        { bin, timedOut: r.timedOut, exitCode: r.exitCode },
+      );
+    }
+    return supported;
+  }
+
   private buildArgs(mode: { kind: "spawn" | "resume"; sessionId: string }): string[] {
     const spec = this.spec!;
     const args: string[] = [
@@ -366,6 +400,13 @@ export class ClaudeDriver extends BaseDriver implements HarnessDriver {
 
     if (mode.kind === "spawn") args.push("--session-id", mode.sessionId);
     else args.push("--resume", mode.sessionId);
+
+    // Cross-session address (Claude Code ≥2.1.224): lets the concierge/other live sessions
+    // ListAgents/SendMessage this worker by name. Verified against the installed binary's own
+    // --help (cached) so an older claude on PATH never sees an unsupported flag and dies at spawn.
+    if (spec.sessionName && spec.sessionName.trim().length > 0 && this.supportsNameFlag()) {
+      args.push("--name", spec.sessionName);
+    }
 
     if (spec.systemAppend && spec.systemAppend.trim().length > 0) {
       args.push("--append-system-prompt", spec.systemAppend);
