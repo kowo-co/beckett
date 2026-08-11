@@ -70,6 +70,12 @@ const HarnessSpecSchema: z.ZodType<HarnessSpec> = z.object({
   model: z.string().min(1).optional(),
   effort: z.enum(["low", "medium", "high", "xhigh", "ultracode"]).optional(),
   reviewTier: z.enum(["self", "fresh"]).optional(),
+}).refine((spec) => spec.effort !== "ultracode" || spec.harness === "claude", {
+  // "ultracode" is claude-only (2.1.203+, tracker/types.ts) — codex/pi don't implement it; without
+  // this the fail-fast a plain effort enum used to give at parse time is lost, and an "ultracode"
+  // cast on another harness only fails opaquely at harness runtime (codex.ts writes
+  // model_reasoning_effort="ultracode"; pi.ts passes --thinking ultracode).
+  message: `effort "ultracode" is claude-only — cast harness "claude", not another harness`,
 });
 
 /** A casting object is a map of stage-name → HarnessSpec (implement/review + open-ended). */

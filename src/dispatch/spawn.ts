@@ -204,6 +204,12 @@ export interface SpawnWorkerArgs {
    * today; a future caller (e.g. an ultracode run) can request `workflowSizeGuideline` etc.
    */
   settingsExtra?: Record<string, unknown>;
+  /**
+   * Cross-session address (claude `--name`, ≥2.1.224): threaded straight through to the built
+   * {@link SpawnSpec} so the concierge/other live sessions can SendMessage this worker by name.
+   * Unset = the harness's auto-name. No supervisor naming policy lives here — the caller decides.
+   */
+  sessionName?: string;
 }
 
 // =======================================================================================
@@ -432,6 +438,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<TicketWorkerHa
     steering,
     reviewDiff,
     settingsExtra,
+    sessionName,
   } = args;
   // v6 Phase 5: stage resolution rides the SAME registry view that staffed this ticket.
   const stages = args.stages ?? stageRegistry;
@@ -580,6 +587,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<TicketWorkerHa
       settingsPath,
       mcpConfigPath,
       settingsExtra,
+      sessionName,
     };
 
     const spawnResult = await driver.spawn(spec);
