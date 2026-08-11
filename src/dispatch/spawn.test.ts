@@ -134,4 +134,36 @@ describe("writeWorkerMeta", () => {
     });
     expect(existsSync(sharedHome)).toBe(false);
   });
+
+  // W2A: every worker's --settings carries crossSessionInbound so a live worker can be
+  // ListAgents/SendMessage'd by the concierge (or another session) instead of holding the message.
+  test("worker-settings.json always carries crossSessionInbound: accept", () => {
+    const repoRoot = tempDir("bw-meta-repo-cross-session-");
+
+    const { settingsPath } = writeWorkerMeta(repoRoot, join(repoRoot, "guard.ts"), [], join(repoRoot, "awareness.ts"), 0, null);
+
+    const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+    expect(settings.crossSessionInbound).toBe("accept");
+    expect(settings.hooks.PreToolUse).toBeDefined(); // scope-guard hook still rendered
+  });
+
+  test("settingsExtra merges on top of crossSessionInbound, and a smuggled 'hooks' key never wins", () => {
+    const repoRoot = tempDir("bw-meta-repo-settings-extra-");
+
+    const { settingsPath } = writeWorkerMeta(
+      repoRoot,
+      join(repoRoot, "guard.ts"),
+      [],
+      join(repoRoot, "awareness.ts"),
+      0,
+      null,
+      { workflowSizeGuideline: "large", hooks: "should never appear" },
+    );
+
+    const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+    expect(settings.crossSessionInbound).toBe("accept");
+    expect(settings.workflowSizeGuideline).toBe("large");
+    expect(settings.hooks).not.toBe("should never appear");
+    expect(settings.hooks.PreToolUse).toBeDefined();
+  });
 });

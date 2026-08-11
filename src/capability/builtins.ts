@@ -71,6 +71,7 @@ const CLAUDE_DRIVER_OWNED_FLAGS = new Set([
   "--settings",
   "--json-schema",
   "--max-turns",
+  "--name",
 ]);
 
 const HarnessConfigSchema = z
@@ -92,7 +93,9 @@ const HarnessConfigSchema = z
         // claude 2.1.197). Sonnet 5 @ high is the worker default — the doctrine caps Sonnet at
         // high (a task that wants xhigh belongs on Opus 5). A ticket may cast a different
         // effort per stage. Honored by ClaudeDriver.buildArgs + dispatch/spawn#buildEnvelope.
-        default_effort: z.enum(["low", "medium", "high", "xhigh"]).default("high"),
+        // `ultracode` (claude 2.1.203+) is claude-only — automatic workflow orchestration on top
+        // of xhigh reasoning; the default stays "high" (a task that wants it belongs on a cast).
+        default_effort: z.enum(["low", "medium", "high", "xhigh", "ultracode"]).default("high"),
         // v0 seed: bounded by the worktree + PreToolUse scope hook, so the worker runs
         // autonomously without per-edit prompts (Spec 12 §1.7; Spec 02 §8). Honored by
         // ClaudeDriver.buildArgs.

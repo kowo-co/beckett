@@ -21,14 +21,25 @@ export interface HookSpec {
 /** The claude settings shape written to `<workspace>/.claude/settings.json`. */
 export interface ClaudeHookSettings {
   hooks: Record<string, { matcher?: string; hooks: { type: "command"; command: string }[] }[]>;
+  /** Top-level keys merged in from `extraSettings` (e.g. `crossSessionInbound`). */
+  [key: string]: unknown;
 }
 
 /**
  * Render a list of {@link HookSpec}s into the claude settings object. Specs sharing the
  * same event + matcher are collapsed into one entry (claude de-dupes by matcher, but being
  * explicit avoids surprises). Order within an event is preserved.
+ *
+ * `extraSettings` (optional) is merged in at the TOP LEVEL alongside `hooks` — e.g.
+ * `{"crossSessionInbound": "accept"}` so an unattended `-p` worker/session can take cross-session
+ * messages (Claude Code ≥2.1.224) instead of holding or dropping them. It must not carry a
+ * `hooks` key of its own — the rendered hook table always wins, so a `hooks` key in
+ * `extraSettings` is dropped rather than silently clobbering the real one.
  */
-export function renderClaudeSettings(specs: HookSpec[]): ClaudeHookSettings {
+export function renderClaudeSettings(
+  specs: HookSpec[],
+  extraSettings?: Record<string, unknown>,
+): ClaudeHookSettings {
   const byEvent = new Map<string, { matcher?: string; hooks: { type: "command"; command: string }[] }[]>();
 
   for (const spec of specs) {
@@ -48,7 +59,9 @@ export function renderClaudeSettings(specs: HookSpec[]): ClaudeHookSettings {
     }
   }
 
-  return { hooks: Object.fromEntries(byEvent) };
+  // extraSettings first so the real `hooks` key (added last) always wins over a same-named key.
+  const { hooks: _ignoredHooksKey, ...safeExtra } = extraSettings ?? {};
+  return { ...safeExtra, hooks: Object.fromEntries(byEvent) };
 }
 
 /**

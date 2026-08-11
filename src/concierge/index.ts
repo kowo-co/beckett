@@ -41,6 +41,8 @@ import { resolveGitHubOwner } from "../github/owner.ts";
 import { log as rootLog } from "../log.ts";
 import { loadConfig } from "../config.ts";
 import { buildPaths } from "../paths.ts";
+import { renderClaudeSettings } from "../hooks/registry.ts";
+import { supportsNameFlag } from "../drivers/claude.ts";
 import { DispatchDigestFeed } from "../dispatch/digest-feed.ts";
 import type { DispatchEvent } from "../dispatch/events.ts";
 import { serveBus, type BusRequest, type BusResponse } from "../shell/control-bus.ts";
@@ -409,6 +411,12 @@ export function branchCardReference(content: string): string | null {
 const DEFAULT_ROTATE_AT_TOKENS = 160_000;
 /** Safety fallback for a channel that never becomes idle; still rotate only after releasing its gate slot. */
 const FORCED_ROTATE_AT_TOKENS = 190_000;
+
+/**
+ * Cross-session address every ConciergeSession pool scope launches under (Claude Code ≥2.1.224,
+ * `--name`) — the fixed name a live worker's SendMessage targets for a status question.
+ */
+const CONCIERGE_SESSION_NAME = "beckett-concierge";
 
 /** Small, fast seat for a best-effort handoff; never spend an Opus chat turn on bookkeeping. */
 const HANDOFF_MODEL = "claude-haiku-4-5";
@@ -1658,6 +1666,17 @@ export class ConciergeSession {
       "--model",
       this.model,
     ];
+    // Cross-session address (Claude Code ≥2.1.224): lets a live worker (or another concierge
+    // scope) reach the chat seat via SendMessage for status questions (ctx-docs.md). Fixed name
+    // — every ConciergeSession pool scope answers to it, mirroring the worker driver's --name.
+    // Gated on the SAME cached --help probe the worker driver uses (issue #54's KILL-vs-FAIL
+    // distinction applies here too): on a claude binary older than 2.1.224 (e.g. a pinned
+    // /usr/bin/claude wrapper — see deploy/config.toml.example), an unconditional --name/--settings
+    // would exit immediately on the unknown flag and crash-loop the whole chat lane. Fail open —
+    // same as the worker driver — never fail closed over a missing flag.
+    if (supportsNameFlag(this.config.harness.claude.bin, this.log)) {
+      args.push("--name", CONCIERGE_SESSION_NAME, "--settings", this.conciergeSettingsPath());
+    }
     // Reasoning effort for the chat seat (issue #25) — a config knob; empty = CLI default.
     const effort = this.config.concierge.effort?.trim();
     if (effort) args.push("--effort", effort);
@@ -1674,6 +1693,32 @@ export class ConciergeSession {
       if (!args.includes(f)) args.push(f);
     }
     return args;
+  }
+
+  /**
+   * Render `<beckettDir>/concierge-settings.json` fresh at each launch — `{"crossSessionInbound":
+   * "accept"}`, no hooks (the concierge is MCP-free and hook-free by design). Without this an
+   * unattended bypassPermissions session HOLDS an inbound SendMessage instead of accepting it, so
+   * a worker's status question would never land (ctx-docs.md §Cross-session messaging).
+   */
+  private conciergeSettingsPath(): string {
+    const beckettDir = buildPaths(this.config).beckettDir;
+    const path = join(beckettDir, "concierge-settings.json");
+    mkdirSync(beckettDir, { recursive: true });
+    // tmp+rename (not a bare writeFileSync): up to 6 pool sessions plus SYSTEM_SCOPE can launch
+    // concurrently against this ONE shared path, and a bare truncating write leaves a window where
+    // another session's claude child reads a partial/empty file and dies on invalid JSON. rename()
+    // is atomic, so every reader always sees either the old or the new complete content.
+    const content = JSON.stringify(renderClaudeSettings([], { crossSessionInbound: "accept" }), null, 2);
+    const temp = `${path}.${process.pid}.tmp`;
+    try {
+      writeFileSync(temp, content);
+      renameSync(temp, path);
+    } catch (error) {
+      try { unlinkSync(temp); } catch { /* absent */ }
+      throw error;
+    }
+    return path;
   }
 
   private childEnv(): Record<string, string | undefined> {
