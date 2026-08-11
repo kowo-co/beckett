@@ -68,8 +68,8 @@ function applyDrainRule(event: DispatchEvent): DispatchEvent {
 
 const events: DispatchEvent[] = rows.map(([offset, stage, outcome, message, error]) => ({
   ts: new Date(t0 + offset * 1000).toISOString(),
-  ticketId: "ticket-21",
-  ticketRef: "#2.1",
+  runId: "ticket-21",
+  runRef: "#2.1",
   branchRef: "beckett/task-2-1",
   stage,
   outcome,

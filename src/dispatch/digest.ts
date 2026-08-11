@@ -2,7 +2,7 @@
  * The human digest of the dispatch event feed (#4).
  *
  * `formatDispatchEvent` (./events.ts) renders one machine row — marker, UTC clock, internal stage
- * name, outcome word, elapsed, raw detail. That shape is right for `beckett ticket trace`, where a
+ * name, outcome word, elapsed, raw detail. That shape is right for `beckett task trace`, where a
  * person has asked for the forensic timeline. It was wrong for the channel, where those rows arrived
  * as a wall of `✗ 04:56:31 · #2.1 · implement · FAILED · 22m 4s 🚨 ALERT — <the worker's opening
  * narration>`: a restart-killed worker dressed as a failure, no-op `in_review → in_review`
@@ -13,7 +13,7 @@
  * single message the caller edits in place, and drops replays. Two rules it never bends:
  *   - only a genuine failure is marked as one, and it carries the real error text;
  *   - nothing here ever renders the raw trace line — the full detail lives behind
- *     `beckett ticket trace "<ref>"`, which every digest names.
+ *     `beckett task trace "<ref>"`, which every digest names.
  *
  * It is deliberately pure: no Discord, no clock beyond an injectable `now`. {@link
  * ../dispatch/digest-feed.ts DispatchDigestFeed} owns the post/edit mechanics.
@@ -124,7 +124,7 @@ export class DispatchDigest {
     const note = describeDispatchEvent(event);
     if (!note) return null;
     const now = this.now();
-    const key = event.ticketId || event.ticketRef;
+    const key = event.runId || event.runRef;
     this.prune(now);
 
     // Replay suppression. A restart replays the same staff/repo/worktree batch, and the poller can
@@ -145,7 +145,7 @@ export class DispatchDigest {
     const fresh = stale || !!note.alert;
     const session: DigestSession = fresh
       ? {
-          ref: event.ticketRef || key,
+          ref: event.runRef || key,
           lines: stale ? [] : prior!.lines.slice(-2),
           startedAt: stale ? ts : prior!.startedAt,
           lastAt: now,
@@ -154,7 +154,7 @@ export class DispatchDigest {
         }
       : prior!;
 
-    session.ref = event.ticketRef || session.ref;
+    session.ref = event.runRef || session.ref;
     session.lastAt = now;
     session.lines.push({ at: ts, text: `${note.alert ? "⚠️ " : ""}${note.text}` });
     if (note.closes) session.closed = true;
@@ -170,7 +170,7 @@ export class DispatchDigest {
       lines = lines.slice(-this.maxLines);
       session.lines = lines;
     }
-    const trace = `_full detail: \`beckett ticket trace "${session.ref}"\`_`;
+    const trace = `_full detail: \`beckett task trace "${session.ref}"\`_`;
     const build = () =>
       [
         `**${session.ref}** · since ${this.time(session.startedAt)}`,

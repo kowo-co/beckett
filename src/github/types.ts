@@ -5,7 +5,7 @@
  * PR and went blind to review comments, CI, and the eventual merge. This module gives it eyes.
  * The {@link GitHubPrPoller} watches the PRs Beckett opened on the kowo-co org and turns the
  * raw `gh pr view` reads below into a stream of MATERIAL {@link PrPollEvent}s — the same shape
- * the tracker poller uses to feed the Concierge (see `src/tracker/types.ts`).
+ * the run engine uses to feed the Concierge.
  *
  * Scope (v1): read-and-relay only. Nothing here replies to a review or merges a PR — those stay
  * a human handshake. Import style (whole repo, bun-native): explicit `.ts` extensions, ESM.
@@ -128,16 +128,17 @@ export interface GitHubBranchCardReader {
 }
 
 /**
- * The routing context stamped on every emitted event: enough to name the PR in voice AND to
- * route the update back to the channel that filed the originating ticket. A `channel` of
- * undefined means the poller found no origin channel — the Concierge drops the event silently.
+ * The routing context stamped on every emitted event: enough to name the PR in voice AND to route
+ * the update back to the channel the run was deployed from. A `channel` of undefined means the
+ * poller found no origin channel — the Concierge drops the event silently.
  */
 export interface PrRef {
   repo: string;
   number: number;
   url: string;
   title: string;
-  ticket?: string;
+  /** The run this PR carries, when it came from one. */
+  runId?: string;
   channel?: string;
 }
 

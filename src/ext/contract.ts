@@ -103,20 +103,23 @@ export interface ExtensionCapability {
  * One worker stage an extension contributes to the dispatcher's state machine. Deliberately a
  * STRUCTURAL marker — the same discipline as `Capability`'s `BusRequestLike` — so this contract
  * never imports dispatch-domain types: the real stage shape (`src/dispatch/stages.ts`'s
- * `StageDefinition`, carrying prompt builders, cast defaults, and finish/transition handlers)
- * structurally satisfies this, and dispatch-side consumers widen back to it through their own
- * stage view (`stageViewOf`). Stage names and entry states are GLOBAL namespaces across all
- * extensions (like capability ids); the registry refuses collisions loudly so no stage — and no
- * state→stage staffing — can silently shadow another.
+ * `StageDefinition`, carrying prompt builders and cast defaults) structurally satisfies this, and
+ * dispatch-side consumers widen back to it through their own stage view (`stageViewOf`). Stage
+ * names and entry states are GLOBAL namespaces across all extensions (like capability ids); the
+ * registry refuses collisions loudly so no stage — and no state→stage staffing — can silently
+ * shadow another.
  *
- * Stages are NOT discovery: they never appear in {@link ExtensionRegistry.catalog}. The
- * dispatcher staffs a stage when a ticket enters its state; the concierge never routes an
- * @mention to one.
+ * Stages are NOT discovery: they never appear in {@link ExtensionRegistry.catalog}. The run
+ * supervisor staffs a stage when a run enters its state; the concierge never routes an @mention
+ * to one.
  */
 export interface StageFacet {
   /** Unique stage name ("implement", "review"). The registry key. */
   readonly name: string;
-  /** Ticket state whose entry staffs this stage; absent for follow-on stages a finish handler spawns. */
+  /**
+   * Run state whose entry staffs this stage (a `RunState` — kept a bare `string` so `src/ext`
+   * stays free of run-domain types); absent for a stage only reachable by name.
+   */
   readonly entryState?: string;
 }
 
@@ -126,7 +129,7 @@ export interface StageFacet {
 
 /**
  * Provenance an extension may need to do its job, kept STRUCTURAL so the contract has zero
- * dependency on discord/tracker types (the same discipline as `Capability`'s `BusRequestLike`).
+ * dependency on discord/run-domain types (the same discipline as `Capability`'s `BusRequestLike`).
  */
 export interface InvocationOrigin {
   /** Which surface the call came from ("discord", "cli", "routine", "goal-ledger", …). */

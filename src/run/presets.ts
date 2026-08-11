@@ -1,30 +1,30 @@
 /**
- * Beckett — user-defined cast presets ("flows") (`src/tracker/presets.ts`)
+ * Beckett — user-defined cast presets ("flows") (`src/run/presets.ts`)
  * =======================================================================================
  * OPS-110. A preset is a USER-NAMED cast: pick, say, Fable as the reviewer and Sonnet 5 as the
- * implementer, name it whatever you like, and reuse it by name via `beckett ticket create
- * --preset <name>`. The whole point of the ticket is that presets live OUTSIDE the daemon source:
+ * implementer, name it whatever you like, and reuse it by name via `beckett preset
+ * show <name>` / a cast flag. The whole point is that presets live OUTSIDE the daemon source:
  *
  *   ~/.beckett/presets.json    { "<preset-name>": <cast-object>, ... }
  *
- * Editing or adding a preset is editing that file — it takes effect on the very next ticket with
+ * Editing or adding a preset is editing that file — it takes effect on the very next run with
  * ZERO rebuild and ZERO daemon restart, because {@link loadPresets} reads the file FRESH on every
- * `beckett ticket create` / `beckett plan` invocation (no in-process cache that a restart would be
- * needed to bust). The daemon that runs workers never reads this file; presets are pure sugar over
- * the existing `--cast` block, resolved at ticket-file time in the CLI.
+ * invocation (no in-process cache that a restart would be needed to bust). The daemon that runs
+ * workers never reads this file; presets are pure sugar over the existing `--cast` object, resolved
+ * at deploy time in the CLI.
  *
  * A `<cast-object>` is exactly the `--cast` shape ({@link Casting}) — `{ "implement": {...},
  * "review": {...} }` — and PARTIAL presets are allowed (e.g. only a `review` stage). Every preset's
  * cast is validated on load against the roster ({@link validateCasting}, the shared source of
  * truth): a blocked model (SOL / bare gpt-5.6) or a malformed harness/model/effort throws a clear
- * error naming the preset, so a broken cast is never silently filed.
+ * error naming the preset, so a broken cast is never silently deployed.
  *
  * Import style: explicit `.ts` extensions.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type { Casting } from "./types.ts";
+import type { Casting } from "./cast.ts";
 import { validateCasting } from "./cast.ts";
 
 /** name → cast-object. The on-disk shape of `presets.json`, and what {@link loadPresets} returns. */
@@ -65,8 +65,8 @@ function seedFileContents(): string {
 }
 
 /**
- * Read `presets.json` FRESH from disk and return the validated preset map. Called on every ticket
- * file — NO caching, so a just-saved edit takes effect on the next ticket with no restart.
+ * Read `presets.json` FRESH from disk and return the validated preset map. Called on every deploy —
+ * NO caching, so a just-saved edit takes effect on the next run with no restart.
  *
  * - Missing file → created, seeded with {@link SEED_PRESETS}, and that seed returned.
  * - Not valid JSON, or not a top-level object → throws with the path and the parse error.
@@ -130,7 +130,7 @@ export function requirePreset(presets: PresetMap, name: string): Casting {
 }
 
 /**
- * Resolve the final casting for a ticket from a preset + an explicit override. PRECEDENCE, per
+ * Resolve the final casting for a run from a preset + an explicit override. PRECEDENCE, per
  * stage: the explicit cast WINS for every stage it names (it replaces that stage's spec wholesale),
  * and the preset fills in the stages the explicit cast omits. So
  * `--preset fable-review+terra-work --cast '{"implement":{"harness":"pi","effort":"xhigh"}}'`

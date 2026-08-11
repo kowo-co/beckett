@@ -10,7 +10,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Config } from "../types.ts";
-import type { HarnessSpec } from "../tracker/types.ts";
+import type { HarnessSpec } from "./cast.ts";
 import { appendSpendRecord, type SpendRecord } from "../spend.ts";
 import type { DispatchEvent } from "../dispatch/events.ts";
 import type { RunGitOps } from "./supervisor.ts";
@@ -19,7 +19,7 @@ import type { Run } from "./types.ts";
 
 // ── controllable fake worker handle + spawn mock ────────────────────────────────────────────
 interface SpawnCall {
-  ticketId: string;
+  itemId: string;
   stage: string;
   harness: HarnessSpec;
   branch: string;
@@ -43,7 +43,7 @@ function makeHandle(args: any) {
   const h: any = {
     id: `wk_${++counter}`,
     workerId: `wk_${counter}`,
-    ticketId: args.ticket.id,
+    itemId: args.item.id,
     stage: args.stage,
     harness: args.harness.harness,
     workspace: args.workspace,
@@ -82,7 +82,7 @@ function makeHandle(args: any) {
 
 const fakeSpawn = async (args: any) => {
   spawnCalls.push({
-    ticketId: args.ticket.id,
+    itemId: args.item.id,
     stage: args.stage,
     harness: args.harness,
     branch: args.branch,
@@ -93,7 +93,7 @@ const fakeSpawn = async (args: any) => {
     resumeSessionId: args.resumeSessionId,
     steering: args.steering,
     reviewDiff: args.reviewDiff,
-    body: args.ticket.body,
+    body: args.item.body,
   });
   if (spawnThrows) throw spawnThrows;
   const h = makeHandle(args);
@@ -107,7 +107,6 @@ const realSpawnModule = await import("../dispatch/spawn.ts");
 mock.module("../dispatch/spawn.ts", () => ({
   ...realSpawnModule,
   spawnWorker: fakeSpawn,
-  spawnTicketWorker: fakeSpawn,
 }));
 
 const { RunSupervisor, runProjectSlug, runSpecReader } = await import("./supervisor.ts");
@@ -304,10 +303,10 @@ describe("admission", () => {
     const run = seedRun(store, makeRun());
     await supervisor.admit(run.id);
     await tick();
-    expect(events[0]).toMatchObject({ ticketId: run.id, stage: "run:deploy", outcome: "started", message: "queued" });
-    // Every event on this run's timeline is keyed by the run id, exactly like the ticket
-    // dispatcher's — cards/digests/telemetry need no run-specific handling to find it.
-    expect(events.every((e) => e.ticketId === run.id && e.ticketRef === run.id)).toBe(true);
+    expect(events[0]).toMatchObject({ runId: run.id, stage: "run:deploy", outcome: "started", message: "queued" });
+    // Every event on this run's timeline is keyed by the run id — cards, digests, and telemetry
+    // all find it with one key.
+    expect(events.every((e) => e.runId === run.id && e.runRef === run.id)).toBe(true);
   });
 
   test("claim-before-dispatch: a double admit produces exactly one spawn", async () => {
@@ -369,19 +368,19 @@ describe("admission", () => {
     await tick();
     await supervisor.admit(b.id);
     await tick();
-    expect(spawnCalls.map((c) => c.ticketId)).toEqual([a.id]);
+    expect(spawnCalls.map((c) => c.itemId)).toEqual([a.id]);
 
     // A's own next stage takes the freed slot first — b is still queued behind the cap.
     created[0]!.finish("success", "done", doneSignal("complete"));
     await settle();
-    expect(spawnCalls.map((c) => c.ticketId)).toEqual([a.id, a.id]);
+    expect(spawnCalls.map((c) => c.itemId)).toEqual([a.id, a.id]);
     expect(spawnCalls[1]!.stage).toBe("review");
 
     // Once a is genuinely finished, the queue pumps and b starts.
     created[1]!.finish("success", "pass", doneSignal("complete"));
     await settle();
     expect(store.get(a.id)!.state).toBe("done");
-    expect(spawnCalls.map((c) => c.ticketId)).toContain(b.id);
+    expect(spawnCalls.map((c) => c.itemId)).toContain(b.id);
   });
 });
 
@@ -482,7 +481,7 @@ describe("stage flow", () => {
     expect(store.get(run.id)!.state).toBe("publishing");
     const rows = readFileSync(outbox, "utf8").trim().split("\n").map((l) => JSON.parse(l));
     expect(rows).toHaveLength(1);
-    expect(rows[0].ticket.id).toBe(run.id);
+    expect(rows[0].item.id).toBe(run.id);
     expect(rows[0].purpose).toBe("done");
   });
 
@@ -557,7 +556,7 @@ describe("stage flow", () => {
       outbox,
       `${JSON.stringify({
         id: "op-1",
-        ticket: { id: run.id, identifier: run.id },
+        item: { id: run.id, identifier: run.id },
         slug: "gateway",
         repoRoot: join(dir, "wt"),
         messagePrefix: "Review passed → **done**.",
@@ -876,6 +875,135 @@ describe("ultracode", () => {
   });
 });
 
+// The review GATE (`cast.ts#HarnessSpec.reviewTier`), ported from the dispatcher. `self` is what
+// `--preset taste-lane` and the cheap lanes are FOR: one pass, no second adversarial seat.
+describe("review tier", () => {
+  test("an explicit self tier publishes straight off implement — no reviewer is ever spawned", async () => {
+    const { supervisor, store, publishCalls } = newSupervisor({ publish: true });
+    const run = seedRun(
+      store,
+      makeRun({ cast: { implement: { harness: "claude", model: "claude-opus-5", effort: "high", reviewTier: "self" } } }),
+    );
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    await settle();
+    expect(spawnCalls.map((c) => c.stage)).toEqual(["implement"]);
+    expect(store.get(run.id)!.state).toBe("done");
+    expect(publishCalls).toHaveLength(1);
+  });
+
+  test("a low/medium implement effort derives self; high and an un-cast run stay fresh", async () => {
+    for (const [effort, expected] of [["low", ["implement"]], ["medium", ["implement"]], ["high", ["implement", "review"]]] as const) {
+      spawnCalls = [];
+      created = [];
+      const { supervisor, store } = newSupervisor({ publish: true });
+      const run = seedRun(store, makeRun({ slug: `tier-${effort}`, cast: { implement: { harness: "pi", effort } } }));
+      await supervisor.admit(run.id);
+      await tick();
+      created[0]!.finish("success", "implemented", doneSignal("complete"));
+      await settle();
+      expect(spawnCalls.map((c) => c.stage)).toEqual([...expected]);
+    }
+
+    spawnCalls = [];
+    created = [];
+    const { supervisor, store } = newSupervisor({ publish: true });
+    const plain = seedRun(store, makeRun({ slug: "tier-none" }));
+    await supervisor.admit(plain.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    await settle();
+    expect(spawnCalls.map((c) => c.stage)).toEqual(["implement", "review"]);
+  });
+
+  test("the spend ledger records the tier the run ACTUALLY ran under, not a constant", async () => {
+    const dir = scratch();
+    const ledger = join(dir, "spend.jsonl");
+    const { supervisor, store } = newSupervisor({ publish: true, spendLedgerPath: ledger });
+    const run = seedRun(store, makeRun({ cast: { implement: { harness: "pi", effort: "low" } } }));
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.telemetry = () => ({
+      turns: 1,
+      toolCalls: 2,
+      tokens: { input: 10, output: 5, cacheRead: 0, cacheCreate: 0 },
+      usdEstimate: 0.01,
+    });
+    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    await settle();
+    const rows = readFileSync(ledger, "utf8").trim().split("\n").map((l) => JSON.parse(l) as SpendRecord);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.reviewTier).toBe("self");
+  });
+});
+
+// The ONE lever that stops work already running. Under the ticket system this was the poller's
+// `cancelled` event reaching the dispatcher; without it a cancelled run burns to completion.
+describe("cancel", () => {
+  test("cancelling a live run aborts + reaps its worker and marks it cancelled", async () => {
+    const { supervisor, store } = newSupervisor({ publish: true });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    const worker = created[0]!;
+    let aborted: string | undefined;
+    let reaped = 0;
+    worker.abort = async (reason?: string) => void (aborted = reason);
+    worker.reap = async () => void (reaped += 1);
+
+    expect(await supervisor.cancel(run.id, "owner clicked cancel")).toBe("cancelled");
+    expect(aborted).toBe("owner clicked cancel");
+    expect(reaped).toBe(1);
+    expect(store.get(run.id)!.state).toBe("cancelled");
+    expect(store.get(run.id)!.error).toBe("owner clicked cancel");
+
+    // And the run is genuinely off the engine: a late worker finish must not resurrect it into
+    // review, publish it, or spawn anything else.
+    worker.finish("success", "implemented", doneSignal("complete"));
+    await settle();
+    expect(spawnCalls).toHaveLength(1);
+    expect(store.get(run.id)!.state).toBe("cancelled");
+  });
+
+  test("a queued (never-staffed) run cancels cleanly, and a finished one is refused", async () => {
+    const { supervisor, store } = newSupervisor();
+    const queued = seedRun(store, makeRun({ slug: "queued-one" }));
+    expect(await supervisor.cancel(queued.id)).toBe("cancelled");
+    expect(store.get(queued.id)!.state).toBe("cancelled");
+    expect(spawnCalls).toHaveLength(0);
+
+    expect(await supervisor.cancel("run-20260810-nope")).toBe("unknown");
+    const finished = seedRun(store, makeRun({ slug: "shipped", state: "done" }));
+    expect(await supervisor.cancel(finished.id)).toBe("already-terminal");
+    expect(store.get(finished.id)!.state).toBe("done");
+  });
+
+  test("a parked run IS cancellable — parking is held-for-a-human, not finished", async () => {
+    const { supervisor, store } = newSupervisor();
+    const parked = seedRun(store, makeRun({ slug: "held", state: "parked" }));
+    expect(await supervisor.cancel(parked.id)).toBe("cancelled");
+    expect(store.get(parked.id)!.state).toBe("cancelled");
+  });
+
+  test("cancelling frees the live-run slot so a queued run is pumped in", async () => {
+    const { supervisor, store } = newSupervisor({
+      config: cfg({ runs: { max_live: 1, review_cycles_max: 2, budget_usd_per_run: 0 } }),
+    });
+    const first = seedRun(store, makeRun({ slug: "first" }));
+    const second = seedRun(store, makeRun({ slug: "second" }));
+    await supervisor.admit(first.id);
+    await tick();
+    await supervisor.admit(second.id);
+    await settle();
+    expect(spawnCalls).toHaveLength(1); // second is queued behind the cap
+
+    await supervisor.cancel(first.id);
+    await settle();
+    expect(spawnCalls.map((c) => c.itemId)).toEqual([first.id, second.id]);
+  });
+});
+
 describe("steering", () => {
   test("a live worker is nudged; an idle run buffers for its next brief", async () => {
     const { supervisor, store } = newSupervisor();
@@ -889,7 +1017,7 @@ describe("steering", () => {
     expect(await supervisor.steer(idle.id, "later note")).toBe("buffered");
     await supervisor.admit(idle.id);
     await tick();
-    expect(spawnCalls.find((c) => c.ticketId === idle.id)!.steering).toEqual(["later note"]);
+    expect(spawnCalls.find((c) => c.itemId === idle.id)!.steering).toEqual(["later note"]);
   });
 });
 

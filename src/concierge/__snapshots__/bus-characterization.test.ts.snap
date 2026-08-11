@@ -40,43 +40,6 @@ exports[`bus: task.created rejects a missing/invalid taskNumber 3`] = `
 }
 `;
 
-exports[`bus: ticket.filed needs identifier and channelId; tracks when both given 1`] = `
-{
-  "error": "ticket.filed needs both identifier and channelId",
-  "ok": false,
-}
-`;
-
-exports[`bus: ticket.filed needs identifier and channelId; tracks when both given 2`] = `
-{
-  "error": "ticket.filed needs both identifier and channelId",
-  "ok": false,
-}
-`;
-
-exports[`bus: ticket.filed needs identifier and channelId; tracks when both given 3`] = `
-{
-  "data": {
-    "tracked": true,
-  },
-  "ok": true,
-}
-`;
-
-exports[`bus: ticket.restaff without a wired dispatcher is refused 1`] = `
-{
-  "error": "restaff unavailable — the dispatcher is not wired (v3 daemon only)",
-  "ok": false,
-}
-`;
-
-exports[`bus: ticket.courier without a wired dispatcher is refused 1`] = `
-{
-  "error": "courier unavailable — the dispatcher is not wired",
-  "ok": false,
-}
-`;
-
 exports[`bus: status assembles discord + concierge halves (no provider wired) 1`] = `
 {
   "data": {
@@ -323,5 +286,26 @@ exports[`bus: pr.watch validates repo/number/url and no-ops without a wired poll
     "watching": false,
   },
   "ok": true,
+}
+`;
+
+exports[`bus: the retired ticket verbs are gone, not silently accepted 1`] = `
+{
+  "error": "concierge bus: unknown command "ticket.filed"",
+  "ok": false,
+}
+`;
+
+exports[`bus: the retired ticket verbs are gone, not silently accepted 2`] = `
+{
+  "error": "concierge bus: unknown command "ticket.restaff"",
+  "ok": false,
+}
+`;
+
+exports[`bus: the retired ticket verbs are gone, not silently accepted 3`] = `
+{
+  "error": "concierge bus: unknown command "ticket.courier"",
+  "ok": false,
 }
 `;

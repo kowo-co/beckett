@@ -51,7 +51,8 @@ export interface HarvestOptions {
   claudeDir: string;
   piDir: string;
   codexDir: string;
-  boredStateDir: string;
+  /** Beckett's own dispatch/run event ledger (`<beckettDir>/events/dispatch.jsonl`). */
+  runEventsPath: string;
   note?: (message: string) => void;
 }
 
@@ -261,27 +262,32 @@ async function filesUnder(root: string, note: (message: string) => void): Promis
   return result.sort();
 }
 
-async function trackerCyclesFromState(stateDir: string, note: (message: string) => void): Promise<Map<string, number>> {
+/**
+ * Review cycles per unit of work, read from Beckett's OWN append-only dispatch ledger.
+ *
+ * This used to read the out-of-process tracker's state directory and count `in_progress →
+ * in_review` transitions. That service is gone; the equivalent signal now lives in the ledger the
+ * supervisor writes on every stage transition, where a review that sent work back is exactly one
+ * `review:verdict` row with outcome `bounced`. Legacy rows (keyed `ticketId`/`ticketRef`) are
+ * counted too — the file is append-only history and predates the rename.
+ */
+async function reviewCyclesFromEvents(eventsPath: string, note: (message: string) => void): Promise<Map<string, number>> {
   const cycles = new Map<string, number>();
-  const files = await filesUnder(join(stateDir, "runs"), note);
-  for (const path of files) {
-    try {
-      const raw = await readFile(path, "utf8");
-      let task: string | null = null;
-      for (const line of raw.split(/\r?\n/)) {
-        if (!line.trim()) continue;
-        let event: Record<string, unknown>;
-        try { event = JSON.parse(line) as Record<string, unknown>; }
-        catch { note(`tracker: invalid JSON skipped in ${path}`); continue; }
-        task ??= text(event.taskRef) ?? text(event.ticketRef) ?? text(event.runId);
-        const from = text(event.from) ?? text(event.fromState) ?? text(event.previousState);
-        const to = text(event.to) ?? text(event.toState) ?? text(event.state);
-        if ((from === "in_progress" || from === "beckett_implement") && (to === "in_review" || to === "review" || to === "beckett_review")) {
-          const id = task ?? taskIdFromText(path);
-          if (id) cycles.set(id.toUpperCase(), (cycles.get(id.toUpperCase()) ?? 0) + 1);
-        }
-      }
-    } catch (error) { note(`tracker: could not read ${path} (${(error as Error).message})`); }
+  let raw: string;
+  try {
+    raw = await readFile(eventsPath, "utf8");
+  } catch (error) {
+    note(`run events absent/unreadable: ${eventsPath} (${(error as Error).message})`);
+    return cycles;
+  }
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let event: Record<string, unknown>;
+    try { event = JSON.parse(line) as Record<string, unknown>; }
+    catch { note(`run events: invalid JSON skipped in ${eventsPath}`); continue; }
+    if (text(event.stage) !== "review:verdict" || text(event.outcome) !== "bounced") continue;
+    const id = text(event.runRef) ?? text(event.runId) ?? text(event.ticketRef) ?? text(event.ticketId);
+    if (id) cycles.set(id.toUpperCase(), (cycles.get(id.toUpperCase()) ?? 0) + 1);
   }
   return cycles;
 }
@@ -333,7 +339,7 @@ export async function harvest(options: HarvestOptions): Promise<TelemetryDataset
   let rates: RateTable;
   try { rates = JSON.parse(await readFile(options.rates, "utf8")) as RateTable; }
   catch (error) { throw new Error(`cannot read rate table ${options.rates}: ${(error as Error).message}`); }
-  const cycles = await trackerCyclesFromState(options.boredStateDir, note);
+  const cycles = await reviewCyclesFromEvents(options.runEventsPath, note);
   const [claude, pi, codex] = await Promise.all([
     parseSource(options.claudeDir, "claude-code", parseClaudeSession, note),
     parseSource(join(options.piDir, "agent", "sessions"), "pi", parsePiSession, note),
@@ -361,6 +367,8 @@ export function defaultOptions(cwd = process.cwd(), env = process.env): HarvestO
     claudeDir: join(home, ".claude/projects"),
     piDir: join(home, ".pi"),
     codexDir: join(home, ".codex"),
-    boredStateDir: env.BORED_STATE_DIR ?? join(home, ".local/state/bored"),
+    runEventsPath: env.BECKETT_EVENTS_DIR
+      ? join(env.BECKETT_EVENTS_DIR, "dispatch.jsonl")
+      : join(home, ".beckett", "events", "dispatch.jsonl"),
   };
 }

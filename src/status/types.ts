@@ -13,6 +13,16 @@ export interface CoreOperationHealth {
   detail?: string;
 }
 
+/** How much work the run engine is holding right now (`RunStore.live()`, bucketed). */
+export interface RunBoard {
+  /** Non-terminal runs — everything the supervisor still owns. */
+  live: number;
+  /** Admitted but not yet staffed (waiting on the live-run cap or the next admission). */
+  queued: number;
+  /** Deliberately held for a human. Counted inside `live`. */
+  parked: number;
+}
+
 export interface HarnessUsage {
   harness: string;
   last24h: { records: number; turns: number; tokensIn: number; tokensOut: number; costUsd: number | null };
@@ -47,11 +57,12 @@ export interface SubscriptionLimits {
 /** All I/O has already happened by the time this value reaches a renderer. */
 export interface StatusDashboardSnapshot {
   collectedAt: string;
-  /** The tracker cadence, used to give health staleness a concrete meaning. */
+  /** The supervisor's watchdog cadence, used to give health staleness a concrete meaning. */
   pollIntervalMs: number;
-  versions: { beckett: string; bun: string; bored: string | null };
+  versions: { beckett: string; bun: string };
   uptime: UptimeSnapshot;
   system: SystemMetrics;
+  runs: RunBoard;
   health: CoreOperationHealth[];
   harnessUsage: HarnessUsage[];
   subscriptionLimits: SubscriptionLimits;

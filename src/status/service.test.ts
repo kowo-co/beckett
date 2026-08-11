@@ -12,10 +12,11 @@ afterEach(() => dirs.splice(0).forEach((dir) => rmSync(dir, { recursive: true, f
 function snapshot(): StatusDashboardSnapshot {
   return {
     collectedAt: "2026-07-26T12:00:00.000Z", pollIntervalMs: 5_000,
-    versions: { beckett: "6.5.2", bun: "1.3.14", bored: "1.0.0" },
+    versions: { beckett: "6.5.2", bun: "1.3.14" },
     uptime: { currentUptimeMs: 1_000, bootedAt: "2026-07-26T12:00:00.000Z", downtimeHistory: "no-history", downtimeMessage: "no downtime history recorded yet", downtimeWindows: [], totalDowntimeMs: null, uncleanRestarts: 0 },
     system: { source: "proc", collectedAt: "2026-07-26T12:00:00.000Z", cpu: { loadPercent: 1 }, memory: { usedBytes: 1, totalBytes: 2 }, disk: { usedBytes: 1, totalBytes: 2 }, cpuLoad: 1, memoryUsed: 1, memoryTotal: 2, diskUsed: 1, diskTotal: 2 },
-    health: [{ name: "Tracker poll", reachable: true, lastSuccessAt: 1, lastSuccessAgeMs: 0, consecutiveFailures: 0 }],
+    runs: { live: 0, queued: 0, parked: 0 },
+    health: [{ name: "Run supervisor", reachable: true, lastSuccessAt: 1, lastSuccessAgeMs: 0, consecutiveFailures: 0 }],
     harnessUsage: [],
     subscriptionLimits: { claude: { available: false, limits: [] }, codex: { available: false, limits: [], observedAgeMs: null, stale: false } },
     ccusage: { available: false, sessionCostUsd: null, dailyCostUsd: null, observedAt: null },

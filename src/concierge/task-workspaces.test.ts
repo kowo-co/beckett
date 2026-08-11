@@ -130,15 +130,11 @@ test("task.created grounds the thread it was filed from, and only when that thre
     creatorId: OWNER,
   });
   await tasks.createTask({ title: "Build voting", originChannelId: "user-thread", initialBranchTitle: "API" });
-  await tasks.linkTicket(
-    "1.1",
-    { id: "t", identifier: "OPS-9", board: "ops", projectId: "p", url: "https://tracker.test/OPS-9" },
-    "in_progress",
-  );
+  await tasks.linkRun("1.1", { runId: "run-ops-9" }, "implementing");
 
   await concierge.onBusRequest({ cmd: "task.created", args: { taskNumber: 1, channelId: "user-thread" } });
   expect(workspaces.channelForTask("1")).toBe("user-thread");
-  expect(workspaces.channelForTicket("OPS-9")).toBe("user-thread");
+  expect(workspaces.channelForRun("run-ops-9")).toBe("user-thread");
 
   // A plain channel is not a workspace, so nothing is recorded and results stay in that channel.
   await tasks.createTask({ title: "Other work", originChannelId: "channel-1" });
@@ -260,11 +256,7 @@ test("startup recovery re-binds branches linked while the daemon was down, and s
   const { concierge, tasks, threadCalls } = harness();
   const workspaces = (concierge as unknown as { workspaces: WorkspaceRegistry }).workspaces;
   await tasks.createTask({ title: "Offline repair", originChannelId: "parent-1", initialBranchTitle: "API" });
-  await tasks.linkTicket(
-    "1.1",
-    { id: "ticket-id", identifier: "OPS-321", board: "ops", projectId: "project-id", url: "https://tracker.test/OPS-321" },
-    "in_progress",
-  );
+  await tasks.linkRun("1.1", { runId: "run-ops-321" }, "implementing");
   // The room the person opened and attached #1 to. That attachment — not `task.threadId` — is what
   // recovery resolves against, and it is already durable in workspaces.json on its own.
   concierge.onThreadCreated({
@@ -289,9 +281,9 @@ test("startup recovery re-binds branches linked while the daemon was down, and s
   expect(workspaces.contextFor("user-thread")).toMatchObject({
     taskRefs: ["1"],
     branchRefs: ["1.1"],
-    ticketIdents: ["OPS-321"],
+    runIds: ["run-ops-321"],
   });
-  expect(workspaces.channelForTicket("OPS-321")).toBe("user-thread");
+  expect(workspaces.channelForRun("run-ops-321")).toBe("user-thread");
   // A stale `task.threadId` is never resurrected into a workspace.
   expect(workspaces.contextFor("thread-gone")).toBeNull();
   expect(workspaces.channelForTask("2")).toBeNull();
@@ -304,11 +296,7 @@ test("startup recovery honours the CURRENT attachment, not the task's stale thre
   // The task row still points at thread A — an artifact of the era when Beckett opened a thread per
   // task, and a field `&12` deliberately never writes.
   await tasks.setThread(1, "A", "parent-1");
-  await tasks.linkTicket(
-    "1.1",
-    { id: "t", identifier: "OPS-77", board: "ops", projectId: "p", url: "https://tracker.test/OPS-77" },
-    "in_progress",
-  );
+  await tasks.linkRun("1.1", { runId: "run-ops-77" }, "implementing");
   for (const threadId of ["A", "B"]) {
     concierge.onThreadCreated({ threadId, parentChannelId: "parent-1", name: `room ${threadId}`, creatorId: OWNER });
   }
@@ -327,9 +315,9 @@ test("startup recovery honours the CURRENT attachment, not the task's stale thre
   expect(workspaces.channelForTask("1")).toBe("B");
   expect(workspaces.contextFor("A")?.taskRefs).toEqual([]);
   // Branch/ticket links land on the thread that genuinely owns the task right now.
-  expect(workspaces.contextFor("B")).toMatchObject({ branchRefs: ["1.1"], ticketIdents: ["OPS-77"] });
+  expect(workspaces.contextFor("B")).toMatchObject({ branchRefs: ["1.1"], runIds: ["run-ops-77"] });
   expect(workspaces.contextFor("A")?.branchRefs).toEqual([]);
-  expect(workspaces.channelForTicket("OPS-77")).toBe("B");
+  expect(workspaces.channelForRun("run-ops-77")).toBe("B");
 });
 
 test("a conversational branch-status reference returns the rich card without an LLM turn", async () => {

@@ -147,26 +147,23 @@ cd ~/beckett && bun install --frozen-lockfile
 ./deploy/install.sh
 ```
 
-### Tracker (bored)
+### No tracker (v7)
 
-Beckett files, steers, and completes every ticket through the [bored](https://github.com/frgmt0/bored)
-tracker, so a box with no tracker has a bot that chats but can never ship. The public `install.sh`
-provisions it automatically; on a hand-built box, install it the same way bored's own installer
-does — clone, build, and enable a loopback `bored.service` user unit. `--worker /bin/false` with
-`--max-workers 1` keeps bored a pure ticket store: Beckett drives every worker itself over the
-control bus, never through bored's seat runner.
+There is no ticket board any more. Work is a **run** in `~/.beckett/runs.json`, filed by
+`beckett task deploy` and driven by the in-daemon run supervisor, so a fresh box needs nothing
+installed for Beckett to ship.
 
-```bash
-git clone https://github.com/frgmt0/bored.git ~/bored
-~/bored/scripts/install-systemd-user-service.sh \
-  --source ~/bored --repo ~/beckett --root ~/.local/state/bored \
-  --port 7770 --worker /bin/false --max-workers 1 --owner-dm owner --start
-curl -fsS http://127.0.0.1:7770/health   # {"ok":true}
-```
+**Upgrading a box that ran v6**, in this order:
 
-The port must match `BECKETT_BORED_URL` (default `http://127.0.0.1:7770`). Re-running the script
-rebuilds the checkout and rewrites `~/.config/bored/bored.env` in place; `beckett doctor`'s
-`tracker: bored` check reports whether the live daemon can reach it.
+1. `systemctl --user disable --now bored.service` — nothing reads it; leaving it up is a port and
+   a process for no reason.
+2. Drop `BECKETT_BORED_URL` from `~/.beckett/.env`.
+3. Delete the `[tracker]` and `[progress]` sections from `~/.beckett/config.toml`. Both were
+   retired with the run engine. The daemon still BOOTS with them present — `loadConfig` strips
+   retired sections and logs one deprecation line per key — but that shim is temporary, so clean
+   the file on this deploy rather than the next one.
+
+Runs in flight across the upgrade are recovered from `runs.json` on boot, not re-filed.
 
 ## Ops visibility (issue #30)
 

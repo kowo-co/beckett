@@ -3,23 +3,20 @@
 # the keys that make DEV inert and isolated; everything else uses the validated schema defaults.
 # Validation is strict (src/config.ts): only override keys you mean to change.
 
-# No live ticket board. The board is a shared HTTP service (BECKETT_BORED_URL = prod's bored by
-# default), NOT under BECKETT_DIR, so this switch is what keeps DEV off the production queue: with
-# it false the daemon never polls or dispatches a board (and never pays the boot-time retry storm an
-# unreachable board would cost). The unit ALSO points BECKETT_BORED_URL at a dead loopback port, so
-# even a stray tracker write (e.g. a concierge ticket-create) can never reach prod's board.
-[tracker]
-enabled = false
-
-# Dispatcher fleet capped at 1 so a staging worker cannot starve or collide with a production
-# worker on this box (2014 Haswell, 4 cores, already loaded). Prod default is 2.
+# Worker fleet capped at 1 so a staging worker cannot starve or collide with a production worker on
+# this box (2014 Haswell, 4 cores, already loaded). Prod default is 2.
 [concurrency]
 max_workers = 1
 
-# With no board (tracker disabled), the staffing watchdog has nothing to re-staff and would only
-# probe the (dead) board endpoint on a timer. 0 turns it off entirely (the dispatcher supports it).
+# One live run at a time, and no cards: DEV shares the run ledger's shape but not prod's volume,
+# and it must never post a run card into a production channel.
+[runs]
+max_live = 1
+cards = false
+
+# The staffing watchdog is the run engine's own heartbeat. Keep it armed but slow on staging.
 [supervise]
-staffing_watchdog_s = 0
+staffing_watchdog_s = 300
 
 # One concierge turn / one quick lane at a time — staging does not need prod's parallelism.
 [concierge]

@@ -6,13 +6,13 @@ import { harvest } from "./harvest.ts";
 
 const line = (value: unknown) => `${JSON.stringify(value)}\n`;
 
-test("harvest normalizes Claude, pi, Codex, and bored review transitions", async () => {
+test("harvest normalizes Claude, pi, Codex, and review-bounce transitions", async () => {
   const root = await mkdtemp(join(tmpdir(), "beckett-telemetry-"));
   const claude = join(root, "claude/projects/project");
   const pi = join(root, "pi/agent/sessions/project");
   const codex = join(root, "codex/sessions/2026/01/01");
-  const bored = join(root, "bored/runs");
-  await Promise.all([mkdir(claude, { recursive: true }), mkdir(pi, { recursive: true }), mkdir(codex, { recursive: true }), mkdir(bored, { recursive: true })]);
+  const events = join(root, "events");
+  await Promise.all([mkdir(claude, { recursive: true }), mkdir(pi, { recursive: true }), mkdir(codex, { recursive: true }), mkdir(events, { recursive: true })]);
   await writeFile(join(claude, "c.jsonl"), [
     line({ type: "user", sessionId: "claude-1", timestamp: "2026-01-01T00:00:00Z", message: { role: "user", content: "[OPS-9] do it" } }),
     line({ type: "assistant", sessionId: "claude-1", timestamp: "2026-01-01T00:01:00Z", message: { id: "one", role: "assistant", model: "claude-haiku-4-5-20251001", usage: { input_tokens: 1_000_000, output_tokens: 1_000_000, cache_read_input_tokens: 1_000_000, cache_creation_input_tokens: 1_000_000 } } }),
@@ -27,16 +27,19 @@ test("harvest normalizes Claude, pi, Codex, and bored review transitions", async
     line({ type: "turn_context", timestamp: "2026-01-01T00:00:01Z", payload: { model: "gpt-5.6-luna" } }),
     line({ type: "event_msg", timestamp: "2026-01-01T00:00:03Z", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 1_000_000, cached_input_tokens: 200_000, output_tokens: 1_000_000 } } } }),
   ].join(""));
-  await writeFile(join(bored, "9.jsonl"), [
-    line({ taskRef: "OPS-9", type: "edge_taken", from: "beckett_implement", to: "beckett_review" }),
-    line({ taskRef: "OPS-9", type: "edge_taken", from: "in_progress", to: "in_review" }),
+  // One legacy-keyed row and one current-keyed row: both count, so an append-only ledger that
+  // spans the ticket rip-out still yields the same review-cycle number.
+  await writeFile(join(events, "dispatch.jsonl"), [
+    line({ ticketRef: "OPS-9", stage: "review:verdict", outcome: "bounced" }),
+    line({ runRef: "OPS-9", stage: "review:verdict", outcome: "bounced" }),
+    line({ runRef: "OPS-9", stage: "review:verdict", outcome: "passed" }),
   ].join(""));
 
   const output = join(root, "runs.json");
   const notes: string[] = [];
   const dataset = await harvest({
     output, rates: join(process.cwd(), "config/model-rates.json"), claudeDir: join(root, "claude/projects"),
-    piDir: join(root, "pi"), codexDir: join(root, "codex"), boredStateDir: join(root, "bored"), note: (message) => notes.push(message),
+    piDir: join(root, "pi"), codexDir: join(root, "codex"), runEventsPath: join(events, "dispatch.jsonl"), note: (message) => notes.push(message),
   });
   expect(dataset.runs).toHaveLength(3);
   expect(dataset.runs.map((run) => run.harness).sort()).toEqual(["claude-code", "codex", "pi"]);
@@ -60,7 +63,7 @@ test("Claude child runs use the child id rather than their shared parent session
   ].join(""));
   const dataset = await harvest({
     output: join(root, "runs.json"), rates: join(process.cwd(), "config/model-rates.json"), claudeDir: join(root, "claude/projects"),
-    piDir: join(root, "none"), codexDir: join(root, "none"), boredStateDir: join(root, "none"), note: () => {},
+    piDir: join(root, "none"), codexDir: join(root, "none"), runEventsPath: join(root, "none/dispatch.jsonl"), note: () => {},
   });
   expect(dataset.runs[0]?.session_id).toBe("agent-1");
   expect(dataset.runs[0]?.run_id).toBe("claude-code:agent-1");
@@ -71,7 +74,7 @@ test("harvest completes with absent session sources", async () => {
   const notes: string[] = [];
   const dataset = await harvest({
     output: join(root, "runs.json"), rates: join(process.cwd(), "config/model-rates.json"), claudeDir: join(root, "none"),
-    piDir: join(root, "none"), codexDir: join(root, "none"), boredStateDir: join(root, "none"), note: (message) => notes.push(message),
+    piDir: join(root, "none"), codexDir: join(root, "none"), runEventsPath: join(root, "none/dispatch.jsonl"), note: (message) => notes.push(message),
   });
   expect(dataset.runs).toEqual([]);
   expect(notes.some((message) => message.includes("source absent/unreadable"))).toBe(true);

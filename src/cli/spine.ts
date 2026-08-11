@@ -121,10 +121,8 @@ export const SPINE: SpineEntry[] = [
   },
   { id: "eval", cliHelp: "eval <author/model> [--short|--full]", verbs: [{ name: "eval", load: core((m) => m.runEval) }] },
   { id: "site", cliHelp: "site deploy", verbs: [{ name: "site", load: core((m) => m.runSite) }] },
-  { id: "task", cliHelp: "task create|branch|start|deploy|ask|steer|show|list", verbs: [{ name: "task", load: core((m) => m.runTask) }] },
-  { id: "ticket", cliHelp: "ticket create|comment|state|list|show|trace", verbs: [{ name: "ticket", load: core((m) => m.runTicket) }] },
+  { id: "task", cliHelp: "task create|branch|start|deploy|ask|steer|cancel|show|list|trace", verbs: [{ name: "task", load: core((m) => m.runTask) }] },
   { id: "preset", cliHelp: "preset ls|show", verbs: [{ name: "preset", load: core((m) => m.runPreset) }] },
-  { id: "plan", cliHelp: "plan", verbs: [{ name: "plan", load: core((m) => m.runPlan) }] },
   {
     // The end-of-ticket motion as ONE verb: PR → CI → merge → the guarded redeploy. Sits next to
     // `gh` because that's the surface it wraps; its body is its own module (never core.ts) so a
@@ -198,8 +196,8 @@ for (const entry of SPINE) {
 }
 
 /**
- * Resolve a CLI invocation to its verb loader, longest match first: for `["ticket","create",…]`
- * a registered "ticket create" wins over "ticket". Returns null when nothing matches (→ the
+ * Resolve a CLI invocation to its verb loader, longest match first: for `["discord","reply",…]`
+ * a registered "discord reply" wins over "discord". Returns null when nothing matches (→ the
  * entry's unknown-command refusal). Mirrors the old `CapabilityRegistry.resolveCliVerb` (≤2-word
  * verbs), so `beckett discord` with no bare "discord" verb still falls through to the help.
  */

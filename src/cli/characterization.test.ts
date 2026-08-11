@@ -8,7 +8,7 @@
  * CapabilityRegistry walk, THIS suite must stay green byte-for-byte.
  *
  * What "observable behavior" means here: each command is exercised up to its hermetic
- * boundary — full output for the in-process commands (memory, task, plan validation, config,
+ * boundary — full output for the in-process commands (memory, task, config,
  * rpc, federation, …), and the exact usage/refusal/dead-daemon message for commands whose
  * happy path needs a live daemon, Discord, the tracker, GitHub, or Cloudflare. Those boundary
  * messages are load-bearing: the Concierge pattern-matches on them, so they are part of the
@@ -169,8 +169,8 @@ const CASES: Case[] = [
   { name: "spend: bad --since is rejected", argv: ["spend", "--since", "yesterdayish"] },
 
   // ── journal ─────────────────────────────────────────────────────────────────────────────
-  { name: "journal: no ticket prints usage", argv: ["journal"] },
-  { name: "journal: unknown ticket reports no journal", argv: ["journal", "OPS-999"] },
+  { name: "journal: no ident prints usage", argv: ["journal"] },
+  { name: "journal: unknown ident reports no journal", argv: ["journal", "run-20260810-ghost"] },
   { name: "journal: non-integer --tail is rejected", argv: ["journal", "OPS-1", "--tail", "x"] },
 
   // ── identity ────────────────────────────────────────────────────────────────────────────
@@ -301,40 +301,21 @@ const CASES: Case[] = [
   { name: "task: ask without a run reference prints usage", argv: ["task", "ask"] },
   { name: "task: ask about an unknown run fails", argv: ["task", "ask", "ghost-run"] },
   { name: "task: unknown sub prints usage", argv: ["task", "bogus"] },
-
-  // ── ticket (validation layer only — everything past it needs the tracker) ───────────────
-  { name: "ticket: trace without an id prints usage", argv: ["ticket", "trace"] },
-  { name: "ticket: trace with no events file", argv: ["ticket", "trace", "OPS-1"] },
-  { name: "ticket: create without a title prints usage", argv: ["ticket", "create"] },
-  { name: "ticket: create against the restricted self-project is bounced", argv: ["ticket", "create", "--title", "x", "--project", "beckett"] },
-  { name: "ticket: create with --intensive plus a different --board is rejected", argv: ["ticket", "create", "--title", "x", "--intensive", "--board", "ops"] },
-  { name: "ticket: create on an unknown board is rejected", argv: ["ticket", "create", "--title", "x", "--board", "nope"] },
-  { name: "ticket: comment without an id prints usage", argv: ["ticket", "comment"] },
-  { name: "ticket: state without args prints usage", argv: ["ticket", "state"] },
-  { name: "ticket: restaff without an id prints usage", argv: ["ticket", "restaff"] },
-  { name: "ticket: restaff with the daemon down fails on the bus", argv: ["ticket", "restaff", "OPS-1"] },
-  { name: "ticket: courier without an id prints usage", argv: ["ticket", "courier"] },
-  { name: "ticket: show without an id prints usage", argv: ["ticket", "show"] },
-  { name: "ticket: unknown sub prints usage", argv: ["ticket", "bogus"] },
+  { name: "task: trace without an id prints usage", argv: ["task", "trace"] },
+  { name: "task: trace with no events file", argv: ["task", "trace", "run-20260810-x"] },
+  { name: "task: deploy without a prompt prints usage", argv: ["task", "deploy"] },
+  { name: "task: deploy with a broken cast is refused", argv: ["task", "deploy", "--prompt", "x", "--cast", "{"] },
+  { name: "task: steer without a note prints usage", argv: ["task", "steer", "ghost-run"] },
+  { name: "task: steer of an unknown run fails", argv: ["task", "steer", "ghost-run", "do the thing"] },
+  { name: "task: cancel without a reference prints usage", argv: ["task", "cancel"] },
+  { name: "task: cancel of an unknown run fails", argv: ["task", "cancel", "ghost-run"] },
+  { name: "task: cancel of an unknown branch fails", argv: ["task", "cancel", "#9.1"] },
 
   // ── preset ──────────────────────────────────────────────────────────────────────────────
   { name: "preset: ls seeds and lists the presets file", argv: ["preset", "ls"] },
   { name: "preset: show without a name prints usage", argv: ["preset", "show"] },
   { name: "preset: show of an unknown preset fails", argv: ["preset", "show", "nope"] },
   { name: "preset: unknown sub prints usage", argv: ["preset", "bogus"] },
-
-  // ── plan (full validation layer runs before any tracker call) ───────────────────────────
-  { name: "plan: non-JSON stdin is rejected", argv: ["plan"], stdin: "not json" },
-  { name: "plan: empty ticket list prints usage", argv: ["plan"], stdin: "{}" },
-  { name: "plan: a ticket without a key is rejected", argv: ["plan"], stdin: '{"tickets":[{"title":"x"}]}' },
-  { name: "plan: duplicate keys are rejected", argv: ["plan"], stdin: '{"tickets":[{"key":"a","title":"x"},{"key":"a","title":"y"}]}' },
-  { name: "plan: a ticket without a title is rejected", argv: ["plan"], stdin: '{"tickets":[{"key":"a"}]}' },
-  { name: "plan: an unknown needs edge is rejected", argv: ["plan"], stdin: '{"tickets":[{"key":"a","title":"x","needs":["z"]}]}' },
-  { name: "plan: a self-dependency is rejected", argv: ["plan"], stdin: '{"tickets":[{"key":"a","title":"x","needs":["a"]}]}' },
-  { name: "plan: a dependency cycle is rejected", argv: ["plan"], stdin: '{"tickets":[{"key":"a","title":"x","needs":["b"]},{"key":"b","title":"y","needs":["a"]}]}' },
-  { name: "plan: an unknown board is rejected", argv: ["plan"], stdin: '{"board":"nope","tickets":[{"key":"a","title":"x"}]}' },
-  { name: "plan: the restricted self-project is bounced", argv: ["plan"], stdin: '{"tickets":[{"key":"a","title":"x","project":"beckett"}]}' },
-  { name: "plan: INT tickets without a channel are rejected", argv: ["plan"], stdin: '{"board":"int","tickets":[{"key":"a","title":"x"}]}' },
 
   // ── status / config ─────────────────────────────────────────────────────────────────────
   { name: "status: daemon down fails with the service hint", argv: ["status"] },

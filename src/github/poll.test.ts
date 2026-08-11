@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GitHubPrPoller } from "./poll.ts";
@@ -52,7 +52,7 @@ const WATCH = {
   number: 96,
   url: "https://github.com/0xbeckett/foo/pull/96",
   title: "Add sense",
-  ticket: "OPS-124",
+  runId: "OPS-124",
   channel: "chan-1",
 };
 
@@ -89,7 +89,7 @@ describe("GitHubPrPoller", () => {
     expect(first).toHaveLength(1);
     expect(first[0]!.kind).toBe("review");
     expect(first[0]!.pr.channel).toBe("chan-1");
-    expect(first[0]!.pr.ticket).toBe("OPS-124");
+    expect(first[0]!.pr.runId).toBe("OPS-124");
     expect(await p.poll()).toEqual([]); // dedup
   });
 
@@ -438,7 +438,7 @@ describe("GitHubPrPoller", () => {
       expect(ev).toHaveLength(1);
       expect(ev[0]!.kind).toBe("review");
       expect(ev[0]!.pr.channel).toBe("chan-open");
-      expect(ev[0]!.pr.ticket).toBeUndefined();
+      expect(ev[0]!.pr.runId).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -463,3 +463,35 @@ function rev(id: string, author: string, state: string): PrSignals["reviews"][nu
 function com(id: string, author: string, body: string): PrSignals["comments"][number] {
   return { id, author, createdAt: `2026-01-01T00:01:0${id.length}.000Z`, body };
 }
+
+describe("legacy state files", () => {
+  test("a pre-v7 github-prs.json keyed `ticket` reloads with its routing intact as runId", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gh-poll-legacy-"));
+    const statePath = join(dir, "github-prs.json");
+    try {
+      writeFileSync(
+        statePath,
+        JSON.stringify({
+          "0xbeckett/foo#96": {
+            repo: "0xbeckett/foo", number: 96, url: "https://github.com/0xbeckett/foo/pull/96",
+            title: "Add sense", ticket: "OPS-124", channel: "chan-1",
+            addedAt: "2026-07-01T00:00:00.000Z", seeded: true, state: "OPEN", isDraft: false,
+            headRefOid: "sha-1", ciConclusion: "NONE", seenReviewIds: [], seenCommentIds: [],
+            terminal: false,
+          },
+        }),
+        "utf8",
+      );
+      const reader: GitHubPrReader = { async prSignals() { return signals({ state: "MERGED" }); } };
+      const p = new GitHubPrPoller({ reader, account: "0xbeckett", logger: quiet as never, statePath, now: () => 1_000 });
+      expect(p.stats().watching).toBe(1);
+      // The tracker identifier was the routing handle; it carries across onto `runId` rather than
+      // silently dropping a live PR's origin on the first restart after the rip-out.
+      const [event] = await p.poll();
+      expect(event!.pr.runId).toBe("OPS-124");
+      expect(event!.pr.channel).toBe("chan-1");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

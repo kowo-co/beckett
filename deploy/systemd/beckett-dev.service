@@ -29,11 +29,6 @@ EnvironmentFile=-%h/.beckett-dev/.env
 Environment=BECKETT_DIR=%h/.beckett-dev
 Environment=BECKETT_HOME=%h/.beckett-dev
 Environment=BECKETT_PROJECTS_ROOT=%h/.beckett-dev/projects
-# The ticket board is NOT under BECKETT_DIR — it is an HTTP endpoint (default 127.0.0.1:7770 =
-# PROD's shared bored). Point DEV at a loopback port with NO listener so DEV can never read or
-# dispatch the production board (the poller primes nothing and dispatch stays a no-op). DEV's
-# [tracker] poll_secs is raised so this deliberately-unreachable board barely logs.
-Environment=BECKETT_BORED_URL=http://127.0.0.1:7788
 # Suppress boot narration into prod's channels. STARTUP handles the boot banner + crash-loop
 # alarm + email hint; CARDS (=disabled) suppresses the status dashboard + task/branch cards, whose
 # channel is an otherwise-hardcoded prod snowflake (the env seam added for #141).

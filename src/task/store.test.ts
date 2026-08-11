@@ -60,17 +60,48 @@ test("concurrent creators receive unique task numbers", async () => {
   expect(created.map((row) => row.task.number).sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
 });
 
-test("links internal tickets while keeping the public branch reference stable", async () => {
+test("links the executing run while keeping the public branch reference stable", async () => {
   const { store } = makeStore();
   await store.createTask({ title: "Voting", project: "polls" });
-  const linked = await store.linkTicket(
-    "#1.1",
-    { id: "uuid", identifier: "OPS-143", board: "ops", projectId: "p1", url: "https://tracker.test/OPS-143" },
-    "in_progress",
-    "polls",
+  const linked = await store.linkRun("#1.1", { runId: "run-20260810-voting" }, "implementing", "polls");
+  expect(linked).toMatchObject({ ref: "1.1", status: "running", run: { runId: "run-20260810-voting" } });
+  expect(store.findByRun("run-20260810-voting")?.branch.ref).toBe("1.1");
+});
+
+test("a second, DIFFERENT run on one branch is refused; re-linking the same run is idempotent", async () => {
+  const { store } = makeStore();
+  await store.createTask({ title: "Voting" });
+  await store.linkRun("1.1", { runId: "run-a" }, "implementing");
+  expect((await store.linkRun("1.1", { runId: "run-a" }, "reviewing")).status).toBe("review");
+  await expect(store.linkRun("1.1", { runId: "run-b" }, "implementing")).rejects.toThrow(/already linked to run run-a/);
+});
+
+test("a pre-v7 registry with tracker links still loads; the dead links are dropped", () => {
+  const { path, store } = makeStore();
+  writeFileSync(
+    path,
+    JSON.stringify({
+      version: 1,
+      nextTaskNumber: 2,
+      startClaims: {},
+      tasks: [{
+        id: "t", number: 1, title: "Legacy", status: "active", createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        branches: [{
+          id: "b", ref: "1.1", path: [1], title: "Legacy", status: "review", needs: [],
+          ticket: { id: "uuid", identifier: "OPS-143", board: "ops", projectId: "p1", url: "https://tracker.test/OPS-143" },
+          createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
+        }],
+      }],
+    }),
+    "utf8",
   );
-  expect(linked).toMatchObject({ ref: "1.1", status: "running", ticket: { identifier: "OPS-143" } });
-  expect(store.findByTicket("OPS-143")?.branch.ref).toBe("1.1");
+  const branch = store.getBranch("1.1")!.branch;
+  // The branch survives with its last known status; the tracker link is gone, and no run took
+  // its place (a run id cannot be derived from a ticket id).
+  expect(branch.status).toBe("review");
+  expect(branch.run).toBeUndefined();
+  expect(branch).not.toHaveProperty("ticket");
 });
 
 test("a corrupt registry fails loudly instead of resetting task numbers", () => {
@@ -209,11 +240,7 @@ test("a lone task is a wave of one, and a finished wave is still the recent one"
   advance(10 * 60_000);
   await store.createTask({ title: "Hotfix" });
   // Status-blind: completing the newest wave must not hand &recent back to the older batch.
-  await store.linkTicket(
-    "2.1",
-    { id: "uuid", identifier: "OPS-9", board: "ops", projectId: "p1", url: "https://tracker.test/OPS-9" },
-    "done",
-  );
+  await store.linkRun("2.1", { runId: "run-20260810-hotfix" }, "done");
 
   const recent = store.recentWave();
   expect(recent.map((task) => task.number)).toEqual([2]);
@@ -265,18 +292,12 @@ test("unresolvable references return null instead of throwing", async () => {
 
 test("resuming implementation clears the previous final diff snapshot", async () => {
   const { store } = makeStore();
-  const ticket = {
-    id: "uuid",
-    identifier: "OPS-143",
-    board: "ops",
-    projectId: "p1",
-    url: "https://tracker.test/OPS-143",
-  };
+  const link = { runId: "run-20260810-voting" };
   await store.createTask({ title: "Voting" });
-  await store.linkTicket("1.1", ticket, "in_review");
+  await store.linkRun("1.1", link, "reviewing");
   await store.setDiff("1.1", { additions: 4, deletions: 1, files: 2, commits: 1 });
 
-  await store.linkTicket("1.1", ticket, "in_progress");
+  await store.linkRun("1.1", link, "implementing");
 
   expect(store.getBranch("1.1")?.branch.diff).toBeUndefined();
 });

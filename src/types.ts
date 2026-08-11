@@ -897,21 +897,7 @@ export interface Config {
     github_user: string;
     gmail_address: string;
   };
-  /**
-   * Ticket-queue (bored) config. bored's loopback URL rides BECKETT_BORED_URL in env, not here.
-   * A legacy `[plane]` section in config.toml is still accepted and folded into this shape at
-   * load time (the Plane backend itself was removed in OPS-191).
-   */
-  tracker: {
-    /** Master switch for the board poller + dispatch. Default true; a board-less instance (#141) sets false. */
-    enabled: boolean;
-    poll_secs: number;
-    /** Known board names (`--board` values). bored serves one managed board per instance. */
-    boards: string[];
-    /** Board name used when a caller omits --board. */
-    default_board: string;
-  };
-  /** v7 runs — the ticketless execution unit driven by `src/run/supervisor.ts`. */
+  /** Runs — the execution unit driven by `src/run/supervisor.ts`. */
   runs: {
     /** Concurrent live runs; over-cap admissions queue FIFO. Default 3. */
     max_live: number;
@@ -921,8 +907,7 @@ export interface Config {
     budget_usd_per_run: number;
     /**
      * The deploy receipt: one progress card per run (`src/progress/cards.ts`), edited off the
-     * dispatch event bus. Default ON — this is the run engine's own switch, independent of
-     * `[progress] cards_as_code` (the ticket dispatcher's flag).
+     * dispatch event bus. Default ON.
      */
     cards: boolean;
   };
@@ -1128,11 +1113,6 @@ export interface Config {
     /** Repo the spike's throwaway worktree is cut from. Empty = `<projects>/beckett`
      *  (Beckett's own project checkout — the loops a dream can pair are Beckett's own). */
     spike_repo: string;
-  };
-  /** Zero-token progress cards: CODE posts/edits one status message per active ticket in the
-   *  ticket's origin channel, driven by dispatch events — no model turn. Default off. */
-  progress: {
-    cards_as_code: boolean;
   };
   /**
    * Free time (docs/freetime.md): one weekly, budgeted, unprompted session in a scratch

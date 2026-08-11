@@ -1,5 +1,5 @@
 /**
- * Beckett quick agents - the no-ticket lane.
+ * Beckett quick agents - the short-lived specialist lane.
  *
  * Fire-and-report errands only: each run spawns a short-lived `claude -p` harness, blocks up to
  * the sync window for its report, and otherwise detaches and reports back through the Concierge
@@ -221,7 +221,7 @@ export function createQuickRunner(deps: CreateQuickRunnerDeps): QuickRunner {
       }
       if (!task.trim()) throw new Error("quick run needs a non-empty task");
       if (live.size >= config.quick.max_concurrent) {
-        throw new Error(`quick lane is full (${live.size}/${config.quick.max_concurrent} running) - retry shortly or file a ticket`);
+        throw new Error(`quick lane is full (${live.size}/${config.quick.max_concurrent} running) - retry shortly or deploy a run`);
       }
 
       const runId = randomUUID();

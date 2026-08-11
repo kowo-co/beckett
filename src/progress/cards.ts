@@ -1,5 +1,5 @@
 /**
- * Zero-token progress cards (progress.cards_as_code): one self-editing status message per active
+ * Zero-token progress cards (`[runs] cards`): one self-editing status message per active
  * ticket, in the channel that filed it.
  *
  * {@link reduceProgressCard} decides WHAT the card says and {@link renderProgressCard} how it
@@ -62,7 +62,7 @@ export function reduceProgressCard(
   if (!verdict) return null;
   const parsed = Date.parse(event.ts);
   return {
-    ref: event.ticketRef || prev?.ref || event.ticketId,
+    ref: event.runRef || prev?.ref || event.runId,
     startedAt: prev?.startedAt ?? (Number.isFinite(parsed) ? parsed : nowMs),
     ...verdict,
   };
@@ -220,13 +220,13 @@ export interface ProgressCardServiceOptions {
   /** Where a ticket's card lives; null = this ticket gets no card. */
   resolveChannel: (event: DispatchEvent) => string | null;
   /**
-   * A run's live `## Checklist` progress, keyed by `DispatchEvent.ticketId` (the run id) —
+   * A run's live `## Checklist` progress, keyed by `DispatchEvent.runId` —
    * injected so this module stays fs-free in tests. Production wires `parseSpecChecklist` over
    * the run's workspace (`../run/supervisor.ts`'s `runSpecReader`). Returns null when the run has
    * no workspace yet, no spec.md, or isn't a run at all (e.g. a ticket-dispatcher event) — the
    * card then renders exactly as it did before checklists existed.
    */
-  specReader?: (ticketId: string) => CardChecklist | null;
+  specReader?: (runId: string) => CardChecklist | null;
   logger?: Logger;
   now?: () => number;
   /** Floor between consecutive edits of one card. Default 15_000. */
@@ -283,7 +283,7 @@ export class ProgressCardService {
    */
   observe(event: DispatchEvent): Promise<void> {
     try {
-      const key = event.ticketId || event.ticketRef;
+      const key = event.runId || event.runRef;
       if (!key) return Promise.resolve();
       const existing = this.records.get(key);
       const state = reduceProgressCard(existing?.state ?? null, event, this.now());
@@ -306,7 +306,7 @@ export class ProgressCardService {
       }, wait);
       return Promise.resolve();
     } catch (error) {
-      this.logger.warn("progress card observe failed", { ticket: event.ticketRef, error: String(error) });
+      this.logger.warn("progress card observe failed", { run: event.runRef, error: String(error) });
       return Promise.resolve();
     }
   }
@@ -362,7 +362,7 @@ export class ProgressCardService {
     // event; every event after it (once the workspace's spec.md scaffold is written) reads the
     // real progress off specReader as normal.
     const checklist =
-      this.opts.specReader?.(record.lastEvent.ticketId) ??
+      this.opts.specReader?.(record.lastEvent.runId) ??
       (record.lastEvent.stage === "run:deploy" ? { done: 0, total: 0 } : null);
     const text = renderProgressCard(record.state, this.now(), checklist);
     record.lastDeliveredAt = this.now();
@@ -491,17 +491,10 @@ export function createProgressCardService(opts: ProgressCardServiceOptions): Pro
 // Sink gating (boot wiring)
 // =======================================================================================
 //
-// Two independent switches feed the ONE card service the daemon builds at boot
-// (`src/shell/main.ts`): `progress.cards_as_code` gates the ticket dispatcher's sink,
-// `runs.cards` gates the run engine's sink — either lane can be on while the other stays off.
-// Pulled out as pure predicates (rather than inlined `if` checks at each call site) so a
-// regression that drops a flag's check — e.g. reverting to a bare `service &&` null-check —
-// fails a fast unit test instead of only showing up as a silent behavior change in prod.
-
-/** Should the ticket dispatcher's dispatchLiveSink forward this event to the card service? */
-export function shouldObserveTicketCard(service: unknown, cardsAsCodeEnabled: boolean): boolean {
-  return Boolean(service) && cardsAsCodeEnabled;
-}
+// `runs.cards` gates the run engine's sink into the ONE card service the daemon builds at boot
+// (`src/shell/main.ts`). Pulled out as a pure predicate (rather than an inlined `if` at the call
+// site) so a regression that drops the flag check — e.g. reverting to a bare `service &&`
+// null-check — fails a fast unit test instead of only showing up as a silent behavior change.
 
 /** Should the run engine's dispatchLiveSink forward this event to the card service? */
 export function shouldObserveRunCard(service: unknown, runCardsEnabled: boolean): boolean {

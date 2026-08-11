@@ -1,5 +1,5 @@
 /**
- * Tests for user-defined cast presets (`src/tracker/presets.ts`) — OPS-110.
+ * Tests for user-defined cast presets (`src/run/presets.ts`) — OPS-110.
  * Covers: fresh (uncached) reads so an edit applies next call, seed-on-missing, roster validation
  * (blocked models + malformed casts throw), loud unknown-name failure, and per-stage override
  * precedence. These guard the "edit the file, no restart" contract and "never file a broken cast".

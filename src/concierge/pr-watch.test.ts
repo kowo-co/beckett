@@ -78,7 +78,7 @@ test("pr.watch forwards a hand-opened PR (channel stamped) to the wired registra
       url: "https://github.com/betterwright/betterwright/pull/66",
       title: "reimplement #65",
       channel: "chan-open",
-      ticket: undefined,
+      runId: undefined,
       author: "0xbeckett",
     },
   ]);

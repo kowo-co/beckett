@@ -214,10 +214,9 @@ async function main(): Promise<void> {
     const clock = new FakeClock();
     const gateway = new FakeGateway();
     const frames: TurnMessage[] = [];
-    const filedTickets: { identifier: string; title: string; channelId: string }[] = [];
+    const deployedRuns: { runId: string; title: string; channelId: string }[] = [];
     let concierge!: Concierge;
     let triageCalls = 0;
-    let ticketFiledPokes = 0;
 
     const yes: TriageVerdict = {
       interject: true,
@@ -253,13 +252,8 @@ async function main(): Promise<void> {
           });
           assert(ack.ok, `discord.reply bus ack failed: ${ack.error ?? "unknown"}`);
 
-          const filed = await concierge.onBusRequest({
-            cmd: "ticket.filed",
-            args: { channelId: CHAN, identifier: "E2E-CSV-1", title: "Add CSV export" },
-          });
-          assert(filed.ok, `ticket.filed bus signal failed: ${filed.error ?? "unknown"}`);
-          filedTickets.push({ identifier: "E2E-CSV-1", title: "Add CSV export", channelId: CHAN });
-          return "Filed E2E-CSV-1.";
+          deployedRuns.push({ runId: "run-20260810-csv-export", title: "Add CSV export", channelId: CHAN });
+          return "Deployed run-20260810-csv-export.";
         }
         if (text.includes("wish the dashboard had PDF export")) return "PASS";
         return "I can do that — want me to file CSV export?";
@@ -281,9 +275,6 @@ async function main(): Promise<void> {
     });
 
     concierge = new Concierge({ config, session, gateway, ambientTriage: triage, ambientClock: clock });
-    concierge.setTicketFiledListener(() => {
-      ticketFiledPokes++;
-    });
     gateway.onMessage((m) => concierge.onMessage(m));
 
     console.log("→ code gate: default off, one fake channel in suggest mode");
@@ -324,13 +315,12 @@ async function main(): Promise<void> {
     const parentPosts = gateway.posts.filter((p) => p.channelId === CHAN);
     assertEqual(parentPosts.length, 2, "consent should post exactly one parent-channel ack via the CLI path");
     assertEqual(parentPosts[1]?.text, "On it — filing CSV export now.", "consent ack mismatch");
-    assertEqual(filedTickets.length, 1, "consent should signal one filed ticket");
-    assertEqual(filedTickets[0]?.identifier, "E2E-CSV-1", "filed ticket identifier mismatch");
-    assertEqual(ticketFiledPokes, 1, "ticket.filed should poke the dispatcher once");
+    assertEqual(deployedRuns.length, 1, "consent should deploy one run");
+    assertEqual(deployedRuns[0]?.runId, "run-20260810-csv-export", "deployed run id mismatch");
     await drain();
-    // Coworker-as-a-Service: filing a ticket spawns NO bot threads and posts nothing beyond the
+    // Coworker-as-a-Service: deploying work spawns NO bot threads and posts nothing beyond the
     // ack — the worker firehose goes to the private journal, not a user-facing Discord thread.
-    assertEqual(gateway.posts.length, parentPosts.length, "ticket lifecycle should post nothing outside the parent channel");
+    assertEqual(gateway.posts.length, parentPosts.length, "run lifecycle should post nothing outside the parent channel");
     assertEqual(readLedger(dir).offers?.length ?? 0, 0, "offer ledger should clear after accepted consent");
 
     console.log("→ PASS/no-post path");

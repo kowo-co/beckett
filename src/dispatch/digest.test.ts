@@ -12,8 +12,8 @@ function ev(
 ): DispatchEvent {
   return {
     ts: extra.ts ?? at(clock),
-    ticketId: extra.id ?? "ticket-1",
-    ticketRef: extra.ref ?? "#2.1",
+    runId: extra.id ?? "ticket-1",
+    runRef: extra.ref ?? "#2.1",
     branchRef: "beckett/task-2-1",
     stage,
     outcome,
@@ -131,7 +131,7 @@ describe("DispatchDigest", () => {
   test("every digest points at the full trace", () => {
     const { d } = digest();
     expect(d.observe(ev("implement", "started", { message: "worker wk_1 on claude" }))?.text)
-      .toContain('beckett ticket trace "#2.1"');
+      .toContain('beckett task trace "#2.1"');
   });
 
   test("suppresses the duplicate replay batch a restart produces", () => {

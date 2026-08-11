@@ -861,8 +861,8 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
 
     // Case 1 — origin points to a repo outside our own account/managed owner. The head repo and
     // push target are read from THAT origin, never a hardcoded `<owner>/<slug>` — the assumption
-    // that stranded #12 (origin was frgmt0/bored, but publish tried to open a cross-fork PR from a
-    // stale fork that was never pushed). Two sub-shapes, distinguished by whether we can push:
+    // that stranded #12 (origin was a third-party upstream, but publish tried to open a cross-fork
+    // PR from a stale fork that was never pushed). Two sub-shapes, distinguished by whether we can push:
     //   1a — we're a collaborator on origin (write access): push the branch STRAIGHT to origin and
     //        open a plain in-repo PR (base = origin's default branch, head = branch). No fork.
     //   1b — a genuine third-party upstream we can only read: fork it, push the branch to our fork,

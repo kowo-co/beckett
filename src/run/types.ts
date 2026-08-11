@@ -6,15 +6,14 @@
  * call, `RunSupervisor` drives it through implement → review → publish, and the worker's spec.md
  * checklist (see `./spec-file.ts`) is the enforced contract instead of tracker acceptance
  * criteria. This module is intentionally implementation-free (types only), mirroring the root
- * `src/types.ts` / `src/tracker/types.ts` convention.
+ * `src/types.ts` convention.
  *
- * `Casting` is re-exported from its current home (`../tracker/types.ts`) rather than imported
- * ad hoc by every consumer, so wave-B — which cuts the tracker package out of the runtime
- * entirely — only has to change this one line to point Casting at its new home.
+ * `Casting` is re-exported from `./cast.ts` rather than imported ad hoc by every consumer, so the
+ * run contract stays the one import a consumer needs.
  */
 
-export type { Casting } from "../tracker/types.ts";
-import type { Casting } from "../tracker/types.ts";
+export type { Casting } from "./cast.ts";
+import type { Casting } from "./cast.ts";
 
 /** The two worker stages a run drives a Claude session through. */
 export type RunStage = "implement" | "review";
@@ -40,6 +39,19 @@ export type RunState =
  * whether a parked run gets a worker.
  */
 export const RUN_TERMINAL: ReadonlySet<RunState> = new Set<RunState>(["done", "failed", "cancelled", "parked"]);
+
+/**
+ * What the supervisor tells the rest of the daemon about a run's lifecycle. Deliberately ONE kind:
+ * the ticket system's four poll-event kinds existed because a tracker was the source of truth and
+ * the daemon had to diff it; the supervisor OWNS the transition, so a state change is the whole
+ * vocabulary. `from` is null for a run admitted mid-flight after a restart.
+ */
+export interface RunStateChange {
+  kind: "state_changed";
+  run: Run;
+  from: RunState | null;
+  to: RunState;
+}
 
 /**
  * The execution unit. One row per `beckett task deploy` call (or plan-filed run). Durable at

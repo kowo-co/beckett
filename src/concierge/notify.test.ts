@@ -1,7 +1,7 @@
 /**
- * Coverage for the closed agent loop's routing + dedup (Concierge.notify / frameUpdate). This is
- * the brittle judgment — which tracker events become a Discord ping, on which channel, exactly once —
- * so it's pinned here against an injected fake session rather than left to a live run.
+ * Coverage for the closed agent loop's routing + dedup (Concierge.notify / frameRunUpdate). This is
+ * the brittle judgment — which run transitions become a Discord ping, on which channel, exactly
+ * once — so it's pinned here against an injected fake session rather than left to a live run.
  */
 
 import { expect, test } from "bun:test";
@@ -14,7 +14,7 @@ import { openLoop, settleLoop } from "../memory/loops.ts";
 import { TaskStore } from "../task/store.ts";
 import type { AmbientClock } from "./ambient.ts";
 import type { Config } from "../types.ts";
-import type { TicketComment, PollEvent, Ticket } from "../tracker/types.ts";
+import type { Run, RunStateChange } from "../run/types.ts";
 
 const CHAN = "1097283746520174592";
 
@@ -49,44 +49,45 @@ function harness(clock?: AmbientClock, tasks?: TaskStore) {
   return { concierge, asks };
 }
 
-function ticket(overrides: Partial<Ticket> = {}): Ticket {
+function run(overrides: Partial<Run> = {}): Run {
   return {
-    id: "id-1",
-    identifier: "BEC-1",
+    id: "run-20260810-healthz",
+    slug: "healthz",
     title: "Add healthz",
-    description: "",
-    body: "",
-    state: "in_progress",
-    assignees: [],
-    casting: {},
-    criteria: [],
-    blockedBy: [],
-    projectId: "p",
-    url: "http://x",
-    updatedAt: "now",
-    originChannel: CHAN,
+    prompt: "Add a /healthz endpoint.",
+    channelId: CHAN,
+    requesterId: null,
+    taskRef: null,
+    ultracode: false,
+    cast: null,
+    repo: null,
+    state: "implementing",
+    createdAt: "2026-08-10T00:00:00.000Z",
+    updatedAt: "2026-08-10T00:00:00.000Z",
+    workspace: null,
+    branch: "beckett/run-healthz",
+    baseSha: null,
+    sessionIds: {},
+    sessionName: "beckett-run-healthz",
+    reviewCycles: 0,
+    prUrl: null,
+    error: null,
     ...overrides,
   };
 }
 
-function comment(body: string): TicketComment {
-  return { id: "c1", ticketId: "id-1", author: "beckett", body, createdAt: "now" };
+function change(to: Run["state"], overrides: Partial<Run> = {}, from: Run["state"] | null = "implementing"): RunStateChange {
+  return { kind: "state_changed", run: run({ state: to, ...overrides }), from, to };
 }
 
-const dispatcherComment = (text: string) => comment(`<!-- beckett:dispatcher -->\n${text}`);
-
-test("relays a dispatcher milestone comment as one turn carrying the right --channel", async () => {
+test("relays a terminal milestone as one turn carrying the right --channel", async () => {
   const { concierge, asks } = harness();
-  concierge.notify({
-    kind: "comment_added",
-    ticket: ticket(),
-    comment: dispatcherComment("Review found issues → back to **in_progress** for re-work."),
-  });
+  concierge.notify(change("failed", { error: "the implement worker exited with an error." }));
   await new Promise((r) => setTimeout(r, 0)); // notify frames + batches on a microtask (issue #25)
   expect(asks.length).toBe(1);
   expect(asks[0]).toContain(`beckett discord reply --channel ${CHAN}`);
-  expect(asks[0]).toContain("in_progress");
-  expect(asks[0]).not.toContain("beckett:dispatcher"); // marker stripped before the concierge sees it
+  expect(asks[0]).toContain("The run failed.");
+  expect(asks[0]).toContain("the implement worker exited with an error.");
 });
 
 test("incoming email is delivered through the automated-update turn queue with readable fields", async () => {
@@ -172,99 +173,53 @@ test("routine.self refuses without routineId/prompt/channelId (no half-formed se
   expect(asks.length).toBe(0);
 });
 
-test("does NOT ping for the intermediate `→ in_review` advance (avoids the double-message)", () => {
+test("mid-flight churn (implement → review) never costs a turn", () => {
   const { concierge, asks } = harness();
-  // The person already has an ack; the `done` ping lands after review. This intermediate advance is
-  // exactly the "okay, I did the thing" half of the back-to-back pair — it must stay silent.
-  concierge.notify({
-    kind: "comment_added",
-    ticket: ticket(),
-    comment: dispatcherComment("Implementation complete → **in_review**."),
-  });
+  // The person already has an ack; the terminal ping lands when the work finishes. This
+  // intermediate advance is exactly the "okay, I did the thing" half of a back-to-back pair.
+  concierge.notify(change("reviewing"));
+  concierge.notify(change("publishing", {}, "reviewing"));
+  concierge.notify(change("queued", {}, null));
   expect(asks.length).toBe(0);
 });
 
-test("still surfaces a human-handoff that mentions in_review (no `→` arrow — keep it)", async () => {
+test("a parked run always speaks — nothing will re-staff it, so silence would strand the work", async () => {
   const { concierge, asks } = harness();
-  concierge.notify({
-    kind: "comment_added",
-    ticket: ticket(),
-    comment: dispatcherComment(
-      "Review found issues, and this is rework cycle 3/3 — stopping automatic rework and leaving " +
-        "this in **in_review** for a human to take over.",
-    ),
-  });
+  concierge.notify(change("parked", { error: "review found issues, and this is rework cycle 2/2." }));
   await new Promise((r) => setTimeout(r, 0));
   expect(asks.length).toBe(1);
-  expect(asks[0]).toContain("human");
+  expect(asks[0]).toContain("parked for a human");
+  expect(asks[0]).toContain("rework cycle 2/2");
 });
 
-test("ignores human/worker comments — only Beckett's own narration is echoed", () => {
+test("surfaces `done` and carries the shipped PR link so the person can click through", async () => {
   const { concierge, asks } = harness();
-  concierge.notify({
-    kind: "comment_added",
-    ticket: ticket(),
-    comment: comment("hey can you also add request logging while you're in there"),
-  });
-  expect(asks.length).toBe(0);
-});
-
-test("surfaces `done` from the state transition (the comment feed misses terminal tickets)", async () => {
-  const { concierge, asks } = harness();
-  concierge.notify({ kind: "state_changed", ticket: ticket({ state: "done" }), from: "in_review", to: "done" });
-  await new Promise((r) => setTimeout(r, 0)); // done pings frame async (artifact-link fetch)
+  concierge.notify(change("done", { prUrl: "https://github.com/0xbeckett/healthz/pull/3" }, "publishing"));
+  await new Promise((r) => setTimeout(r, 0));
   expect(asks.length).toBe(1);
   expect(asks[0]).toContain(`--channel ${CHAN}`);
   expect(asks[0]?.toLowerCase()).toContain("done");
+  expect(asks[0]).toContain("https://github.com/0xbeckett/healthz/pull/3");
 });
 
-test("the done ping carries the artifact link from the dispatcher's done comment (issue #21)", async () => {
-  const asks: string[] = [];
-  const session = {
-    ask: (m: string) => {
-      asks.push(m);
-      return Promise.resolve("");
-    },
-  } as unknown as ConciergeSession;
-  const tracker = {
-    listComments: async () => [
-      comment("<!-- beckett:dispatcher -->\nSelf-reviewed → **done** (one pass).\n\nShipped: https://github.com/0xbeckett/healthz"),
-    ],
-  };
-  const concierge = new Concierge({ config, session, gateway: {} as never, tracker });
-  concierge.notify({ kind: "state_changed", ticket: ticket({ state: "done" }), from: "in_review", to: "done" });
+test("a done run with no PR still pings, without inventing a link", async () => {
+  const { concierge, asks } = harness();
+  concierge.notify(change("done", {}, "publishing"));
   await new Promise((r) => setTimeout(r, 0));
   expect(asks.length).toBe(1);
-  expect(asks[0]).toContain("https://github.com/0xbeckett/healthz");
+  expect(asks[0]?.toLowerCase()).toContain("done");
+  expect(asks[0]).not.toContain("Artifact:");
 });
 
-test("boot recovery (from: null) tells the user the ticket is being re-staffed (issue #21)", async () => {
+test("boot recovery (from: null) tells the user the run is being re-staffed (issue #21)", async () => {
   const { concierge, asks } = harness();
-  concierge.notify({ kind: "state_changed", ticket: ticket(), from: null, to: "in_progress" });
+  concierge.notify(change("implementing", {}, null));
   await new Promise((r) => setTimeout(r, 0));
   expect(asks.length).toBe(1);
   expect(asks[0]).toContain("restarted");
 });
 
-test("warm-restart silent re-staff (from === to) does NOT ping the user (issue #60)", async () => {
-  // The poller re-staffs a previously-seen active ticket by seeding a same-state transition so the
-  // Dispatcher picks it up WITHOUT the `from: null` restart ping. The concierge must stay silent —
-  // this is the phantom-ping-storm fix's user-facing guarantee.
-  const { concierge, asks } = harness();
-  concierge.notify({ kind: "state_changed", ticket: ticket(), from: "in_progress", to: "in_progress" });
-  concierge.notify({ kind: "state_changed", ticket: ticket({ state: "in_review" }), from: "in_review", to: "in_review" });
-  await new Promise((r) => setTimeout(r, 0));
-  expect(asks.length).toBe(0);
-});
-
-test("does not double-surface non-terminal state changes (covered by the comment)", () => {
-  const { concierge, asks } = harness();
-  concierge.notify({ kind: "state_changed", ticket: ticket(), from: "in_progress", to: "in_review" });
-  concierge.notify({ kind: "created", ticket: ticket() });
-  expect(asks.length).toBe(0);
-});
-
-test("a carded task's cancellation is card-only churn (no plain ping), but its done milestone still fires (#104)", async () => {
+test("a carded task's cancellation is card-only churn, but its done milestone still fires (#104)", async () => {
   // A task that owns a self-editing card shows cancelled/re-staff as machine state on the card, so
   // those routine transitions no longer cost a separate message. A genuine milestone (done) still
   // goes out in Beckett's voice — the card replaces churn, not the speaking-when-it-matters.
@@ -273,31 +228,27 @@ test("a carded task's cancellation is card-only churn (no plain ping), but its d
   await store.createTask({ title: "Carded", originChannelId: CHAN });
   await store.setCard(1, { channelId: CHAN, messageId: "card-1" });
   const { concierge, asks } = harness(undefined, store);
-  const carded = ticket({ branchRef: "1.1" });
 
-  concierge.notify({ kind: "cancelled", ticket: carded });
-  concierge.notify({ kind: "state_changed", ticket: carded, from: null, to: "in_progress" });
+  concierge.notify(change("cancelled", { taskRef: "#1.1" }));
+  concierge.notify(change("implementing", { taskRef: "#1.1" }, null));
   await new Promise((r) => setTimeout(r, 0));
   expect(asks.length).toBe(0); // both are card-only churn — no plain message
 
-  concierge.notify({ kind: "state_changed", ticket: ticket({ branchRef: "1.1", state: "done" }), from: "in_review", to: "done" });
+  concierge.notify(change("done", { taskRef: "#1.1" }, "publishing"));
   await new Promise((r) => setTimeout(r, 0));
   expect(asks.length).toBe(1); // the milestone still speaks
   expect(asks[0]!.toLowerCase()).toContain("done");
+  rmSync(dir, { recursive: true, force: true });
 });
 
-test("a branch's persisted --ping list rides every automated update as a --ping flag on the suggested reply (issue #10)", async () => {
+test("a branch's persisted --ping list rides every automated update as a --ping flag (issue #10)", async () => {
   const RO = "1151230208783945818";
   const dir = mkdtempSync(join(tmpdir(), "beckett-notify-ping-"));
   const store = new TaskStore(join(dir, "tasks.json"));
   await store.createTask({ title: "Add healthz", originChannelId: CHAN, pings: [RO] });
   const { concierge, asks } = harness(undefined, store);
 
-  concierge.notify({
-    kind: "comment_added",
-    ticket: ticket({ branchRef: "1.1" }),
-    comment: dispatcherComment("Review found issues → back to **in_progress** for re-work."),
-  });
+  concierge.notify(change("failed", { taskRef: "#1.1" }));
   await new Promise((r) => setTimeout(r, 0));
   expect(asks.length).toBe(1);
   expect(asks[0]).toContain(`beckett discord reply --channel ${CHAN} --ping ${RO} "<your message>"`);
@@ -313,11 +264,7 @@ test("a branch's own pings (set at task start) override the task's default in th
   await store.setPings("1.1", [ALICE]);
   const { concierge, asks } = harness(undefined, store);
 
-  concierge.notify({
-    kind: "comment_added",
-    ticket: ticket({ branchRef: "1.1" }),
-    comment: dispatcherComment("Review found issues → back to **in_progress** for re-work."),
-  });
+  concierge.notify(change("failed", { taskRef: "#1.1" }));
   await new Promise((r) => setTimeout(r, 0));
   expect(asks.length).toBe(1);
   expect(asks[0]).toContain(`--ping ${ALICE}`);
@@ -327,127 +274,92 @@ test("a branch's own pings (set at task start) override the task's default in th
 
 test("a task/branch with no pings suggests the plain reply command, unchanged", async () => {
   const { concierge, asks } = harness();
-  concierge.notify({
-    kind: "comment_added",
-    ticket: ticket(),
-    comment: dispatcherComment("Review found issues → back to **in_progress** for re-work."),
-  });
+  concierge.notify(change("failed"));
   await new Promise((r) => setTimeout(r, 0));
   expect(asks.length).toBe(1);
   expect(asks[0]).toContain(`beckett discord reply --channel ${CHAN} "<your message>"`);
   expect(asks[0]).not.toContain("--ping");
 });
 
-test("a card-less task still gets the plain cancellation ping (pre-card path unchanged)", async () => {
+test("a card-less run still gets the plain cancellation ping", async () => {
   const { concierge, asks } = harness();
-  concierge.notify({ kind: "cancelled", ticket: ticket() });
+  concierge.notify(change("cancelled"));
   await new Promise((r) => setTimeout(r, 0));
   expect(asks.length).toBe(1);
   expect(asks[0]).toContain("cancelled");
 });
 
-test("drops (does not surface) an update for a ticket with no origin channel", () => {
+test("drops (does not surface) an update for a run with no origin channel", () => {
   const { concierge, asks } = harness();
-  concierge.notify({
-    kind: "comment_added",
-    ticket: ticket({ originChannel: undefined }),
-    comment: dispatcherComment("Review found issues → back to **in_progress** for re-work."),
-  });
+  concierge.notify(change("failed", { channelId: null }));
   expect(asks.length).toBe(0);
 });
 
 test("a full lifecycle batch yields exactly one ping per real milestone", async () => {
   const { concierge, asks } = harness();
-  const t = ticket();
-  const events: PollEvent[] = [
-    { kind: "created", ticket: t },
-    { kind: "state_changed", ticket: t, from: null, to: "in_progress" },
-    { kind: "comment_added", ticket: t, comment: dispatcherComment("Implementation complete → **in_review**.") },
-    { kind: "comment_added", ticket: t, comment: comment("looks good, ship it") }, // human — skip
-    { kind: "comment_added", ticket: t, comment: dispatcherComment("Review found issues → back to **in_progress**.") },
-    { kind: "state_changed", ticket: ticket({ state: "done" }), from: "in_review", to: "done" },
+  const events: RunStateChange[] = [
+    change("implementing", {}, "queued"),
+    change("reviewing"),
+    change("publishing", {}, "reviewing"),
+    change("done", { prUrl: "https://github.com/0xbeckett/healthz/pull/3" }, "publishing"),
   ];
   concierge.notify(events);
   await new Promise((r) => setTimeout(r, 0));
-  // ONE combined turn for the whole batch (issue #25): recovery + rework + done fold together;
-  // created/human chatter AND the `→ in_review` advance are all skipped.
+  // ONE combined turn for the whole batch (issue #25): only the terminal transition speaks.
   expect(asks.length).toBe(1);
-  expect(asks[0]).toContain("Review found issues");
   expect(asks[0]!.toLowerCase()).toContain("done");
   expect(asks[0]).toContain(`--channel ${CHAN}`);
 });
 
-test("routine noise (blockers-cleared start, retry heartbeat) never costs a turn (issue #25)", async () => {
-  const { concierge, asks } = harness();
-  concierge.notify({
-    kind: "comment_added",
-    ticket: ticket(),
-    comment: dispatcherComment("All blockers done (OPS-7) → starting now."),
-  });
-  concierge.notify({
-    kind: "comment_added",
-    ticket: ticket(),
-    comment: dispatcherComment(
-      "The worker stopped without finishing. I committed its work-in-progress and am retrying (attempt 2/3), continuing from the committed work.",
-    ),
-  });
-  await new Promise((r) => setTimeout(r, 0));
-  expect(asks.length).toBe(0);
-});
-
 // ── notify re-fire idempotency (the done-update loop) ──────────────────────────────────────
-// A `done` event can be re-delivered to notify() — the instant-milestone path racing the ≤5s poll
-// re-emit, an outbox replay, or an ambiguous `beckett discord reply` ack that upstream retries
-// mistake for "not delivered". The dispatch dedupes per (ticket, milestone) so one milestone is one
-// turn even when it arrives repeatedly; a real, distinct milestone still fires.
+// A `done` event can be re-delivered to notify() — a boot re-admission, or an ambiguous
+// `beckett discord reply` ack that upstream retries mistake for "not delivered". The dispatch
+// dedupes per (run, state) so one milestone is one turn even when it arrives repeatedly; a real,
+// distinct milestone still fires.
 
 test("a re-delivered done event notifies at most once (ambiguous-ack re-fire loop)", async () => {
   const { concierge, asks } = harness();
-  const done: PollEvent = { kind: "state_changed", ticket: ticket({ state: "done" }), from: "in_review", to: "done" };
+  const done = change("done", {}, "publishing");
   // Four back-to-back deliveries of the SAME done milestone — exactly the observed 4x re-fire.
   concierge.notify(done);
   concierge.notify(done);
   concierge.notify(done);
   concierge.notify(done);
-  await new Promise((r) => setTimeout(r, 0)); // done pings frame async (artifact-link fetch)
+  await new Promise((r) => setTimeout(r, 0));
   expect(asks.length).toBe(1);
   expect(asks[0]?.toLowerCase()).toContain("done");
 });
 
-test("dedupe is per-ticket — two different tickets reaching done each fire once", async () => {
+test("dedupe is per-run — two different runs reaching done each fire once", async () => {
   const { concierge, asks } = harness();
-  concierge.notify({ kind: "state_changed", ticket: ticket({ id: "id-A", state: "done" }), from: "in_review", to: "done" });
-  concierge.notify({ kind: "state_changed", ticket: ticket({ id: "id-A", state: "done" }), from: "in_review", to: "done" });
-  concierge.notify({ kind: "state_changed", ticket: ticket({ id: "id-B", state: "done" }), from: "in_review", to: "done" });
+  concierge.notify(change("done", { id: "run-A" }, "publishing"));
+  concierge.notify(change("done", { id: "run-A" }, "publishing"));
+  concierge.notify(change("done", { id: "run-B" }, "publishing"));
   await new Promise((r) => setTimeout(r, 0));
-  expect(asks.length).toBe(2); // one per distinct ticket, re-delivery of A suppressed
+  expect(asks.length).toBe(2); // one per distinct run, re-delivery of A suppressed
 });
 
-test("a genuinely-new milestone (a distinct dispatcher comment) still fires after a done ping", async () => {
+test("a genuinely-new milestone on the same run still fires after a done ping", async () => {
   const { concierge, asks } = harness();
-  concierge.notify({ kind: "state_changed", ticket: ticket({ state: "done" }), from: "in_review", to: "done" });
+  concierge.notify(change("done", {}, "publishing"));
   await new Promise((r) => setTimeout(r, 0));
-  // A different milestone on the same ticket — distinct comment id, so it is NOT the same key.
-  concierge.notify({
-    kind: "comment_added",
-    ticket: ticket(),
-    comment: { id: "c-later", ticketId: "id-1", author: "beckett", body: "<!-- beckett:dispatcher -->\nReview found issues → back to **in_progress** for re-work.", createdAt: "later" },
-  });
+  // A different STATE on the same run — a distinct key, so it is not suppressed.
+  concierge.notify(change("parked", { error: "a human took it back" }, "done"));
   await new Promise((r) => setTimeout(r, 0));
   expect(asks.length).toBe(2);
 });
 
-test("outside the dedupe window a re-entry fires again (design re-review after human feedback)", async () => {
+test("outside the dedupe window a re-entry fires again (a second park after human feedback)", async () => {
   const clock = new FakeClock();
   const { concierge, asks } = harness(clock);
-  const gate: PollEvent = { kind: "state_changed", ticket: ticket({ state: "design_review" }), from: "design", to: "design_review" };
-  concierge.notify(gate);
+  const parked = change("parked", { error: "held for review" });
+  concierge.notify(parked);
   await new Promise((r) => setTimeout(r, 0));
-  concierge.notify(gate); // immediate re-delivery — suppressed
+  concierge.notify(parked); // immediate re-delivery — suppressed
   await new Promise((r) => setTimeout(r, 0));
   expect(asks.length).toBe(1);
-  clock.advance(6 * 60_000); // past the 5-minute window: a real second parked-for-review is legitimate
-  concierge.notify(gate);
+  clock.advance(6 * 60_000); // past the 5-minute window: a real second park is legitimate
+  concierge.notify(parked);
   await new Promise((r) => setTimeout(r, 0));
   expect(asks.length).toBe(2);
 });

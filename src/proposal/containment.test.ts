@@ -101,7 +101,7 @@ function doors(proposalsDir: string) {
     accept: {
       proposalsDir,
       now: () => NOW,
-      fileTicket: async (input: { title: string }) => (filed.push(input.title), { identifier: "OPS-1" }),
+      deployRun: async (input: { title: string }) => (filed.push(input.title), { runId: "run-20260810-x" }),
       createTaskBranch: async (input: { title: string }) => (branched.push(input.title), { taskRef: "#1", branchRef: "#1.1" }),
     },
     reject: {
@@ -153,7 +153,7 @@ test("accepting a proposal of EVERY kind writes no doctrine, no persona, and no 
   // Everything it COULD do, it did: every proposal walked out a normal front door.
   expect(h.filed.length + h.branched.length).toBe(ids.length);
   expect(listProposals(w.proposalsDir, { all: true }).every((p) => p.status === "accepted")).toBe(true);
-  expect(listProposals(w.proposalsDir, { all: true }).every((p) => /^(ticket|task):/.test(p.became ?? ""))).toBe(true);
+  expect(listProposals(w.proposalsDir, { all: true }).every((p) => /^(run|task):/.test(p.became ?? ""))).toBe(true);
 });
 
 test("rejecting writes no doctrine, no persona, and no memory either", async () => {
@@ -215,8 +215,8 @@ test("a hand-planted record asking to be applied is read as an ordinary proposal
   const before = fingerprint(w.root, [w.proposalsDir]);
   const result = await acceptProposal(h.accept, id);
 
-  expect(result.route).toBe("ticket");
-  expect(result.became).toBe("ticket:OPS-1");
+  expect(result.route).toBe("run");
+  expect(result.became).toBe("run:run-20260810-x");
   expect(fingerprint(w.root, [w.proposalsDir])).toEqual(before);
   // The invented fields did not survive the read, so they are not even in the stamped record.
   const stored = JSON.parse(readFileSync(join(w.proposalsDir, `${id}.json`), "utf8")) as Record<string, unknown>;
@@ -270,7 +270,7 @@ test("an id can never address a file outside the queue, in any decision path", a
 test("there is no third destination: every kind routes to a normal front door", () => {
   expect(Object.keys(ACCEPT_ROUTE).sort()).toEqual([...PROPOSAL_KINDS].sort());
   for (const kind of PROPOSAL_KINDS) {
-    expect(["ticket", "task"]).toContain(ACCEPT_ROUTE[kind as ProposalKind]);
+    expect(["run", "task"]).toContain(ACCEPT_ROUTE[kind as ProposalKind]);
   }
 });
 
