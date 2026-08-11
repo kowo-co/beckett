@@ -1576,7 +1576,7 @@ exports[`cli: task: unknown sub prints usage 1`] = `
 {
   "exit": 1,
   "stderr": 
-"error: usage: beckett task create|branch|start|deploy|ask|steer|cancel|show|list|trace <...>
+"error: usage: beckett task create|branch|start|deploy|ask|steer|cancel|courier|show|list|trace <...>
 "
 ,
   "stdout": "",

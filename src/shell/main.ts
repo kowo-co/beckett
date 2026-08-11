@@ -391,6 +391,24 @@ async function boot(): Promise<BootedSystem> {
         },
       },
       {
+        name: "run.courier",
+        summary: "a human published this run's work by hand: mark it done/shipped (couriered), never cancelled",
+        handle: async (req) => {
+          const runId = typeof req.args.runId === "string" ? req.args.runId.trim() : "";
+          if (!runId) return { ok: false, error: "run.courier needs a runId" };
+          const outcome = await runSupervisor.courier(runId);
+          if (outcome === "unknown") return { ok: false, error: `no such run: ${runId}` };
+          if (outcome === "not-eligible") {
+            return { ok: false, error: `run ${runId} is not publishing or parked — nothing for a courier to have shipped` };
+          }
+          const prUrl = typeof req.args.prUrl === "string" ? req.args.prUrl.trim() : "";
+          if (prUrl && (outcome === "done" || outcome === "already-terminal")) {
+            await runSupervisor.backfillCourierPrUrl(runId, prUrl);
+          }
+          return { ok: true, data: { runId, outcome, ...(prUrl ? { prUrl } : {}) } };
+        },
+      },
+      {
         name: "run.steer",
         summary: "deliver a note to a live run (nudge), or buffer it for its next stage",
         handle: async (req) => {
