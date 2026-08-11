@@ -43,7 +43,7 @@ import {
   type MossDocument,
 } from "./channel-moss.ts";
 import { STOP_WORDS } from "../moss-local/index.ts";
-import type { IncomingMessageSnapshot, Logger } from "../types.ts";
+import type { IncomingMentionTarget, IncomingMessageSnapshot, Logger } from "../types.ts";
 
 /** One captured message in a channel's shared window. */
 export interface ChannelEntry {
@@ -59,6 +59,12 @@ export interface ChannelEntry {
   content: string;
   /** Discord's native reply target, when present. Optional for backward-compatible stored rows. */
   repliedToId?: string | null;
+  /**
+   * Explicit @mention targets on this message (issue #232). Carried into the record so the ambient
+   * classifier's snapshot knows who the author actually addressed, not merely that someone spoke.
+   * Absent on rows written before this field existed, and on messages that mentioned nobody.
+   */
+  mentions?: IncomingMentionTarget[];
   kind: "user" | "beckett";
   /**
    * Quoted originals from a Discord forward, when this entry captured one (#111). Kept on the
@@ -235,6 +241,22 @@ export function createChannelContextStore(opts: ChannelContextStoreOptions): Cha
     return false;
   }
 
+  /**
+   * Re-materialize the stored mention targets. A malformed or partial row loses only its mentions
+   * (the entry itself still stands) — an @mention list is enrichment, never load-bearing.
+   */
+  function parseMentions(raw: unknown): IncomingMentionTarget[] {
+    if (!Array.isArray(raw)) return [];
+    const targets: IncomingMentionTarget[] = [];
+    for (const item of raw) {
+      if (!item || typeof item !== "object") continue;
+      const { id, name } = item as { id?: unknown; name?: unknown };
+      if (typeof id !== "string" || typeof name !== "string" || !id || !name) continue;
+      targets.push({ id, name });
+    }
+    return targets;
+  }
+
   /** Re-materialize one line; anything structurally off is dropped (counted by the caller). */
   function parseEntry(line: string): ChannelEntry | null {
     try {
@@ -249,6 +271,7 @@ export function createChannelContextStore(opts: ChannelContextStoreOptions): Cha
         (raw.repliedToId === undefined || raw.repliedToId === null || typeof raw.repliedToId === "string") &&
         (raw.kind === "user" || raw.kind === "beckett")
       ) {
+        const mentions = parseMentions(raw.mentions);
         return {
           messageId: raw.messageId,
           ts: raw.ts,
@@ -256,6 +279,7 @@ export function createChannelContextStore(opts: ChannelContextStoreOptions): Cha
           authorName: raw.authorName,
           content: raw.content,
           ...(raw.repliedToId !== undefined ? { repliedToId: raw.repliedToId } : {}),
+          ...(mentions.length > 0 ? { mentions } : {}),
           kind: raw.kind,
         };
       }

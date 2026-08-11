@@ -79,6 +79,12 @@ export interface TriageMessage {
   authorId?: string;
   /** Discord's native reply target. Null/absent means this was not a native reply. */
   repliedToId?: string | null;
+  /**
+   * Everyone this message explicitly @mentioned (issue #232). The classifier used to infer the
+   * addressee from wording alone, so a reply aimed at one human read as a message to the room —
+   * "hold on", meant for the person who asked, was read as pausing Beckett's own report.
+   */
+  mentions?: { id?: string; name: string }[];
   /** Mechanical role signal from the shared channel record. */
   isBeckett?: boolean;
 }
@@ -128,6 +134,31 @@ function isBeckettMessage(message: TriageMessage): boolean {
   return message.isBeckett === true;
 }
 
+/** How much of a replied-to message rides along as context. Enough to recognize it, not to re-read it. */
+const REPLY_EXCERPT_MAX = 80;
+
+/** A one-line, bounded quote of the message being replied to — the `↳ replying to …: "…"` half. */
+function excerpt(content: string): string {
+  const flat = content.replace(/\s+/g, " ").trim();
+  if (!flat) return "";
+  return flat.length > REPLY_EXCERPT_MAX ? `${flat.slice(0, REPLY_EXCERPT_MAX - 1).trimEnd()}…` : flat;
+}
+
+/** Explicit @mention targets, normalized and deduped; empty when the message addressed nobody. */
+function mentionTargets(message: TriageMessage): Record<string, string>[] {
+  const seen = new Set<string>();
+  const targets: Record<string, string>[] = [];
+  for (const mention of message.mentions ?? []) {
+    const name = mention?.name?.trim();
+    if (!name) continue;
+    const key = mention.id ? `id:${mention.id}` : `name:${name.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    targets.push({ name, ...(mention.id ? { id: mention.id } : {}) });
+  }
+  return targets;
+}
+
 /** Distinct human identities across the recent window, in first-seen order. */
 function participants(transcript: TriageMessage[], burst: TriageMessage[]): Record<string, string>[] {
   const seen = new Set<string>();
@@ -162,16 +193,21 @@ function modelMessages(messages: TriageMessage[], allMessages: TriageMessage[]):
     let replyTo: Record<string, string> | undefined;
     if (message.repliedToId) {
       const target = byId.get(message.repliedToId);
+      // The excerpt is the half that was missing (issue #232): "ro replied to ssh" says who, and
+      // only the quoted words say WHAT — which is what tells a hesitation apart from a pivot.
+      const quoted = target ? excerpt(target.content) : "";
       replyTo = target
         ? isBeckettMessage(target)
-          ? { role: "beckett" }
+          ? { role: "beckett", ...(quoted ? { excerpt: quoted } : {}) }
           : {
               role: "human",
               name: target.authorDisplayName.trim() || "unknown-human",
               ...(target.authorId ? { id: target.authorId } : {}),
+              ...(quoted ? { excerpt: quoted } : {}),
             }
         : { role: "unknown" };
     }
+    const mentions = mentionTargets(message);
     const speaker = isBeckettMessage(message)
       ? { role: "beckett" }
       : {
@@ -183,6 +219,7 @@ function modelMessages(messages: TriageMessage[], allMessages: TriageMessage[]):
       time: fmtTime(message.ts),
       speaker,
       ...(replyTo ? { replyTo } : {}),
+      ...(mentions.length > 0 ? { mentions } : {}),
       text: message.content,
     };
   });

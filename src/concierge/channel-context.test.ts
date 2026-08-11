@@ -78,6 +78,34 @@ test("append → recent round-trips all fields in order", () => {
   expect(store.recent("chan")).toEqual([a, b, c]);
 });
 
+test("mention targets survive a restart, and a malformed one costs only itself (issue #232)", () => {
+  const channelsDir = tempChannelsDir();
+  const { store } = makeStore({ channelsDir, now: () => 10_000 });
+  store.append("chan", entry("m1", 1_000, { mentions: [{ id: "u-ro", name: "ro" }] }));
+  // A fresh store re-materializes from disk — this is the snapshot the classifier scores.
+  const { store: reloaded } = makeStore({ channelsDir, now: () => 10_000 });
+  expect(reloaded.recent("chan")[0]?.mentions).toEqual([{ id: "u-ro", name: "ro" }]);
+
+  mkdirSync(channelsDir, { recursive: true });
+  writeFileSync(
+    join(channelsDir, "chan2.jsonl"),
+    `${JSON.stringify({
+      messageId: "m9",
+      ts: 1_000,
+      authorId: "224712345678901234",
+      authorName: "Jason",
+      content: "still a real line",
+      mentions: ["not-an-object", { id: 7 }, { name: "ro" }],
+      kind: "user",
+    })}\n`,
+  );
+  const { store: third } = makeStore({ channelsDir, now: () => 10_000 });
+  const row = third.recent("chan2")[0];
+  // The entry stands; only its unusable mention list is dropped. An @mention list is enrichment.
+  expect(row?.content).toBe("still a real line");
+  expect(row?.mentions).toBeUndefined();
+});
+
 // ── bounds ──────────────────────────────────────────────────────────────────────────────
 
 test("count cap keeps only the newest maxEntriesPerChannel", () => {
