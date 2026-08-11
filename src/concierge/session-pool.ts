@@ -56,6 +56,8 @@ export interface PoolSession {
   hasLiveChild?(): boolean;
   /** Per-process issuer credential exported into the child env (bus-op correlation, §9.3). */
   busToken?(): string;
+  /** Mark a bus op the child is BLOCKED on; the returned fn settles it (issue #229 re-ground gate). */
+  noteInlineErrand?(): () => void;
 }
 
 export interface SessionPoolOptions {
@@ -273,6 +275,25 @@ export class SessionPool {
       if (session.busToken?.() === token) return session.getCurrentMeta?.() ?? null;
     }
     return null;
+  }
+
+  /**
+   * Mark an INLINE ERRAND against the session that issued it — a bus op its child is blocked on
+   * while it runs (a `browser.exec` holding the browser lease, a `quick.run` specialist). Resolved
+   * by issuer token exactly like {@link metaForToken}, because that token is the only thing that
+   * says WHICH scope is waiting; a channel guess would gate the wrong session's re-ground.
+   *
+   * Returns a settle function that is always safe to call — a no-op for an unknown/stale token or a
+   * session that doesn't track errands (a test double), so callers can wrap in `finally`
+   * unconditionally. The errand blocks that scope's re-grounding until it settles (issue #229).
+   */
+  beginInlineErrand(token: string): () => void {
+    const noop = (): void => undefined;
+    if (!token) return noop;
+    for (const { session } of this.entries.values()) {
+      if (session.busToken?.() === token) return session.noteInlineErrand?.() ?? noop;
+    }
+    return noop;
   }
 
   /**

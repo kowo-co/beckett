@@ -65,6 +65,83 @@ test("idle rotation uses a cheap handoff, preserves the channel window, and defe
   expect(liveTurns).toBe(0); // no dying-session handoff or fresh-session re-ground turn
 });
 
+// ── issue #229: the idle gate ───────────────────────────────────────────────────────────────
+//
+// The re-grounder SIGTERMs the child, so "idle" has to mean every kind of in-flight work is done —
+// not just "the pump isn't running". Prod re-grounded a scope whose turn chain still held an
+// inline browser lease, killing the child out from under real work.
+
+/** The private surface the idle-gate tests script. */
+interface GateGuts {
+  lastContextTokens: number;
+  child: { kill(signal: string): void } | null;
+  pending: unknown;
+  peerTurnLive: boolean;
+  deferredTurn: unknown;
+  rotations: number;
+  runCheapHandoff(window: string): Promise<string>;
+  launch(resume: boolean): Promise<void>;
+  rotateWhileIdle(): Promise<boolean>;
+  noteInlineErrand(): () => void;
+}
+
+function overWatermarkSession(): GateGuts {
+  const s = new ConciergeSession({ config: config(), logger: quietLog }) as unknown as GateGuts;
+  s.lastContextTokens = 190_000; // well past the watermark: only the idle gate can hold it back
+  s.child = { kill() {} };
+  s.runCheapHandoff = async () => "handoff";
+  s.launch = async () => {};
+  return s;
+}
+
+test("issue #229: an outstanding inline errand blocks the re-ground until it settles", async () => {
+  const s = overWatermarkSession();
+  // A `browser.exec` holding the browser lease — the turn that issued it may already be gone.
+  const settle = s.noteInlineErrand();
+
+  expect(await s.rotateWhileIdle()).toBe(false);
+  expect(s.rotations).toBe(0);
+
+  settle();
+  expect(await s.rotateWhileIdle()).toBe(true);
+  expect(s.rotations).toBe(1);
+});
+
+test("issue #229: errands nest, and settling one twice cannot free the gate early", async () => {
+  const s = overWatermarkSession();
+  const first = s.noteInlineErrand();
+  const second = s.noteInlineErrand();
+
+  first();
+  first(); // a `finally` that runs twice must not decrement the other errand's hold
+  expect(await s.rotateWhileIdle()).toBe(false);
+
+  second();
+  expect(await s.rotateWhileIdle()).toBe(true);
+});
+
+test("issue #229: a turn awaiting its result boundary blocks the re-ground", async () => {
+  const s = overWatermarkSession();
+  s.pending = { parts: [] };
+  expect(await s.rotateWhileIdle()).toBe(false);
+
+  s.pending = null;
+  expect(await s.rotateWhileIdle()).toBe(true);
+});
+
+test("issue #229: an unsolicited peer turn (or a line held for one) blocks the re-ground", async () => {
+  const s = overWatermarkSession();
+  s.peerTurnLive = true;
+  expect(await s.rotateWhileIdle()).toBe(false);
+
+  s.peerTurnLive = false;
+  s.deferredTurn = { outbound: "a human's line, waiting for the peer turn to settle" };
+  expect(await s.rotateWhileIdle()).toBe(false);
+
+  s.deferredTurn = null;
+  expect(await s.rotateWhileIdle()).toBe(true);
+});
+
 test("the hard-edge fallback releases its live TurnGate slot before rotating", async () => {
   const gate = new TurnGate(1);
   const a = new ConciergeSession({ config: config(), logger: quietLog, gate }) as unknown as {

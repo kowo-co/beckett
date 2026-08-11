@@ -40,15 +40,33 @@ export function classifyHarnessFailure(text: string | null | undefined): ErrorCl
   return undefined;
 }
 
-/** Ring buffer of the last N stderr lines — the self-diagnosing tail for failure messages. */
+/**
+ * Ring buffer of the last N stderr lines — the self-diagnosing tail for failure messages.
+ *
+ * `maxBytes` adds a SECOND bound for callers that care about how much text they retain rather than
+ * how many lines (the concierge keeps ~8KB of a chat child's stderr — issue #226 — where a handful
+ * of lines can each be a whole stack trace). It defaults to 0 = "line bound only", which is
+ * byte-for-byte the historic behavior every driver relies on.
+ */
 export class StderrRing {
   private readonly lines: string[] = [];
-  constructor(private readonly max = 20) {}
+  /** Retained size, counting the newline each line contributes to {@link tail}. */
+  private bytes = 0;
+  constructor(private readonly max = 20, private readonly maxBytes = 0) {}
 
   record(text: string): void {
     for (const line of text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)) {
       this.lines.push(line);
-      while (this.lines.length > this.max) this.lines.shift();
+      this.bytes += line.length + 1;
+      // Never drop the newest line to satisfy the byte bound — a single oversized line is still
+      // the most useful thing we have, and dropping it would leave an empty tail.
+      while (
+        this.lines.length > this.max ||
+        (this.maxBytes > 0 && this.bytes > this.maxBytes && this.lines.length > 1)
+      ) {
+        const dropped = this.lines.shift();
+        this.bytes -= (dropped?.length ?? 0) + 1;
+      }
     }
   }
 

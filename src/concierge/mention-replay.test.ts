@@ -215,6 +215,8 @@ function harness(opts: {
   replyContext?: ReplyContextMessage[] | null;
   /** A real (validated) config, which brings the durable shared-context store up with it. */
   sharedContext?: boolean;
+  /** Swap in a capturing logger to assert on what the daemon SAYS about a lost turn. */
+  logger?: unknown;
 }): Harness {
   const dir = opts.dir ?? tempBeckettDir();
   if (opts.dir) {
@@ -258,7 +260,12 @@ function harness(opts: {
   } as unknown as ConciergeSession;
 
   const turnConfig = opts.sharedContext ? validateConfig({}) : config;
-  return { concierge: new Concierge({ config: turnConfig, gateway, session, logger: quietLog }), posts, asks, dir };
+  return {
+    concierge: new Concierge({ config: turnConfig, gateway, session, logger: (opts.logger ?? quietLog) as never }),
+    posts,
+    asks,
+    dir,
+  };
 }
 
 function ledger(dir: string): OwedMention[] {
@@ -296,6 +303,36 @@ test("a mention whose turn dies with the daemon is left owed — not answered wi
   const owed = ledger(dying.dir);
   expect(owed.map((e) => e.messageId)).toEqual(["m-1"]);
   expect(owed[0]!.phase).toBe("queued");
+});
+
+test("issue #226: the loss line reports what happened, not a shutdown it cannot know about", async () => {
+  const warns: string[] = [];
+  const capturing = (() => {
+    const c = {
+      info() {},
+      debug() {},
+      error() {},
+      warn(msg: string) { warns.push(msg); },
+      child() { return c; },
+    };
+    return c;
+  })();
+  const dying = harness({ answer: "hang", logger: capturing });
+  const inFlight = dying.concierge.onMessage(mention());
+  await Bun.sleep(20);
+  await dying.concierge.stop();
+  await inFlight;
+
+  // The old wording diagnosed a cause ("lost to a shutdown") and promised a recovery time
+  // ("replay after boot"), and prod printed it for turns that died to a failed `--resume` with no
+  // restart in sight. The replacement states only the facts the daemon actually has.
+  const loss = warns.find((w) => w.includes("left owed"));
+  expect(loss).toBe("directed turn failed and was not answered — left owed; the mention ledger replays it");
+  expect(warns.some((w) => w.includes("lost to a shutdown"))).toBeFalse();
+  expect(warns.some((w) => w.includes("replay after boot"))).toBeFalse();
+  // Unchanged behavior: still owed, still silent to the person.
+  expect(dying.posts).toEqual([]);
+  expect(ledger(dying.dir).map((e) => e.messageId)).toEqual(["m-1"]);
 });
 
 test("the next boot answers it automatically — the restart-window case, end to end", async () => {

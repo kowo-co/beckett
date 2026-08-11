@@ -20,6 +20,7 @@ import {
   TURN_ABSOLUTE_CEILING_MS,
   TURN_SILENCE_MS,
 } from "./index.ts";
+import { StderrRing } from "../drivers/failure.ts";
 import type { Config, IncomingMessage } from "../types.ts";
 import type { DiscordGateway } from "../discord/gateway.ts";
 
@@ -96,6 +97,16 @@ test("a resume that dies before init falls back to a FRESH session seeded with t
   s.lastLaunchWasResume = true;
   s.initSeen = false;
 
+  // RUNG 1 (issue #226): the first death buys one retry of the SAME resume — the transcript is
+  // still presumed good, so nothing is thrown away yet.
+  await s.onExit(1, fakeChild);
+  expect(s.sessionId).toBe("dead-session");
+  expect(s.freshNextLaunch).toBe(false);
+
+  // RUNG 2: the retry died before init too — now the session really is unresumable.
+  s.child = fakeChild as never;
+  s.lastLaunchWasResume = true;
+  s.initSeen = false;
   await s.onExit(1, fakeChild);
 
   expect(s.sessionId).not.toBe("dead-session");
@@ -160,8 +171,9 @@ test("issue #98: an unresumable resume re-drives the SAME turn on the seeded fre
   s.lastHandoff = "we were mid-thread about the deploy rename";
 
   const { launches, writes } = scriptHarness(s, (attempt, child, sess) => {
-    if (attempt === 1) {
+    if (attempt <= 2) {
       // The resumed transcript is gone: a bare error result, then the process exits before init.
+      // Attempt 2 is the issue-#226 same-session retry, which dies the same way.
       sess.handleLine(JSON.stringify({ type: "result", subtype: "error_during_execution" }), child);
       void (sess as unknown as { onExit(c: number, x: unknown): Promise<void> }).onExit(1, child);
     } else {
@@ -178,11 +190,11 @@ test("issue #98: an unresumable resume re-drives the SAME turn on the seeded fre
 
   // The turn produced a real delivery output instead of being dropped / suppressed.
   expect(output).toEqual({ decision: "send", message: "ok, here's where we were" });
-  // Exactly one re-drive: resume attempt, then one fresh attempt — never a loop.
-  expect(launches).toEqual([true, false]);
+  // The full ladder, once each: resume, the #226 same-session retry, then the fresh fallback.
+  expect(launches).toEqual([true, true, false]);
   // The fresh session id was minted and the retry rode the seeded handoff note.
   expect(s.sessionId).not.toBe("dead-session");
-  expect(writes[1]).toContain("we were mid-thread about the deploy rename");
+  expect(writes[2]).toContain("we were mid-thread about the deploy rename");
   // The transient crash was counted then cleared by the successful turn — no lingering alarm.
   expect(s.consecutiveCrashes).toBe(0);
 });
@@ -199,11 +211,121 @@ test("issue #98: a genuinely broken harness fails loudly after one re-drive (nev
     void (sess as unknown as { onExit(c: number, x: unknown): Promise<void> }).onExit(1, child);
   });
 
-  // The retry is bounded: the second (fresh) death is not retried — it surfaces as an error.
+  // The ladder is bounded: resume, one resume retry, one fresh attempt — then it surfaces.
   await expect(s.runTurn("q")).rejects.toThrow();
-  expect(launches).toEqual([true, false]);
-  // Both deaths counted toward crash-loop detection — the existing alarm path is unaffected.
-  expect(s.consecutiveCrashes).toBe(2);
+  expect(launches).toEqual([true, true, false]);
+  // Every death counted toward crash-loop detection — the existing alarm path is unaffected.
+  expect(s.consecutiveCrashes).toBe(3);
+});
+
+// ── issue #226: retry the SAME resume once before demoting to a fresh session ───────────────
+
+test("issue #226: a resume that dies once is retried on the SAME session — no transcript is lost", async () => {
+  tempBeckettDir();
+  const s = makeSession() as unknown as RedriveGuts;
+  s.sessionId = "live-session";
+  s.lastHandoff = "handoff nobody should need";
+
+  const { launches, writes } = scriptHarness(s, (attempt, child, sess) => {
+    if (attempt === 1) {
+      // The dying predecessor still held this session's registration: death before init.
+      void (sess as unknown as { onExit(c: number, x: unknown): Promise<void> }).onExit(1, child);
+    } else {
+      sess.handleLine(JSON.stringify({ type: "system", subtype: "init" }), child);
+      sess.handleLine(
+        JSON.stringify({ type: "result", structured_output: { decision: "send", voice_check: "", message: "still here" } }),
+        child,
+      );
+    }
+  });
+
+  const output = await s.runTurn("you still there?");
+
+  expect(output).toEqual({ decision: "send", message: "still here" });
+  // TWO resumes, no fresh launch: the collision cleared and the transcript survived intact.
+  expect(launches).toEqual([true, true]);
+  expect(s.sessionId).toBe("live-session");
+  // No handoff seed was folded in — nothing needed re-grounding.
+  expect(String(writes[1])).not.toContain("handoff nobody should need");
+});
+
+test("issue #226: the resume retry budget refreshes once a launch reaches init", async () => {
+  tempBeckettDir();
+  const s = makeSession();
+  const fakeChild = { kill() {} };
+  const guts = s as unknown as { resumeRetryUsed: boolean; handleLine(line: string, from: unknown): void };
+
+  s.child = fakeChild as never;
+  s.lastLaunchWasResume = true;
+  s.initSeen = false;
+  await s.onExit(1, fakeChild); // spends the retry
+  expect(guts.resumeRetryUsed).toBe(true);
+
+  // A resume that actually initializes is a healthy session: the NEXT failure, hours later, gets
+  // its own retry rather than being demoted straight to a fresh transcript.
+  s.child = fakeChild as never;
+  guts.handleLine(JSON.stringify({ type: "system", subtype: "init" }), fakeChild);
+  expect(guts.resumeRetryUsed).toBe(false);
+});
+
+// ── issue #226: the child's stderr is captured, not discarded ───────────────────────────────
+
+test("issue #226: a nonzero exit logs the child's stderr tail alongside the code", async () => {
+  tempBeckettDir();
+  const warns: { msg: string; fields: Record<string, unknown> }[] = [];
+  const capturing = (() => {
+    const c = {
+      info() {},
+      debug() {},
+      error() {},
+      warn(msg: string, fields?: Record<string, unknown>) { warns.push({ msg, fields: fields ?? {} }); },
+      child() { return c; },
+    };
+    return c as never;
+  })();
+  const s = new ConciergeSession({ config, logger: capturing }) as unknown as SessionGuts & {
+    childStderr: WeakMap<object, { record(text: string): void }>;
+  };
+  const fakeChild = { kill() {} };
+  s.child = fakeChild as never;
+  // What launch() arms for every child; the drain pump feeds it.
+  const ring = new StderrRing(400, 8_000);
+  s.childStderr.set(fakeChild, ring);
+  ring.record("error: unknown option '--name'\nnode:internal/errors line 1");
+
+  await s.onExit(1, fakeChild);
+
+  const exit = warns.find((w) => w.msg === "concierge claude process exited");
+  expect(exit).toBeDefined();
+  expect(exit!.fields.code).toBe(1);
+  expect(exit!.fields.sessionId).toBe(s.sessionId);
+  expect(String(exit!.fields.stderrTail)).toContain("unknown option '--name'");
+});
+
+test("issue #226: a clean exit stays quiet about stderr, and an empty ring says so", async () => {
+  tempBeckettDir();
+  const warns: { msg: string; fields: Record<string, unknown> }[] = [];
+  const capturing = (() => {
+    const c = {
+      info() {},
+      debug() {},
+      error() {},
+      warn(msg: string, fields?: Record<string, unknown>) { warns.push({ msg, fields: fields ?? {} }); },
+      child() { return c; },
+    };
+    return c as never;
+  })();
+  const s = new ConciergeSession({ config, logger: capturing }) as unknown as SessionGuts;
+  const clean = { kill() {} };
+  s.child = clean as never;
+  await s.onExit(0, clean);
+  expect(warns.find((w) => w.msg === "concierge claude process exited")!.fields.stderrTail).toBeUndefined();
+
+  const silent = { kill() {} };
+  s.child = silent as never;
+  await s.onExit(9, silent);
+  const noisy = warns.filter((w) => w.msg === "concierge claude process exited").at(-1)!;
+  expect(noisy.fields.stderrTail).toBe("(nothing on stderr)");
 });
 
 // ── 2. superseded-child isolation ───────────────────────────────────────────────────────
