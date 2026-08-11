@@ -13,7 +13,12 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validateConfig } from "../config.ts";
+import { primeNameFlagSupport } from "../drivers/claude.ts";
 import { ConciergeSession, conciergeSessionName } from "./index.ts";
+
+// These tests pin the SHAPE of the argv; whether the host machine's claude binary advertises
+// --name (CI runners have none) must not decide the outcome.
+primeNameFlagSupport("claude", true);
 
 const dirs: string[] = [];
 const priorDir = process.env.BECKETT_DIR;

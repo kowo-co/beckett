@@ -111,6 +111,15 @@ const nameFlagSupportCache = new Map<string, boolean>();
  * NOT cached — it falls open for this call only and is re-probed next time, since the box being
  * loaded right now says nothing about whether the flag exists.
  */
+/**
+ * Pin the probe result for a binary without running it. Test seam: the argv-shape tests assert
+ * `--name` is present, which must not depend on whether the machine running the suite (a CI
+ * runner has no claude at all) happens to carry a modern binary.
+ */
+export function primeNameFlagSupport(bin: string, supported: boolean): void {
+  nameFlagSupportCache.set(bin, supported);
+}
+
 export function supportsNameFlag(bin: string, logger?: Pick<Logger, "warn">): boolean {
   const cached = nameFlagSupportCache.get(bin);
   if (cached !== undefined) return cached;
