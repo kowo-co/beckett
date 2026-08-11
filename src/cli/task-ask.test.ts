@@ -109,6 +109,7 @@ test("a LIVE run reports the worker's cross-session address, checklist and journ
   const out = askRun(["oauth-middleware"], deps);
 
   expect(out.live).toBe(true);
+  expect(out.addressable).toBe(true);
   expect(out.sessionName).toBe("beckett-run-oauth-middleware");
   expect(out.state).toBe("implementing");
   expect(out.checklist).toEqual({ total: 5, done: 3, hasPlaceholder: false });
@@ -133,6 +134,7 @@ test("states with no worker session report live:false and no address to message"
   for (const state of noSession) {
     const out = askRun(["oauth-middleware"], fakeDeps([makeRun({ state })]));
     expect(out.live).toBe(false);
+    expect(out.addressable).toBe(false);
     expect(out.sessionName).toBeNull();
     expect(out.state).toBe(state);
     // The records ARE the answer here, so they must still be in the envelope.
@@ -150,6 +152,34 @@ test("a terminal run still carries the outcome fields the concierge answers from
   expect(out.error).toBe("review cycles exhausted");
   expect(out.branch).toBe("beckett/run-oauth-middleware");
   expect(out.updatedAt).toBe("2026-08-10T12:30:00.000Z");
+});
+
+// ── live ≠ addressable (old claude binary, no `--name`) ────────────────────────────────────
+
+test("a LIVE worker on a binary without --name is reported unaddressable, with no address to send to", () => {
+  const out = askRun(
+    ["oauth-middleware"],
+    fakeDeps([makeRun({ state: "implementing" })], { supportsSessionNames: () => false }),
+  );
+  // The worker really is running — that part is unchanged and still says so.
+  expect(out.live).toBe(true);
+  // …but it was spawned without `--name`, so there is nothing to SendMessage.
+  expect(out.addressable).toBe(false);
+  expect(out.sessionName).toBeNull();
+  expect(out.hint).toContain("do NOT message");
+  expect(out.hint).toContain("--name");
+  // And crucially: no instruction to burn the doctrine window waiting for a reply.
+  expect(out.hint).not.toContain("~90s");
+  expect(out.hint).not.toContain("SendMessage");
+  // The records are the whole answer here, so they must be in the envelope.
+  expect(out.checklist).toEqual({ total: 5, done: 3, hasPlaceholder: false });
+  expect(out.journalTail).toHaveLength(2);
+});
+
+test("an absent supportsSessionNames dep assumes support (current installs), preserving the historic shape", () => {
+  const out = askRun(["oauth-middleware"], fakeDeps([makeRun({ state: "implementing" })]));
+  expect(out.addressable).toBe(true);
+  expect(out.sessionName).toBe("beckett-run-oauth-middleware");
 });
 
 // ── best-effort reads ──────────────────────────────────────────────────────────────────────

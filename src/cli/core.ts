@@ -45,6 +45,7 @@ import { AGENT_HARNESSES, AGENT_EFFORTS, type AgentDefinition } from "../agent/t
 import { startTaskBranch } from "./task-start.ts";
 import { runTaskDeploy } from "./task-deploy.ts";
 import { runTaskAsk } from "./task-ask.ts";
+import { supportsNameFlag } from "../drivers/claude.ts";
 import { RunStore } from "../run/store.ts";
 import { parseSpecChecklist } from "../run/spec-file.ts";
 import { formatDispatchTrace, readDispatchEvents } from "../dispatch/events.ts";
@@ -973,9 +974,19 @@ export async function runTask(argv: string[]): Promise<void> {
     runTaskAsk(rest, {
       store: runStore(),
       readChecklist: readRunChecklist,
+      // The ONE cached `--name` probe the spawner and the concierge session already share, so the
+      // envelope can say whether the live worker is actually reachable (see `addressable`).
+      supportsSessionNames: () => supportsNameFlag(config.harness.claude.bin),
       readJournalTail: (runId, lines) => {
         const body = readJournal(paths.journalDir, runId, lines);
-        return body ? body.split("\n").filter((line) => line.trim().length > 0) : [];
+        if (!body) return [];
+        return body
+          .split("\n")
+          .filter((line) => line.trim().length > 0)
+          // `readJournal` prefixes a "… N earlier lines elided" header when it truncates. That is
+          // the READER's framing, not run activity — dropping it keeps journalTail a list of things
+          // the worker actually did, so nothing can be quoted back as one.
+          .filter((line) => !line.startsWith("… ") || !line.includes("elided"));
       },
     });
   }

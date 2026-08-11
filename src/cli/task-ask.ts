@@ -5,7 +5,7 @@
  * in flight; the concierge resolves the run and gets, in ONE call, everything it needs to either
  * ask the live worker directly or answer from records:
  *
- *   {runId, state, live, sessionName, checklist, journalTail, question, hint}
+ *   {runId, state, live, addressable, sessionName, checklist, journalTail, question, hint}
  *
  * WHAT THIS COMMAND DELIBERATELY DOES NOT DO: message the worker. The concierge session owns that
  * conversation — it has its own `SendMessage` tool and its own cross-session address, so IT sends
@@ -19,6 +19,13 @@
  * `checklist` (spec.md progress) and `journalTail` (the last ~15 worker journal lines) ride along
  * on every invocation — live or not. A run that is queued, done, failed or parked has no worker to
  * message: `live` is false, `sessionName` is null, and the same fields carry the whole answer.
+ *
+ * LIVE IS NOT THE SAME AS ADDRESSABLE. Worker spawn only passes `--name` when the installed claude
+ * binary advertises it (`supportsNameFlag`, which fails open on an old/starved probe), so on a
+ * pinned pre-2.1.224 install a perfectly live worker has no cross-session address at all. Sending
+ * to it would be a message into the void, and the concierge would sit out the whole ~90s doctrine
+ * window before falling back. So `addressable` is reported separately, `sessionName` is null when
+ * it is false, and the `hint` says plainly not to message anyone.
  */
 import type { Run, RunState } from "../run/types.ts";
 import { fail, out, parse } from "./io.ts";
@@ -29,9 +36,10 @@ export const TASK_ASK_USAGE = 'usage: beckett task ask <runId|slug|#N.x> [--ques
 export const ASK_JOURNAL_TAIL_LINES = 15;
 
 /**
- * The run states where a worker session is actually LIVE and addressable. `queued` has no worker
- * yet; `publishing` is Beckett's own push/PR step (the worker is gone); `done`/`failed`/
- * `cancelled`/`parked` are over. Only these two mean "there is someone in there to ask".
+ * The run states where a worker session is actually LIVE. `queued` has no worker yet; `publishing`
+ * is Beckett's own push/PR step (the worker is gone); `done`/`failed`/`cancelled`/`parked` are
+ * over. Only these two mean "there is someone in there to ask" — whether that someone can be
+ * REACHED is a second question (see `addressable`).
  */
 const ASKABLE_STATES: ReadonlySet<RunState> = new Set<RunState>(["implementing", "reviewing"]);
 
@@ -55,6 +63,12 @@ export interface AskRunStoreLike {
 
 export interface TaskAskDeps {
   store: AskRunStoreLike;
+  /**
+   * Does the installed claude binary support `--name`? Injected (not probed here) so this module
+   * stays pure and the CLI shares the ONE cached probe the spawner and the concierge session use.
+   * Absent → assumed true, which is the historic shape and correct on any current install.
+   */
+  supportsSessionNames?: () => boolean;
   /** The run's journal play-by-play, most recent `lines` lines (see `../progress/journal.ts`). */
   readJournalTail: (runId: string, lines: number) => string[];
   /**
@@ -77,9 +91,15 @@ export interface TaskAskOutput {
   slug: string;
   title: string;
   state: RunState;
-  /** True iff a worker session is live and addressable at {@link sessionName}. */
+  /** True iff a worker session is running right now (run state `implementing`/`reviewing`). */
   live: boolean;
-  /** The cross-session address to `SendMessage`, or null when nothing is live to ask. */
+  /**
+   * True iff that live worker can actually be reached by `SendMessage` — i.e. it was spawned with
+   * `--name`. False on an install whose claude binary has no `--name` support: ask nobody, answer
+   * from records immediately rather than burning the ~90s reply window on a dead address.
+   */
+  addressable: boolean;
+  /** The cross-session address to `SendMessage`, or null when there is nobody reachable to ask. */
   sessionName: string | null;
   /** The question to put to the worker (`--question`, else {@link DEFAULT_ASK_QUESTION}). */
   question: string;
@@ -140,12 +160,25 @@ export function resolveRun(store: AskRunStoreLike, ref: string): Run | null {
   return store.bySlug(key) ?? store.get(key);
 }
 
-function hintFor(run: Run, live: boolean, sessionName: string | null, question: string): string {
-  if (live) {
+function hintFor(
+  run: Run,
+  live: boolean,
+  addressable: boolean,
+  sessionName: string | null,
+  question: string,
+): string {
+  if (addressable) {
     return (
       `SendMessage to "${sessionName}": "${question}"` +
       (run.channelId ? ` — then relay the answer with \`beckett discord reply --channel ${run.channelId}\`.` : ".") +
       ` If no reply lands within ~90s, answer from the checklist and journalTail below instead.`
+    );
+  }
+  if (live) {
+    return (
+      `A worker IS running (state "${run.state}") but this install's claude binary has no \`--name\` ` +
+      `support, so it has no cross-session address — do NOT message anyone and do NOT wait; ` +
+      `answer from the state, checklist and journalTail below.`
     );
   }
   return (
@@ -164,13 +197,17 @@ export function askRun(argv: string[], deps: TaskAskDeps): TaskAskOutput {
   const run = resolveRun(deps.store, ref);
   if (!run) usage(`no such run: ${ref}`);
   const live = ASKABLE_STATES.has(run.state);
-  const sessionName = live ? run.sessionName : null;
+  // An unreachable worker is worse than no worker: the concierge would wait out the full doctrine
+  // window for a reply that can never arrive. Withhold the address rather than hand over a dead one.
+  const addressable = live && (deps.supportsSessionNames?.() ?? true);
+  const sessionName = addressable ? run.sessionName : null;
   return {
     runId: run.id,
     slug: run.slug,
     title: run.title,
     state: run.state,
     live,
+    addressable,
     sessionName,
     question,
     channelId: run.channelId,
@@ -181,7 +218,7 @@ export function askRun(argv: string[], deps: TaskAskDeps): TaskAskOutput {
     updatedAt: run.updatedAt,
     checklist: deps.readChecklist(run.workspace),
     journalTail: deps.readJournalTail(run.id, ASK_JOURNAL_TAIL_LINES),
-    hint: hintFor(run, live, sessionName, question),
+    hint: hintFor(run, live, addressable, sessionName, question),
   };
 }
 
