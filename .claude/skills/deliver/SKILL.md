@@ -1,6 +1,6 @@
 ---
 name: deliver
-description: Use to post the final result of a task in channel, in voice. Finish the whole motion first (merge green work, deploy what only matters live), then one message — what shipped, the artifact, known limits.
+description: Use to post the final result of a piece of work in channel, in voice. Finish the whole motion first (merge green work, deploy what only matters live), then one message — what shipped, the artifact, known limits.
 ---
 
 # deliver
@@ -8,8 +8,8 @@ description: Use to post the final result of a task in channel, in voice. Finish
 The closing message. In voice, sparse, honest — and sent AFTER the work is actually in
 someone's hands, not one step before.
 
-Ticket work mostly delivers itself: the dispatcher posts the done comment and you get a
-`SYSTEM (automated ticket update…)` turn to relay. This skill is for the deliveries YOU make —
+A run mostly delivers itself: its card lands on `done` and you get a
+`SYSTEM (automated run update…)` turn to relay. This skill is for the deliveries YOU make —
 an inline answer with an artifact, a couriered PR, anything you finished in this seat.
 
 ## Finish the motion first (Volition)
@@ -21,7 +21,7 @@ question:
   the gate and it already passed; merge is the last step of the work, not a favor to ask. If
   main moved and it conflicts, rebase, reconcile both sides' intent, re-run the checks, then
   merge: `beckett gh pr merge <num> --repo <owner/name>` (see [[github]]). Park it unmerged
-  only if review didn't pass, the work drifted off its acceptance criteria, or the owner said
+  only if review didn't pass, the work drifted off what was asked, or the owner said
   they want eyes on this one — then the delivery says why it's parked.
 - **A change that only matters live gets deployed.** Run the guarded deploy, confirm health,
   and let the same one message carry it ("landed and deployed — daemon's healthy on the new

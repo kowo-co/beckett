@@ -47,6 +47,7 @@ import { runTaskDeploy } from "./task-deploy.ts";
 import { runTaskAsk } from "./task-ask.ts";
 import { supportsNameFlag } from "../drivers/claude.ts";
 import { RunStore } from "../run/store.ts";
+import { RUN_TERMINAL } from "../run/types.ts";
 import { parseSpecChecklist } from "../run/spec-file.ts";
 import { formatDispatchTrace, readDispatchEvents } from "../dispatch/events.ts";
 import {
@@ -991,6 +992,35 @@ export async function runTask(argv: string[]): Promise<void> {
     });
   }
 
+  // v7 steering: the concierge's ONE way to bind a mid-flight correction to work already running
+  // (`steering-work-in-flight.md`). The daemon owns delivery — `RunSupervisor.steer()` nudges a live
+  // worker and otherwise buffers the note onto the next stage's brief — so this verb only resolves
+  // the ref and hands the bus a runId. It goes through `bus()`, not `notifyBus()`, ON PURPOSE: a
+  // steer that never reached the daemon must EXIT NON-ZERO, because the concierge reports "told it"
+  // to a channel off the back of this call, and a silently-swallowed note is the one failure that
+  // turns into a lie. The receipt (`delivery: "delivered" | "buffered"`) says which happened.
+  if (sub === "steer") {
+    const ref = _[0];
+    // The note is positional so the command reads the way it is spoken. `--note` is the escape
+    // hatch for a note the flag parser would otherwise eat (one starting with `--`).
+    const note = (_.slice(1).join(" ").trim() || (flags.note === true ? "" : String(flags.note ?? ""))).trim();
+    if (!ref || !note) fail('usage: beckett task steer <run-id|slug> "<note>" [--note <text>]');
+    const run = ref.startsWith("run-") ? runStore().get(ref) : runStore().bySlug(ref);
+    if (!run) fail(`no such run: ${ref}`);
+    // Refuse a run nothing will ever staff again. `RUN_TERMINAL` includes `parked` precisely
+    // because parking is where the machinery stops for a human: the supervisor never re-admits
+    // one, so a note here would buffer forever while the CLI reported success. Say so, and name
+    // the real move — a fresh deploy carrying what was learned, on a branch that kept the WIP.
+    if (RUN_TERMINAL.has(run.state)) {
+      fail(
+        `run ${run.id} is ${run.state} — steering only reaches a run that is still going. ` +
+          `Deploy the new direction as fresh work (\`beckett task deploy --prompt "…" --repo ${run.repo ?? "<slug>"}\`); ` +
+          `branch ${run.branch} still holds everything this run committed.`,
+      );
+    }
+    await bus("run.steer", { runId: run.id, note });
+  }
+
   if (sub === "show") {
     const ref = _[0];
     if (!ref) fail("usage: beckett task show <#N|#N.x>");
@@ -1062,7 +1092,7 @@ export async function runTask(argv: string[]): Promise<void> {
     out([...taskRows, ...runRows]);
   }
 
-  fail("usage: beckett task create|branch|start|deploy|ask|show|list <...>");
+  fail("usage: beckett task create|branch|start|deploy|ask|steer|show|list <...>");
 }
 
 // ── ticket (in-process: the tracker client — the Concierge's door to the queue) ───────────

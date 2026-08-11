@@ -5,6 +5,11 @@ This is the executable plan for the cut described in [orchestration.md](orchestr
 survives, in what order, and what "done" means. It is not a narrative — it is the checklist the
 cut is run against.
 
+> **v7 (2026-08) already landed the first slice of this cut**: the ticket tracker, the poller and
+> the dispatcher are removed from the running system, replaced by runs (`beckett task deploy` → a
+> run ledger + supervisor). Rows below that dispose of ticket machinery are done; the Job/SQLite
+> model is still ahead.
+
 ## The cut in numbers
 
 `src/` on this branch is **125,470 lines** (74,971 code + 50,499 test). v1 lands at **≈12,150

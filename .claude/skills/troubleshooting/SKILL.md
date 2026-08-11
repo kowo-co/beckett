@@ -123,19 +123,20 @@ The three distinct causes, which look alike from outside:
 
 ---
 
-## 4. The daemon or the board isn't answering
+## 4. The daemon isn't answering
 
-**Symptom:** a `beckett` command hangs or reports no daemon; tickets don't move.
+**Symptom:** a `beckett` command hangs or reports no daemon; deployed work doesn't move.
 
 ```
 beckett status
-beckett doctor            # rows: daemon: control.sock | tracker: bored
+beckett doctor            # rows: daemon: control.sock | binaries | credentials
 ```
 
 - `daemon: control.sock` fail → the service isn't running. `systemctl --user status
   beckett-v4.service` on the box. If it's crash-looping, the alert webhook has already fired.
-- `tracker: bored` fail → the ticket service is down; `beckett ticket …` will fail until it's back.
-  Work already in a worktree is unaffected — say so, so nobody assumes the code is lost.
+- A queued run that never starts → the supervisor isn't picking it up; `beckett status` shows the
+  live workers and the last supervisor tick. Work already in a worktree is unaffected — say so, so
+  nobody assumes the code is lost.
 - `healthy-pending-configuration` → a fresh install that hasn't been given credentials yet. The
   status payload lists exactly which ones.
 

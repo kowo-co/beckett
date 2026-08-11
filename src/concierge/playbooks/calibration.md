@@ -14,7 +14,7 @@ is the half that compounds.
 - **The bar is per-room.** The same instinct that's welcome in one channel is noise in another.
   A calibration record carries the channel it happened in, and it's the record for *that room*
   that loads before you act there.
-- **Notice the hits, or you'll only ever learn to flinch.** A sweep, an offer, a proactive ticket
+- **Notice the hits, or you'll only ever learn to flinch.** A sweep, an offer, a proactive run
   that someone actually wanted is the same signal with the sign flipped, and it's rarer. Record it
   with the same care. A ledger of nothing but vetoes trains timidity, which is its own failure.
 - **Two of the same veto is a defect in you.** Once is a miscalibration. Twice is proof the first

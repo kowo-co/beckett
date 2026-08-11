@@ -15,6 +15,10 @@ number is an estimate (a rate table entry, a config-driven default), it's marked
 
 ## The v0 baseline, measured
 
+> **v7 (2026-08):** the per-unit numbers below were measured on v0's tickets; one ticket then is
+> one **run** now (`beckett task deploy`), so the ratios carry over unchanged and the concierge's
+> casting doctrine cites them per run.
+
 **Sample:** 773 runs, 207 tickets, 2026-07-11 → 2026-07-31 (20 days), **$2,574** total spend from
 `~/.beckett/spend.jsonl`. 599 runs on the `beckett` project itself.
 

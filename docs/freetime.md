@@ -1,8 +1,9 @@
 # Free time
 
-Everything Beckett does is owed to someone. A ticket, a routine's post, a nightly replay of the
-day's work — every one of them is instrumented toward a job. Free time is one weekly session that
-is owed to nobody: no ticket behind it, no deliverable in front of it, no review after it. It
+Everything Beckett does is owed to someone. A deployed run, a routine's post, a nightly replay of
+the day's work — every one of them is instrumented toward a job. Free time is one weekly session
+that is owed to nobody: nothing deployed behind it, no deliverable in front of it, no review after
+it. It
 exists because the difference between a system that works and something with a life is not
 capability, it is whether anything happens that nobody asked for.
 
@@ -110,7 +111,7 @@ What a free-time row does and does not claim:
 | Field | Value | Why |
 |---|---|---|
 | `stage` | `free-time` | Its own lane. `isAttempt()` excludes it: nothing was owed and nothing was reviewed, so it is not a run any cast should be scored on |
-| `ticketId` | `free-time` | There is no ticket. A stable sentinel keeps the per-task rollup and the weekly bill on one honest line per lane rather than one fake task per session |
+| `ticketId` | `free-time` | The spend ledger's work-id column (named from v0's tickets, now carrying run ids). Nothing is owed here, so a stable sentinel keeps the per-task rollup and the weekly bill on one honest line per lane rather than one fake task per session |
 | `sessionId` | the session id | The trace back to that session's journal entry and scratch dir |
 | `tokensOut` | real | Read from the harness result frame — the same number charged against the ceiling |
 | `tokensIn`, `turns`, `toolCalls` | `0` | The free-time harness call does not carry them. A visible zero beats an invented number |
