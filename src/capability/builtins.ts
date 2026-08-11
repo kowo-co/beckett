@@ -544,14 +544,20 @@ export const configFragments = {
         .min(0)
         .default(0)
         .transform((ms) => Math.min(ms, DIRECTED_SETTLE_MAX_MS)),
-      // chilltext — a friend's homelab tone-rewrite service (src/chilltext.ts). W3A owns the
-      // concierge's own chilltext gate; other callers (the social-media chill pass — [social]
-      // below) reuse this url/timeout rather than each carrying their own copy. Fails open by
-      // contract: nothing downstream should treat a chilltext outage as a hard error.
+      // chilltext (v7 architecture doc): restyles every human-facing Concierge message through a
+      // friend's homelab rewrite API before it posts, fail-open on any error/timeout. OFF by
+      // default — a fork's config must opt in (prod flips it true). W3A owns this fragment; other
+      // callers (the social-media chill pass — [social] below) reuse this url/timeout rather than
+      // each carrying their own copy.
       chilltext: z
         .object({
-          url: z.string().default("https://chilltext.ssh.codes"),
-          timeout_ms: posInt.default(5_000),
+          enabled: z.boolean().default(false),
+          url: z.string().min(1).default("https://chilltext.ssh.codes"),
+          timeout_ms: posInt.default(8_000),
+          max_bubbles: z.number().int().min(1).max(4).default(3),
+          bubble_delay_ms: nonNegInt.default(2_500),
+          system: z.string().default(""),
+          skip_code_blocks: z.boolean().default(true),
         })
         .strict()
         .default({}),

@@ -2067,8 +2067,13 @@ idle_recycle_minutes = 30
 directed_settle_ms = 0
 
 [concierge.chilltext]
+enabled = false
 url = "https://chilltext.ssh.codes"
-timeout_ms = 5000
+timeout_ms = 8000
+max_bubbles = 3
+bubble_delay_ms = 2500
+system = ""
+skip_code_blocks = true
 
 [quick]
 enabled = true

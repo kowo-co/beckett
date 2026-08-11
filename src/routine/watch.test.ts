@@ -48,7 +48,7 @@ function makeRoutine(action: Partial<Extract<Routine["action"], { kind: "watch" 
       feedUrl: "https://ai-tracker.ssh.codes/api/v1/model-news",
       pollIntervalMinutes: 15,
       agentId: "social-media",
-      credsEntry: "x.com",
+      credsEntry: "x-account",
       dryRun: false,
       ...action,
     },
@@ -138,7 +138,7 @@ test("a genuinely new item after seeding dispatches the agent lane with title/mo
   expect(h.dispatchCalls[0]!.agentInput).toContain("claude-opus-5");
   expect(h.dispatchCalls[0]!.agentInput).toContain("Claude added claude-opus-5");
   expect(h.dispatchCalls[0]!.agentInput).toContain("https://example.com/release");
-  expect(h.dispatchCalls[0]!.opts).toEqual({ channelId: "chan-1", requesterId: "user-1", credsEntry: "x.com" });
+  expect(h.dispatchCalls[0]!.opts).toEqual({ channelId: "chan-1", requesterId: "user-1", credsEntry: "x-account" });
 
   const state = await h.stateStore.get(routine.id);
   expect(state.posts).toHaveLength(1);
