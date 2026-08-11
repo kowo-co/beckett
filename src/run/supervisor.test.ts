@@ -12,6 +12,7 @@ import { dirname, join } from "node:path";
 import type { Config } from "../types.ts";
 import type { HarnessSpec } from "../tracker/types.ts";
 import { appendSpendRecord, type SpendRecord } from "../spend.ts";
+import type { DispatchEvent } from "../dispatch/events.ts";
 import type { RunGitOps } from "./supervisor.ts";
 import { RunStore } from "./store.ts";
 import type { Run } from "./types.ts";
@@ -109,7 +110,7 @@ mock.module("../dispatch/spawn.ts", () => ({
   spawnTicketWorker: fakeSpawn,
 }));
 
-const { RunSupervisor, runProjectSlug } = await import("./supervisor.ts");
+const { RunSupervisor, runProjectSlug, runSpecReader } = await import("./supervisor.ts");
 const { resolveSelfProjectOwner } = await import("../github/owner.ts");
 
 // ── injected git fakes ──────────────────────────────────────────────────────────────────────
@@ -221,6 +222,7 @@ interface Harness {
   store: RunStore;
   repos: string;
   publishCalls: { slug: string; ticket?: string; commitMessage?: string }[];
+  events: DispatchEvent[];
 }
 
 function newSupervisor(
@@ -237,6 +239,10 @@ function newSupervisor(
   const repos = join(dir, "repos");
   const store = opts.store ?? new RunStore(join(dir, "runs.json"));
   const publishCalls: Harness["publishCalls"] = [];
+  // The card service's `specReader`/deploy-receipt tests read the run's own dispatch trace, the
+  // SAME bus `progress/cards.ts` observes in production — captured here rather than through a
+  // real DispatchEventBus so a torn events.jsonl can never make these tests flaky.
+  const events: DispatchEvent[] = [];
   const supervisor = new RunSupervisor({
     store,
     config: opts.config ?? cfg(),
@@ -244,6 +250,9 @@ function newSupervisor(
     // The same resolver shape production wires (`shell/main.ts`): one slug rule for the repo root
     // and the publish target, so `repo: null` lands in beckett's own checkout here too.
     resolveRepoRoot: (run) => join(repos, runProjectSlug(run)),
+    dispatchLiveSink: (event) => {
+      events.push(event);
+    },
     ...(opts.publish
       ? {
           publishRepo: async (a: any) => {
@@ -258,7 +267,7 @@ function newSupervisor(
     ...(opts.spendLedgerPath ? { spendLedgerPath: opts.spendLedgerPath } : {}),
     ...(opts.publishOutboxPath ? { publishOutboxPath: opts.publishOutboxPath } : {}),
   });
-  return { supervisor, store, repos, publishCalls };
+  return { supervisor, store, repos, publishCalls, events };
 }
 
 beforeEach(() => {
@@ -288,6 +297,17 @@ describe("admission", () => {
     expect(spawnCalls[0]!.stage).toBe("implement");
     expect(spawnCalls[0]!.branch).toBe(run.branch);
     expect(store.get(run.id)!.state).toBe("implementing");
+  });
+
+  test("admit fires the deploy receipt's first event BEFORE any staffing/worktree event", async () => {
+    const { supervisor, store, events } = newSupervisor();
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    expect(events[0]).toMatchObject({ ticketId: run.id, stage: "run:deploy", outcome: "started", message: "queued" });
+    // Every event on this run's timeline is keyed by the run id, exactly like the ticket
+    // dispatcher's — cards/digests/telemetry need no run-specific handling to find it.
+    expect(events.every((e) => e.ticketId === run.id && e.ticketRef === run.id)).toBe(true);
   });
 
   test("claim-before-dispatch: a double admit produces exactly one spawn", async () => {
@@ -416,6 +436,19 @@ describe("stage flow", () => {
     expect(publishCalls).toHaveLength(1);
     // The publish is keyed by the RUN id — the whole point of the re-keying.
     expect(publishCalls[0]!.ticket).toBe(run.id);
+  });
+
+  test("the done event's message is the shipped PR URL — the deploy receipt's closing line", async () => {
+    const { supervisor, store, events } = newSupervisor({ publish: true });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    await settle();
+    created[1]!.finish("success", "looks good", doneSignal("complete"));
+    await settle();
+    const doneEvent = events.find((e) => e.stage === "done" && e.outcome === "passed");
+    expect(doneEvent?.message).toBe("https://github.com/o/gateway/pull/7");
   });
 
   test("no publisher wired still finishes the run (local-only completion)", async () => {
@@ -857,5 +890,41 @@ describe("steering", () => {
     await supervisor.admit(idle.id);
     await tick();
     expect(spawnCalls.find((c) => c.ticketId === idle.id)!.steering).toEqual(["later note"]);
+  });
+});
+
+// `progress/cards.ts`'s `specReader` adapter — the checklist line on a run's deploy receipt.
+describe("runSpecReader", () => {
+  test("reads a run's live spec.md checklist progress off its workspace", () => {
+    const dir = scratch();
+    const store = new RunStore(join(dir, "runs.json"));
+    const run = seedRun(store, makeRun({ workspace: join(dir, "ws") }));
+    mkdirSync(run.workspace!, { recursive: true });
+    writeFileSync(
+      join(run.workspace!, "spec.md"),
+      "# t\n\n## Checklist\n- [x] one\n- [x] two\n- [ ] three\n",
+    );
+    expect(runSpecReader(store)(run.id)).toEqual({ done: 2, total: 3 });
+  });
+
+  test("no workspace yet (the deploy-instant card's case) reads as null, not zero", () => {
+    const dir = scratch();
+    const store = new RunStore(join(dir, "runs.json"));
+    const run = seedRun(store, makeRun({ workspace: null }));
+    expect(runSpecReader(store)(run.id)).toBeNull();
+  });
+
+  test("a workspace with no spec.md yet reads as null", () => {
+    const dir = scratch();
+    const store = new RunStore(join(dir, "runs.json"));
+    const run = seedRun(store, makeRun({ workspace: join(dir, "ws") }));
+    mkdirSync(run.workspace!, { recursive: true });
+    expect(runSpecReader(store)(run.id)).toBeNull();
+  });
+
+  test("an id that isn't a run at all (a ticket-dispatcher event) reads as null", () => {
+    const dir = scratch();
+    const store = new RunStore(join(dir, "runs.json"));
+    expect(runSpecReader(store)("ticket-1")).toBeNull();
   });
 });

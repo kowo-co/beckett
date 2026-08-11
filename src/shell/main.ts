@@ -39,7 +39,7 @@ import { boredBaseUrl } from "../bored/client.ts";
 import { createTrackerPoller, type TrackerPoller } from "../tracker/poll.ts";
 import { BECKETT_COMMENT_MARKER, createDispatcher, type Dispatcher } from "../dispatch/dispatcher.ts";
 import { RunStore } from "../run/store.ts";
-import { createRunSupervisor, runProjectSlug, type RunSupervisor } from "../run/supervisor.ts";
+import { createRunSupervisor, runProjectSlug, runSpecReader, type RunSupervisor } from "../run/supervisor.ts";
 import { createStagesExtension, stageViewOf } from "../dispatch/stages.ts";
 import { createProgressCardService, type ProgressCardService } from "../progress/cards.ts";
 import { createGitHubPrPoller, type GitHubPrPoller } from "../github/poll.ts";
@@ -455,12 +455,19 @@ async function boot(): Promise<BootedSystem> {
 
   // 4. Dispatcher — consumes PollEvents, owns the worker lifecycle. Its workers' granular event
   //    streams are mirrored into each ticket's Discord thread via the Concierge's progress hub.
-  // Zero-token progress cards (progress.cards_as_code, default off): CODE keeps one status
-  // message per active ticket in the ticket's origin channel, edited straight off the dispatch
-  // event bus — no Concierge involvement, honoring "the Concierge and the poll-dispatch loop
-  // never call each other directly". Channel: the event's stamped originChannel, else the task
-  // registry's thread/origin (same precedent as the PR re-watch loop below).
-  const progressCards: ProgressCardService | null = config.progress.cards_as_code
+  // The v7 run ledger — constructed early (rather than down in 4b) because the card service
+  // below needs it NOW for the checklist reader; the run engine itself is still built in 4b.
+  const runStore = new RunStore(join(beckettDir, "runs.json"));
+  // Zero-token progress cards: CODE keeps one status message per active ticket/run, edited
+  // straight off the dispatch event bus — no Concierge involvement, honoring "the Concierge and
+  // the poll-dispatch loop never call each other directly". Channel: the event's stamped
+  // originChannel, else the task registry's thread/origin (same precedent as the PR re-watch
+  // loop below). Two independent switches feed this ONE service: `progress.cards_as_code`
+  // (default off) gates the ticket dispatcher's own dispatchLiveSink below; `runs.cards`
+  // (default ON — the v7 deploy receipt) gates the run engine's in 4b. Each sink checks its own
+  // flag before calling observe(), so either lane can be on while the other stays off.
+  const runCardsEnabled = config.runs?.cards ?? true;
+  const progressCards: ProgressCardService | null = config.progress.cards_as_code || runCardsEnabled
     ? createProgressCardService({
         gateway,
         statePath: join(beckettDir, "progress-cards.json"),
@@ -471,6 +478,9 @@ async function boot(): Promise<BootedSystem> {
             tasks.findByTicket(event.ticketRef.replace(/^#/, ""));
           return hit ? hit.task.threadId ?? hit.task.originChannelId ?? null : null;
         },
+        // The v7 run card's checklist line (spec.md progress) — cards.ts stays fs-free, this
+        // reads the run's live workspace off the same store the run engine drives (4b).
+        specReader: runSpecReader(runStore),
         logger: logger.child("progress-cards"),
       })
     : null;
@@ -493,8 +503,10 @@ async function boot(): Promise<BootedSystem> {
     dispatchEventsPath: join(paths.eventsDir, "dispatch.jsonl"),
     dispatchLiveSink: (event) => {
       // Fire-and-forget: a card hiccup must never delay the digest relay, and neither is awaited
-      // by the bus. Flag off ⇒ progressCards is null and this is behaviorally identical.
-      if (progressCards) void progressCards.observe(event);
+      // by the bus. This lane's own switch is `progress.cards_as_code` — `progressCards` may
+      // exist purely for `runs.cards` (the v7 lane below), so re-check the flag here rather than
+      // just null-checking the service.
+      if (progressCards && config.progress.cards_as_code) void progressCards.observe(event);
       return concierge.postDispatchEvent(event);
     },
     runtimeStatePath: join(beckettDir, "dispatcher-state.json"),
@@ -601,7 +613,7 @@ async function boot(): Promise<BootedSystem> {
   //     (unlike the tracker path, which `config.tracker.enabled` still gates), so a board-less
   //     instance is a fully working Beckett. Wave B removes the dispatcher above; until then the
   //     two live side by side, sharing the spend ledger, the journal, and the dispatch event bus.
-  const runStore = new RunStore(join(beckettDir, "runs.json"));
+  //     `runStore` itself was constructed early in 4 (the card service's checklist reader needs it).
   const runSupervisor = createRunSupervisor({
     store: runStore,
     config,
@@ -615,7 +627,9 @@ async function boot(): Promise<BootedSystem> {
     progress: concierge.progressSink(),
     dispatchEventsPath: join(paths.eventsDir, "dispatch.jsonl"),
     dispatchLiveSink: (event) => {
-      if (progressCards) void progressCards.observe(event);
+      // `runs.cards` (default ON) is this lane's own switch — the deploy receipt posts
+      // independently of the ticket dispatcher's `progress.cards_as_code` above.
+      if (progressCards && runCardsEnabled) void progressCards.observe(event);
       return concierge.postDispatchEvent(event);
     },
     publishOutboxPath: join(beckettDir, "run-publish-outbox.jsonl"),

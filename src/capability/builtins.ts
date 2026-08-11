@@ -437,6 +437,10 @@ export const configFragments = {
       // 0 (the default) falls back to `[budget] per_task_usd_cap`, so an install that already
       // tuned the task cap keeps exactly that behavior.
       budget_usd_per_run: z.number().min(0).default(0),
+      // The deploy receipt (progress cards, `src/progress/cards.ts`). Default ON, and deliberately
+      // this lane's OWN switch — independent of `[progress] cards_as_code`, which stays the
+      // ticket-dispatcher's flag until that lane is removed.
+      cards: z.boolean().default(true),
     })
     .strict()
     .default({}),
