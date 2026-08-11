@@ -29,6 +29,7 @@ import type { RunState } from "../run/types.ts";
 import type { WorkItem } from "../run/work-item.ts";
 import { ExtensionRegistry, type Extension, type ExtensionFactory } from "../ext/index.ts";
 import { projectSlug } from "../run/cast.ts";
+import { classifyDiffSurface, reviewDepthInstructions } from "../run/review-depth.ts";
 import { steeringBlock } from "./resume-brief.ts";
 import { CapabilityRegistry, type CapabilityDeps } from "../capability/index.ts";
 import { availableCapabilityModules, createCapability } from "../capability/modules/index.ts";
@@ -391,12 +392,18 @@ const reviewStage: StageDefinition = {
   buildPrompt({ item, baseRef, steering, reviewDiff }): string {
     const body = item.body.trim() ? `\n\n${item.body.trim()}` : "";
     const diffBlock = reviewDiffBlock(reviewDiff, baseRef);
+    // Issue #234: the rubric is scaled to the surface the diff actually touched (content /
+    // visual / code) instead of always running the five-page visual pass. Classified from the
+    // SAME pre-read diff the block above renders — a pure re-derivation of what the supervisor
+    // journalled at cast time, so the prompt and the run card can never disagree. Empty string
+    // when no diff was pre-read: that review keeps its historical, un-scaled brief verbatim.
+    const depthBlock = reviewDepthInstructions(classifyDiffSurface(reviewDiff));
     const inspect = diffBlock
       ? "" // the diff (or its file list) is already in hand
       : `The implementation is committed in the repo you're in (your cwd). Inspect it with ` +
         `${diffHint(baseRef)}, then `;
     return (
-      `<task>\nReview the implementation for ticket ${taskHeader(item)}.${body}\n</task>${taskCriteria(item)}${steeringBlock(steering)}${diffBlock}\n\n` +
+      `<task>\nReview the implementation for ticket ${taskHeader(item)}.${body}\n</task>${taskCriteria(item)}${steeringBlock(steering)}${diffBlock}${depthBlock}\n\n` +
       `${inspect}verify it against EVERY acceptance criterion above. Do not ` +
       `modify the implementation — your job is to judge it.`
     );

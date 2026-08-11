@@ -121,6 +121,75 @@ describe("prompt + system-append fallbacks", () => {
   });
 });
 
+// Issue #234: the review brief carries the rubric DEPTH the diff earned. The classification is
+// pinned in `src/run/review-depth.test.ts`; what these pin is the WIRING — the right block reaches
+// the review brief, and a review with no pre-read diff keeps its historical un-scaled text.
+describe("review depth in the review brief (#234)", () => {
+  const item = makeItem();
+  const hrefFix = `diff --git a/web/public/index.html b/web/public/index.html
+--- a/web/public/index.html
++++ b/web/public/index.html
+@@ -12,7 +12,7 @@
+-  <a class="cta" href="https://exmaple.com/docs">Read the docs</a>
++  <a class="cta" href="https://example.com/docs">Read the docs</a>
+`;
+  const cssChange = `diff --git a/web/public/app.css b/web/public/app.css
+--- a/web/public/app.css
++++ b/web/public/app.css
+@@ -1,3 +1,3 @@
+-.cta { padding: 8px; }
++.cta { padding: 12px; }
+`;
+  const codeChange = `diff --git a/src/run/supervisor.ts b/src/run/supervisor.ts
+--- a/src/run/supervisor.ts
++++ b/src/run/supervisor.ts
+@@ -1,1 +1,2 @@
++const x = 1;
+`;
+
+  test("a copy/href diff gets the content tier — and the external-link check listing the href", () => {
+    const prompt = stageRegistry.prompt("review", { item, reviewDiff: hrefFix });
+    expect(prompt).toContain("Review depth: CONTENT");
+    expect(prompt).toContain("do NOT run the full visual browser rubric");
+    expect(prompt).toContain("LINK CHECK (required)");
+    expect(prompt).toContain("- https://example.com/docs");
+    expect(prompt).not.toContain("Run the FULL visual rubric");
+  });
+
+  test("a stylesheet diff gets the full visual rubric, with no link check", () => {
+    const prompt = stageRegistry.prompt("review", { item, reviewDiff: cssChange });
+    expect(prompt).toContain("Review depth: VISUAL");
+    expect(prompt).toContain("Run the FULL visual rubric");
+    expect(prompt).not.toContain("LINK CHECK");
+  });
+
+  test("a source diff gets the code tier", () => {
+    const prompt = stageRegistry.prompt("review", { item, reviewDiff: codeChange });
+    expect(prompt).toContain("Review depth: CODE");
+    expect(prompt).toContain("Review it as CODE");
+  });
+
+  test("mixed goes deeper: html copy + css is reviewed as visual", () => {
+    const prompt = stageRegistry.prompt("review", { item, reviewDiff: hrefFix + cssChange });
+    expect(prompt).toContain("Review depth: VISUAL");
+    expect(prompt).not.toContain("Review depth: CONTENT");
+  });
+
+  test("no pre-read diff ⇒ no depth block: the un-scaled brief, verbatim", () => {
+    const prompt = stageRegistry.prompt("review", { item });
+    expect(prompt).not.toContain("<review-depth>");
+    expect(prompt).toContain("Inspect it with");
+  });
+
+  test("depth composes with the diff block rather than replacing it", () => {
+    const prompt = stageRegistry.prompt("review", { item, reviewDiff: hrefFix });
+    expect(prompt).toContain("```diff");
+    expect(prompt.indexOf("<review-depth>")).toBeGreaterThan(prompt.indexOf("```diff"));
+    // …and the closing judge-it-against-the-criteria instruction still lands last.
+    expect(prompt.trimEnd().endsWith("your job is to judge it.")).toBe(true);
+  });
+});
+
 describe("worker persona composition (Phase 4)", () => {
   // The worker system append is COMPOSED from the capability modules' registered prompt
   // blocks (github guidance at priority 10, the deploy recipe at 30) with the design stage's

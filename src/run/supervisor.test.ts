@@ -119,6 +119,9 @@ const { resolveSelfProjectOwner } = await import("../github/owner.ts");
 let commitCalls: { workspace: string; message: string }[] = [];
 let ensureCalls: { repoRoot: string; slug: string; owner: string }[] = [];
 let commitResult = { committed: true, sha: "commit000" };
+/** The diff the review stage pre-reads — a `let` so a test can swap in a copy/href surface (#234). */
+const DEFAULT_REVIEW_DIFF = "diff --git a/x.ts b/x.ts\n+added";
+let reviewDiffText = DEFAULT_REVIEW_DIFF;
 const gitFakes: Partial<RunGitOps> = {
   commitWorktree: async (workspace: string, message: string) => {
     commitCalls.push({ workspace, message });
@@ -129,7 +132,7 @@ const gitFakes: Partial<RunGitOps> = {
   ensureProjectRepo: async (repoRoot: string, slug: string, owner: string) => {
     ensureCalls.push({ repoRoot, slug, owner });
   },
-  readDiff: async () => "diff --git a/x.ts b/x.ts\n+added",
+  readDiff: async () => reviewDiffText,
   createWorktree: async (opts) => {
     mkdirSync(opts.workspace, { recursive: true });
     return { repoRoot: opts.repoRoot, workspace: opts.workspace, branch: opts.branch };
@@ -291,6 +294,7 @@ beforeEach(() => {
   commitCalls = [];
   ensureCalls = [];
   commitResult = { committed: true, sha: "commit000" };
+  reviewDiffText = DEFAULT_REVIEW_DIFF;
 });
 
 afterEach(() => {
@@ -449,6 +453,57 @@ describe("stage flow", () => {
     expect(publishCalls).toHaveLength(1);
     // The publish is keyed by the RUN id — the whole point of the re-keying.
     expect(publishCalls[0]!.ticket).toBe(run.id);
+  });
+
+  // #234: the depth the reviewer's rubric was scaled to is journalled at cast time, so a run card
+  // shows WHY a copy fix didn't buy ten minutes of browser rubric.
+  test("review depth is journalled at cast time — scaled to the pre-read diff", async () => {
+    reviewDiffText = `diff --git a/web/public/index.html b/web/public/index.html
+--- a/web/public/index.html
++++ b/web/public/index.html
+@@ -12,7 +12,7 @@
+-  <a href="https://exmaple.com/docs">Read the docs</a>
++  <a href="https://example.com/docs">Read the docs</a>
+`;
+    const { supervisor, store, events } = newSupervisor();
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    await settle();
+
+    const depth = events.find((e) => e.stage === "review:depth");
+    expect(depth?.outcome).toBe("info");
+    expect(depth?.message).toBe("review depth: content (1 file, copy/href only)");
+    // The depth line lands BEFORE the review worker starts — it explains the brief it was handed.
+    const order = events.map((e) => `${e.stage}:${e.outcome}`);
+    expect(order.indexOf("review:depth:info")).toBeLessThan(order.indexOf("review:started"));
+  });
+
+  test("a source diff journals the code tier instead", async () => {
+    const { supervisor, store, events } = newSupervisor();
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    await settle();
+    expect(events.find((e) => e.stage === "review:depth")?.message).toBe(
+      "review depth: code (1 file, source/config: x.ts)",
+    );
+    // Implement never classifies — the depth belongs to the review cast.
+    expect(events.filter((e) => e.stage === "review:depth")).toHaveLength(1);
+  });
+
+  test("an unreadable diff journals no depth line and leaves the review un-scaled", async () => {
+    reviewDiffText = "";
+    const { supervisor, store, events } = newSupervisor();
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    await settle();
+    expect(events.some((e) => e.stage === "review:depth")).toBe(false);
+    expect(spawnCalls[1]!.stage).toBe("review");
   });
 
   test("the done event's message is the shipped PR URL — the deploy receipt's closing line", async () => {
