@@ -4,95 +4,145 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Beckett · Coworker as a Service</title>
-<meta name="description" content="What The Commons means by Coworker as a Service: you delegate outcomes, not prompts. Initiative, accountability, memory, presence, taste." />
-<meta name="theme-color" content="#f3f2ef" media="(prefers-color-scheme: light)" />
-<meta name="theme-color" content="#131316" media="(prefers-color-scheme: dark)" />
+<meta name="description" content="What Coworker as a Service means: you hand over the outcome, not the keystrokes. Delegation as the interface, accountability in the diff, and a coworker you host yourself." />
+<meta name="theme-color" content="#08080a" />
 <meta property="og:title" content="Beckett · Coworker as a Service" />
-<meta property="og:description" content="Not a chatbot with a job title. The paradigm behind Beckett, as we mean it at The Commons." />
+<meta property="og:description" content="Not a chatbot with a job title. The paradigm behind Beckett, and the parts of it that are actually shipped." />
 <meta property="og:type" content="website" />
 <link rel="icon" href="/favicon.svg" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/page.css">
 <script>document.documentElement.className='js'</script>
 </head>
 <body>
+<a class="skip" href="#main">Skip to content</a>
 
 <nav>
   <div class="nav-in">
     <a class="brand" href="/"><em>0x</em>beckett</a>
-    <div class="nav-links">
-      <a href="/#how">How it works</a>
-      <a href="/federation">Federation</a>
-      <a href="/pricing">Pricing</a>
-      <a href="https://github.com/0xbeckett/beckett">GitHub</a>
+    <div class="nav-links" role="navigation" aria-label="Primary">
+      <a class="opt" href="/#work">How it works</a>
+      <a class="opt" href="/#fork">Run your own</a>
+      <a href="https://discord.gg/DfJKFawURy">Discord</a>
+      <a href="https://github.com/kowo-co/beckett">Source</a>
     </div>
-    <a class="btn btn-primary btn-sm" href="https://discord.gg/DfJKFawURy">Join the Commons</a>
+    <a class="btn btn-primary" href="https://github.com/apps/0x-beck">Install on GitHub</a>
   </div>
 </nav>
 
-<main class="page">
-  <header class="intro" id="top">
+<main class="page" id="main">
+  <header class="intro">
     <h1 class="rv">Coworker,<br><span class="g">as a service.</span></h1>
-    <p class="lead rv">The paradigm behind Beckett, as we mean it at The Commons. Spoiler: it's not a chatbot with a job title.</p>
+    <p class="lead rv">The paradigm behind Beckett, and only the parts of it that are actually
+      shipped. Spoiler: it is not a chatbot with a job title.</p>
   </header>
 
   <section class="passage">
     <h2 class="rv">Software kept almost helping.</h2>
-    <p class="rv">SaaS gave you tools; you still did the work. Chatbots gave you answers; you still did the work. Copilots gave you suggestions; you were still the one driving. <b>CaaS is the next honest step: you hand over the outcome, not the keystrokes.</b></p>
+    <p class="rv">SaaS gave you tools; you still did the work. Chatbots gave you answers; you still
+      did the work. Copilots gave you suggestions, and you were still the one driving.
+      <b>Coworker as a Service is the honest next step: you hand over the outcome, not the
+      keystrokes.</b></p>
   </section>
 
   <section class="passage">
     <h2 class="rv">Delegation is the interface.</h2>
-    <p class="rv">You don't operate Beckett. You ask it. It takes the goal, owns the mess in the middle, and comes back with a shipped result it will stand behind. No dashboard, no prompt engineering, no babysitting.</p>
-    <p class="rv">You manage outcomes, the way you would with a colleague. If that sounds like less control, notice it's the exact amount of control you have over every human coworker you already trust.</p>
+    <p class="rv">You don't operate Beckett. You ask it, in the channel you're already in, in the
+      words you'd use with a colleague. It sizes the ask itself — a sentence back if that's all it
+      deserves, or a run it staffs, builds, reviews and opens a pull request for.</p>
+    <p class="rv">You manage outcomes, the way you would with anyone else on the team. If that
+      sounds like less control, notice it's the exact amount of control you have over every human
+      coworker you already trust — and unlike them, this one leaves a diff you can read before
+      anything merges.</p>
   </section>
 
   <section class="passage">
     <h2 class="rv">What makes a coworker, not a tool.</h2>
     <div class="traits">
-      <div class="trait rv"><div class="k">initiative</div><p>Files its own tickets. Speaks up when it smells trouble, without being asked.</p></div>
-      <div class="trait rv"><div class="k">accountability</div><p>Signed commits, adversarial review, a paper trail you can audit.</p></div>
-      <div class="trait rv"><div class="k">memory</div><p>Remembers you tomorrow. Your stack, your taste, your grudges.</p></div>
-      <div class="trait rv"><div class="k">presence</div><p>Lives where the team already talks. Not another tab you forget about.</p></div>
-      <div class="trait rv"><div class="k">taste</div><p>Has opinions and pushes back. Occasionally wrong, never beige.</p></div>
+      <div class="trait rv"><div class="k">accountability</div>
+        <p>A checklist it wrote from your ask, a fresh reviewer grinding the diff against that
+          checklist, and a pull request at the end of it.</p></div>
+      <div class="trait rv"><div class="k">memory</div>
+        <p>A cross-conversation knowledge graph, not a context window. It knows your stack and your
+          taste tomorrow.</p></div>
+      <div class="trait rv"><div class="k">presence</div>
+        <p>It lives where the team already talks. Not another tab you forget to open.</p></div>
+      <div class="trait rv"><div class="k">judgment</div>
+        <p>It casts each stage of a run separately, so cheap work stays cheap and a hard build gets
+          the firepower it needs.</p></div>
+      <div class="trait rv"><div class="k">honesty</div>
+        <p>A mid-flight note that didn't reach a live worker comes back as buffered, never as done.
+          Receipts over reassurance.</p></div>
+      <div class="trait rv"><div class="k">character</div>
+        <p>Its personality is one file it can rewrite live, in the channel, because you asked it
+          to. No redeploy.</p></div>
     </div>
   </section>
 
   <section class="passage">
-    <h2 class="rv">A service without the meter.</h2>
-    <p class="rv">The old version of this page ended in a pricing table. The new one ends in a git clone. Beckett is open source and self-hosted: the service in Coworker as a Service is what it does for you, not what you owe monthly.</p>
-    <p class="rv">A coworker you host is the only kind that's really yours. That thinking has its own page: <a href="/federation">why Beckett is federated</a>.</p>
+    <h2 class="rv">A service you host.</h2>
+    <p class="rv">There is no meter on this. Beckett is MIT-licensed and self-hosted: the
+      <em>service</em> in Coworker as a Service is what it does for you, not what you owe monthly.
+      No tenant model, no per-seat billing, no hosted control plane — it runs on hardware you
+      control, under credentials you minted, and its marginal cost is your own Claude
+      subscription.</p>
+    <p class="rv">A coworker you host is the only kind that's really yours. Fork it, rename it,
+      rewrite its persona and point it at your Discord — <a href="https://github.com/kowo-co/beckett">the
+      whole thing is in one repo</a>.</p>
   </section>
 
-  <section class="outro" id="end">
-    <h2 class="rv">Meet one.</h2>
-    <p class="sub rv">Ours hangs out in the Commons. It will probably have opinions about your repo.</p>
+  <section class="passage">
+    <h2 class="rv">What it doesn't do.</h2>
+    <p class="rv">A coworker you can't audit is a liability, so the limits are part of the pitch.
+      It doesn't merge unreviewed: every run passes a fresh reviewer, and work that needs a human
+      parks with the reason instead of guessing. It doesn't hold your keys — credentials stay on
+      your box, and it refuses provider API keys from the environment on purpose.</p>
+    <p class="rv">And it doesn't pretend to be finished. Beckett is one opinionated coworker for
+      one Discord server, not a general-purpose agent platform. Generality is a cost someone else
+      can choose to pay by forking.</p>
+  </section>
+
+  <section class="outro">
+    <h2 class="rv">Go meet one.</h2>
+    <p class="sub rv">Ours is in the Discord. It will probably have opinions about your repo.</p>
     <div class="cta-row rv">
-      <a class="btn btn-primary btn-lg" href="https://discord.gg/DfJKFawURy">Join the Discord »</a>
-      <a class="btn btn-ghost btn-lg" href="https://github.com/0xbeckett/beckett">Read the source</a>
+      <a class="btn btn-primary btn-lg" href="https://discord.gg/DfJKFawURy">Join the Discord</a>
+      <a class="btn btn-ghost btn-lg" href="https://github.com/apps/0x-beck">Install on GitHub</a>
     </div>
   </section>
 </main>
 
 <footer>
   <div class="f-in">
-    <div class="f-l"><em>0x</em>beckett</div>
+    <a class="f-l" href="/"><em>0x</em>beckett</a>
     <div class="f-r">
-      <a href="https://discord.gg/DfJKFawURy">Discord</a>
-      <a href="https://github.com/0xbeckett/beckett">GitHub</a>
-      <a href="/federation">Federation</a>
       <a href="/caas">Coworker as a Service</a>
-      <a href="/pricing">Pricing</a>
-      <a href="/v6">v6</a>
+      <a href="https://discord.gg/DfJKFawURy">Discord</a>
+      <a href="https://github.com/apps/0x-beck">GitHub App</a>
+      <a href="https://github.com/kowo-co">kowo-co</a>
+      <a href="https://github.com/kowo-co/beckett">Source</a>
     </div>
   </div>
+  <p class="f-base">MIT licensed. Self-hosted. Beckett builds and ships this site itself.</p>
 </footer>
 
 <script>
-  (function(){var io=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target);}});},{threshold:.16,rootMargin:'0px 0px -6% 0px'});
-    document.querySelectorAll('.rv').forEach(function(n,i){n.style.transitionDelay=(i%3*55)+'ms';io.observe(n);})})();
+  (function(){
+    if (window.matchMedia && matchMedia('(prefers-reduced-motion:reduce)').matches
+        || !('IntersectionObserver' in window)) {
+      document.querySelectorAll('.rv').forEach(function(n){ n.classList.add('in'); });
+      return;
+    }
+    var io = new IntersectionObserver(function(es){
+      es.forEach(function(e){ if(e.isIntersecting){ e.target.classList.add('in'); io.unobserve(e.target); } });
+    }, { threshold:.16, rootMargin:'0px 0px -6% 0px' });
+    document.querySelectorAll('.rv').forEach(function(n,i){
+      n.style.transitionDelay = (i % 3 * 55) + 'ms';
+      io.observe(n);
+    });
+  })();
 </script>
 </body>
 </html>
