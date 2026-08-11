@@ -1010,6 +1010,26 @@ export interface Config {
      * today's behavior byte-for-byte. Clamped to 3000 by the schema.
      */
     directed_settle_ms: number;
+    /**
+     * chilltext (v7 architecture doc): restyles every human-facing Concierge message through a
+     * friend's homelab rewrite API before it posts, fail-open on any error/timeout. OFF by
+     * default — a fork's config must opt in (prod flips it true).
+     */
+    chilltext: {
+      enabled: boolean;
+      /** Base URL of the chilltext service; `${url}/chill` is POSTed. */
+      url: string;
+      /** Abort the POST after this long; a timeout is a normal fail-open, not an error log. */
+      timeout_ms: number;
+      /** Upper bound on bubbles the service may split a reply into (1–4 upstream). */
+      max_bubbles: number;
+      /** Delay between posting successive bubbles of one chilled reply (human texting cadence). */
+      bubble_delay_ms: number;
+      /** English personality request forwarded as-is; empty = the service's own default voice. */
+      system: string;
+      /** Reserved for a future per-message override; the client-side ``` bypass is unconditional. */
+      skip_code_blocks: boolean;
+    };
   };
   /**
    * Quick agents — the NO-TICKET lane: short-lived specialist `claude -p` harnesses

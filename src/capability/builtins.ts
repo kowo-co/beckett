@@ -568,6 +568,21 @@ export const configFragments = {
         .min(0)
         .default(0)
         .transform((ms) => Math.min(ms, DIRECTED_SETTLE_MAX_MS)),
+      // chilltext (v7 architecture doc): restyles every human-facing reply through a friend's
+      // homelab rewrite API, fail-open on any error/timeout. OFF by default — a fork opts in;
+      // prod's config.toml flips this true.
+      chilltext: z
+        .object({
+          enabled: z.boolean().default(false),
+          url: z.string().min(1).default("https://chilltext.ssh.codes"),
+          timeout_ms: posInt.default(8_000),
+          max_bubbles: z.number().int().min(1).max(4).default(3),
+          bubble_delay_ms: nonNegInt.default(2_500),
+          system: z.string().default(""),
+          skip_code_blocks: z.boolean().default(true),
+        })
+        .strict()
+        .default({}),
     })
     .default({}),
   // Quick agents — the no-ticket lane. Sonnet at medium: these are errands where

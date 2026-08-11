@@ -49,6 +49,7 @@ import { serveBus, type BusRequest, type BusResponse } from "../shell/control-bu
 import { ActionClass, CapabilityRegistry, type Capability } from "../capability/index.ts";
 import { effectiveActionClass, renderCatalogBlock, type ExtensionContext, type ExtensionRegistry, type InvocationOrigin } from "../ext/index.ts";
 import { createDiscordGateway, type DiscordGateway } from "../discord/gateway.ts";
+import { deliverChilled } from "./chill-gate.ts";
 import { contentWithForwardedSnapshots } from "./forwarded-message.ts";
 import {
   downloadAttachments,
@@ -5204,7 +5205,15 @@ export class Concierge {
                   if (claimsActiveTurn && active && !active.ambient) this.owed.markDelivering(active.messageId);
                   // A long reply may land as several human-cadence messages (OPS-62); `post` returns the FIRST
                   // message id (the reply-correlation anchor), so `data.messageId` keeps its single-id contract.
-                  const messageId = await this.gateway.post(channelId, text, opts);
+                  // Restyled through chilltext when enabled — fail-open to the exact call above.
+                  const messageId = await deliverChilled(channelId, text, {
+                    input: active?.text,
+                    postOpts: opts,
+                    gateway: this.gateway,
+                    cfg: this.config.concierge.chilltext,
+                    logger: this.log,
+                    recordPost: (chId, bubbleText, bubbleId) => this.recordBeckettPost(chId, bubbleText, bubbleId),
+                  });
                   // OPS-80: a CLI reply is Beckett speaking in a channel — into the shared record it goes
                   // as one logical entry even when the native chunker sends several messages.
                   this.recordBeckettPost(channelId, text, messageId);
@@ -5293,7 +5302,15 @@ export class Concierge {
                       : {}),
                     ...(pingUserIds.length > 0 ? { pingUserIds } : {}),
                   };
-                  const messageId = await this.gateway.post(channelId, text, opts);
+                  // Restyled through chilltext when enabled, forced to ONE bubble (an ack is a
+                  // transient progress line, never a multi-bubble delivery) — fail-open to the call above.
+                  const messageId = await deliverChilled(channelId, text, {
+                    postOpts: opts,
+                    gateway: this.gateway,
+                    cfg: this.config.concierge.chilltext,
+                    logger: this.log,
+                    single: true,
+                  });
                   // Deliberately NOT recorded into the shared context and NOT marked repliedViaCli: an ack
                   // is a transient, model-authored progress signal (the only kind left — the daemon's
                   // canned fast/progress acks are gone), so the turn's real answer still flows through
@@ -6013,9 +6030,15 @@ export class Concierge {
         this.owed.markDelivering(m.messageId);
         for (const injectedId of absorbedInjections) this.owed.markDelivering(injectedId);
         // The Concierge's conversational reply is a native reply, which notifies only its author.
-        const ackId = await this.gateway.post(m.channelId, text, {
-          replyToMessageId: m.messageId,
-          replyToUserId: m.userId,
+        // Restyled through chilltext when enabled (v7 architecture doc) — fail-open to the exact
+        // call above on any bypass/failure, so this posts byte-for-byte the same with the flag off.
+        const ackId = await deliverChilled(m.channelId, text, {
+          input: turnContent || undefined,
+          postOpts: { replyToMessageId: m.messageId, replyToUserId: m.userId },
+          gateway: this.gateway,
+          cfg: this.config.concierge.chilltext,
+          logger: this.log,
+          recordPost: (chId, bubbleText, bubbleId) => this.recordBeckettPost(chId, bubbleText, bubbleId),
         });
         // OPS-80: our own reply joins the shared record (a CLI reply was already recorded on the
         // bus path — this covers the auto-post half, so exactly one entry either way).
@@ -6543,7 +6566,14 @@ export class Concierge {
       if (claim.repliedViaCli) {
         postedId = claim.ackMessageId; // the bus path already recorded this post (OPS-80)
       } else {
-        postedId = await this.gateway.post(turn.channelId, reply);
+        // Restyled through chilltext when enabled — fail-open to the exact plain post below.
+        postedId = await deliverChilled(turn.channelId, reply, {
+          input: turn.transcript.at(-1)?.content || undefined,
+          gateway: this.gateway,
+          cfg: this.config.concierge.chilltext,
+          logger: this.log,
+          recordPost: (chId, bubbleText, bubbleId) => this.recordBeckettPost(chId, bubbleText, bubbleId),
+        });
         // OPS-80: an ambient interjection is a real Beckett post in the channel — record it.
         this.recordBeckettPost(turn.channelId, reply, postedId);
       }
