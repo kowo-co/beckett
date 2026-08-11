@@ -31,6 +31,8 @@ interface SpawnCall {
   steering?: string[];
   reviewDiff?: string;
   body: string;
+  /** The worker's granular event callback — the journal sink AND the activity blurb lane. */
+  onProgress?: (ev: unknown, ctx: { stage: string; workerId: string }) => void;
 }
 let spawnCalls: SpawnCall[] = [];
 let created: any[] = [];
@@ -94,6 +96,7 @@ const fakeSpawn = async (args: any) => {
     steering: args.steering,
     reviewDiff: args.reviewDiff,
     body: args.item.body,
+    onProgress: args.onProgress,
   });
   if (spawnThrows) throw spawnThrows;
   const h = makeHandle(args);
@@ -232,6 +235,9 @@ function newSupervisor(
     spendLedgerPath?: string;
     publishOutboxPath?: string;
     store?: RunStore;
+    /** The activity-blurb POLISH seam — a fake here is what keeps this suite off the network. */
+    summarizeActivity?: (lines: string[], opts: { provider?: string }) => Promise<string | null>;
+    now?: () => number;
   } = {},
 ): Harness {
   const dir = scratch();
@@ -262,6 +268,13 @@ function newSupervisor(
           },
         }
       : {}),
+    // Default the blurb POLISH to a hard failure: any test that DOESN'T opt in must never be able
+    // to reach a real model, and the run must survive the polish throwing. (With the shipped
+    // default `provider = "off"` it is never called at all.)
+    summarizeActivity: opts.summarizeActivity ?? (async () => {
+      throw new Error("activity polish must be injected in tests");
+    }),
+    ...(opts.now ? { now: opts.now } : {}),
     ...(opts.runtimeStatePath ? { runtimeStatePath: opts.runtimeStatePath } : {}),
     ...(opts.spendLedgerPath ? { spendLedgerPath: opts.spendLedgerPath } : {}),
     ...(opts.publishOutboxPath ? { publishOutboxPath: opts.publishOutboxPath } : {}),
@@ -1054,5 +1067,144 @@ describe("runSpecReader", () => {
     const dir = scratch();
     const store = new RunStore(join(dir, "runs.json"));
     expect(runSpecReader(store)("ticket-1")).toBeNull();
+  });
+});
+
+// ── the live activity blurb (./activity.ts) ─────────────────────────────────────────────
+
+describe("the live activity blurb", () => {
+  /** One worker tool call, exactly as the driver hands it to `onProgress`. */
+  const toolCall = (tool: string, input: Record<string, unknown>) =>
+    ({ kind: "tool_call", tool, toolId: `t${Math.random()}`, input }) as never;
+
+  /** Drive a run to a live implement worker and hand back its `onProgress` callback. */
+  async function liveWorker(opts: Parameters<typeof newSupervisor>[0] = {}) {
+    const h = newSupervisor(opts);
+    const run = seedRun(h.store, makeRun());
+    await h.supervisor.admit(run.id);
+    await tick();
+    const onProgress = spawnCalls.at(-1)!.onProgress!;
+    const blurbs = () => h.events.filter((e) => e.stage === "activity");
+    return { ...h, run, onProgress, blurbs };
+  }
+
+  test("a tool call puts a derived phrase on the card, with no model in the path", async () => {
+    const { onProgress, blurbs } = await liveWorker();
+    onProgress(toolCall("Edit", { file_path: "/ws/web/public/index.html" }), {
+      stage: "implement",
+      workerId: "wk_1",
+    });
+    await tick();
+    expect(blurbs().map((e) => e.message)).toEqual(["editing index.html"]);
+    expect(blurbs()[0]).toMatchObject({ outcome: "info", stage: "activity" });
+  });
+
+  test("refreshes are throttled to one per 15s per run (fake clock)", async () => {
+    let now = 1_000_000;
+    const { onProgress, blurbs } = await liveWorker({ now: () => now });
+    const ctx = { stage: "implement", workerId: "wk_1" };
+    onProgress(toolCall("Edit", { file_path: "/ws/a.ts" }), ctx);
+    onProgress(toolCall("Edit", { file_path: "/ws/b.ts" }), ctx); // same instant — throttled
+    now += 14_999;
+    onProgress(toolCall("Edit", { file_path: "/ws/c.ts" }), ctx); // still inside the floor
+    now += 1;
+    onProgress(toolCall("Edit", { file_path: "/ws/d.ts" }), ctx); // clears it
+    await tick();
+    expect(blurbs().map((e) => e.message)).toEqual(["editing a.ts", "editing d.ts"]);
+  });
+
+  test("an unchanged phrase is not republished every cycle", async () => {
+    let now = 1_000_000;
+    const { onProgress, blurbs } = await liveWorker({ now: () => now });
+    const ctx = { stage: "implement", workerId: "wk_1" };
+    for (let i = 0; i < 4; i++) {
+      onProgress(toolCall("Bash", { command: "bun test" }), ctx);
+      now += 16_000;
+    }
+    await tick();
+    // 4 refreshes, one phrase: the card is repainted only often enough to stay fresh.
+    expect(blurbs().map((e) => e.message)).toEqual(["running tests"]);
+    now += 60_000;
+    onProgress(toolCall("Bash", { command: "bun test" }), ctx);
+    await tick();
+    expect(blurbs()).toHaveLength(2);
+  });
+
+  test("blurbs are EPHEMERAL — they never reach the durable dispatch ledger", async () => {
+    const dir = scratch();
+    const path = join(dir, "dispatch.jsonl");
+    const h = newSupervisor();
+    // A supervisor whose bus actually writes: the blurb must not appear in the file.
+    const supervisor = new RunSupervisor({
+      store: h.store,
+      config: cfg(),
+      gitOps: gitFakes,
+      resolveRepoRoot: (run) => join(h.repos, runProjectSlug(run)),
+      dispatchEventsPath: path,
+      summarizeActivity: async () => null,
+    });
+    const run = seedRun(h.store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    spawnCalls[0]!.onProgress!(toolCall("Edit", { file_path: "/ws/index.html" }), {
+      stage: "implement",
+      workerId: "wk_1",
+    });
+    await tick();
+    const rows = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.some((r) => r.stage === "activity")).toBe(false);
+  });
+
+  test("`enabled = false` reverts the card to the phase word entirely", async () => {
+    const config = cfg({
+      runs: { max_live: 3, review_cycles_max: 2, budget_usd_per_run: 0, activity: { enabled: false } },
+    });
+    const { onProgress, blurbs } = await liveWorker({ config });
+    onProgress(toolCall("Edit", { file_path: "/ws/index.html" }), { stage: "implement", workerId: "wk_1" });
+    await tick();
+    expect(blurbs()).toHaveLength(0);
+  });
+
+  test("the polish is OFF by default — a throwing polish seam is never even called", async () => {
+    // `newSupervisor`'s default polish throws; with `provider = "off"` (the shipped default) the
+    // run still gets its derived phrase and nothing rejects.
+    const { onProgress, blurbs } = await liveWorker();
+    onProgress(toolCall("Bash", { command: "bun x tsc --noEmit" }), { stage: "implement", workerId: "wk_1" });
+    await settle();
+    expect(blurbs().map((e) => e.message)).toEqual(["typechecking"]);
+  });
+
+  test("a flagged-on polish overwrites the derived phrase, and a failing one doesn't", async () => {
+    const config = cfg({
+      runs: {
+        max_live: 3,
+        review_cycles_max: 2,
+        budget_usd_per_run: 0,
+        activity: { provider: "cerebras" },
+      },
+    });
+    const good = await liveWorker({ config, summarizeActivity: async () => "polishing the hero styles" });
+    good.onProgress(toolCall("Bash", { command: "bun test" }), { stage: "implement", workerId: "wk_1" });
+    await settle();
+    expect(good.blurbs().map((e) => e.message)).toEqual(["running tests", "polishing the hero styles"]);
+
+    const bad = await liveWorker({
+      config,
+      summarizeActivity: async () => {
+        throw new Error("cerebras is down");
+      },
+    });
+    bad.onProgress(toolCall("Bash", { command: "bun test" }), { stage: "implement", workerId: "wk_1" });
+    await settle();
+    expect(bad.blurbs().map((e) => e.message)).toEqual(["running tests"]);
+  });
+
+  test("a tool call the journal drops produces no blurb, and neither does a non-worker stage", async () => {
+    const { onProgress, blurbs } = await liveWorker();
+    onProgress({ kind: "turn_complete" } as never, { stage: "implement", workerId: "wk_1" });
+    onProgress(toolCall("Edit", { file_path: "/ws/a.ts" }), { stage: "design", workerId: "wk_1" });
+    await tick();
+    expect(blurbs()).toHaveLength(0);
   });
 });

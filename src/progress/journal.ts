@@ -217,15 +217,35 @@ function toolHint(tool: string, input: unknown): string {
   if (!input || typeof input !== "object") return "";
   const o = input as Record<string, unknown>;
   const pick = (k: string): string | null => (typeof o[k] === "string" ? (o[k] as string) : null);
+  const command = pick("command"); // Bash
+  const path = pick("file_path") ?? pick("path"); // Read / Edit / Write / notebooks
   const raw =
-    pick("command") ?? // Bash
-    pick("file_path") ?? // Read / Edit / Write
-    pick("path") ??
+    command ??
+    path ??
     pick("pattern") ?? // Grep
     pick("query") ?? // search tools
     pick("url") ??
     "";
-  return raw ? truncate(raw.replace(/\s+/g, " ").trim(), HINT_MAX) : "";
+  if (!raw) return "";
+  const flat = raw.replace(/\s+/g, " ").trim();
+  // A path hint truncated head-first loses the ONE segment a reader (and `../run/activity.ts`'s
+  // blurb) wants — the filename — because worktree paths are long and the interesting end is the
+  // far end. Keep the same ceiling and the same head truncation, but always retain the basename.
+  return command === null && path !== null ? truncatePath(flat, HINT_MAX) : truncate(flat, HINT_MAX);
+}
+
+/**
+ * Truncate a PATH to `n` chars while keeping its final segment: `/home/beckett/Projects/…` becomes
+ * `/home/beckett/Proj…index.html` rather than `/home/beckett/Projects/beckett/.beckett/worktr…`.
+ * The line's structure, marker and stamp are untouched — only which characters survive changes.
+ */
+function truncatePath(path: string, n: number): string {
+  if (path.length <= n) return path;
+  const base = path.slice(path.lastIndexOf("/") + 1);
+  // A single segment longer than the budget has no prefix worth keeping; fall back to plain
+  // head truncation so the result can never exceed `n`.
+  if (!base || base.length + 2 > n) return truncate(path, n);
+  return `${path.slice(0, n - base.length - 1)}…${base}`;
 }
 
 /** Single-char mark for a file change kind. */

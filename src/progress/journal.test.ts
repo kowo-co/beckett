@@ -124,3 +124,52 @@ test("a journal with no dir is disabled: events drop, reads are null, nothing th
   journal.event("OPS-1", finished("success", "x"), IMPL);
   expect(journal.read("OPS-1")).toBeNull();
 });
+
+// ── path truncation keeps the basename (the run card's activity blurb reads these) ──────────
+
+test("a long PATH argument is truncated head-first but keeps its final segment", () => {
+  const path =
+    "/home/beckett/Projects/beckett/.beckett/worktrees/run-20260811-0xbeckett-me-redesign-spatial-3d-landing/web/public/page.css";
+  for (const tool of ["Read", "Write", "Edit"]) {
+    const line = formatEvent(toolCall(tool, { file_path: path }), IMPL, new Map())!;
+    const hint = line.slice(line.indexOf(tool) + tool.length + 2);
+    expect(hint).toHaveLength(80); // the same HINT_MAX ceiling as before
+    expect(hint.startsWith("/home/beckett/Projects/beckett/")).toBe(true);
+    expect(hint.endsWith("…page.css")).toBe(true);
+    // The line's STRUCTURE is untouched: marker, tool, two spaces, hint.
+    expect(line.startsWith(`  · ${tool}  /home/`)).toBe(true);
+  }
+});
+
+test("a short path, a long COMMAND, and a long non-path hint are unchanged", () => {
+  expect(formatEvent(toolCall("Read", { file_path: "/repo/a.ts" }), IMPL, new Map())).toBe("  · Read  /repo/a.ts");
+  // A command is not a path: it keeps plain tail truncation, so nothing that reads Bash lines moves.
+  const command = `bun test ${"x".repeat(200)}`;
+  const bash = formatEvent(toolCall("Bash", { command }), IMPL, new Map())!;
+  expect(bash).toBe(`  · Bash  ${command.slice(0, 79)}…`);
+  const grep = formatEvent(toolCall("Grep", { pattern: "y".repeat(200) }), IMPL, new Map())!;
+  expect(grep.endsWith("…")).toBe(true);
+});
+
+test("a single path segment longer than the whole budget still fits the ceiling", () => {
+  const line = formatEvent(toolCall("Read", { file_path: `/${"n".repeat(200)}.ts` }), IMPL, new Map())!;
+  const hint = line.slice(line.indexOf("Read") + 6);
+  expect(hint).toHaveLength(80);
+  expect(hint.endsWith("…")).toBe(true);
+});
+
+test("truncated path lines still read back through the journalTail consumer's filter", () => {
+  // `src/cli/core.ts`'s readJournalTail drops the reader's own "… N earlier lines elided" header
+  // and keeps everything else. A basename appended after an ellipsis must not look like one.
+  const dir = journalDir();
+  const journal = new TicketJournal({ dir, logger: quietLog });
+  const path = `/home/beckett/Projects/beckett/.beckett/worktrees/${"run-long-".repeat(8)}/web/public/index.html`;
+  for (let i = 0; i < 5; i++) journal.event("run-1", toolCall("Read", { file_path: path }), IMPL);
+  const body = readJournal(dir, "run-1", 2)!;
+  const tail = body
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .filter((line) => !line.startsWith("… ") || !line.includes("elided"));
+  expect(tail).toHaveLength(2);
+  expect(tail.every((line) => line.includes("· Read") && line.endsWith("…index.html"))).toBe(true);
+});

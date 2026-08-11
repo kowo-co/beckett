@@ -1844,6 +1844,11 @@ review_cycles_max = 2
 budget_usd_per_run = 0
 cards = true
 
+[runs.activity]
+enabled = true
+provider = "off"
+throttle_secs = 15
+
 [github]
 poll_secs = 60
 

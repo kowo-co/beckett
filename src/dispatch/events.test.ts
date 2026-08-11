@@ -28,6 +28,34 @@ describe("DispatchEventBus", () => {
     }
   });
 
+  test("emitEphemeral notifies the live sink without touching the durable ledger", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "beckett-dispatch-events-"));
+    const path = join(dir, "dispatch.jsonl");
+    const seen: string[] = [];
+    const bus = new DispatchEventBus({ path, liveSink: (event) => void seen.push(event.stage) });
+    try {
+      bus.emit({ runId: "run-1", runRef: "run-1", branchRef: "b", stage: "implement", outcome: "started" });
+      // The run card's activity blurb repaints a live surface every few seconds; a forensic
+      // ledger whose whole point is that nothing rewrites it must not fill up with repaints.
+      const blurb = bus.emitEphemeral({
+        runId: "run-1",
+        runRef: "run-1",
+        branchRef: "b",
+        stage: "activity",
+        outcome: "info",
+        message: "editing index.html",
+      });
+      expect(blurb.message).toBe("editing index.html");
+      expect(blurb.ts).toBeTruthy();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(seen).toEqual(["implement", "activity"]);
+      expect(readFileSync(path, "utf8").trim().split("\n")).toHaveLength(1);
+      expect(readDispatchEvents(path, "run-1").map((e) => e.stage)).toEqual(["implement"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("trace is ordered and failures render as an unmistakable alert", () => {
     const events = [
       { ts: "2026-01-01T00:00:00.000Z", runId: "ticket-1", runRef: "OPS-1", branchRef: "beckett/ops-1", stage: "implement", outcome: "started" as const, elapsedMs: 0 },
