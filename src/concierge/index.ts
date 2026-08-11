@@ -413,11 +413,30 @@ const DEFAULT_ROTATE_AT_TOKENS = 160_000;
 /** Safety fallback for a channel that never becomes idle; still rotate only after releasing its gate slot. */
 const FORCED_ROTATE_AT_TOKENS = 190_000;
 
+/** Prefix every concierge pool scope's cross-session address shares (Claude Code ≥2.1.224, `--name`). */
+export const CONCIERGE_SESSION_NAME_PREFIX = "beckett-concierge";
+
 /**
- * Cross-session address every ConciergeSession pool scope launches under (Claude Code ≥2.1.224,
- * `--name`) — the fixed name a live worker's SendMessage targets for a status question.
+ * The cross-session address ONE pool scope launches under. W2A shipped a FIXED
+ * `beckett-concierge` for every scope, which is an address collision the moment two pooled
+ * sessions are live at once (the default pool runs up to 6 plus SYSTEM_SCOPE): two children
+ * registering the same name, and a worker's status reply landing on whichever won.
+ *
+ * So the name carries the scope: the last 6 characters of the scope key — a Discord channel id's
+ * tail (`beckett-concierge-482913`), or the scope word itself for the short internal scopes
+ * (`system`, `global`). Six is enough to separate the handful of scopes a pool holds while keeping
+ * the name short and greppable.
+ *
+ * Nothing else has to learn these names: a worker answers a status ping by replying to the SENDER
+ * of the message it received (its reply address), never to a hardcoded address, and the concierge
+ * addresses workers by `run.sessionName`. This name only has to be UNIQUE and recognisable.
  */
-const CONCIERGE_SESSION_NAME = "beckett-concierge";
+export function conciergeSessionName(scope: string): string {
+  const key = scope.trim() || GLOBAL_SCOPE;
+  // `--name` wants a plain token: keep it to characters that can't need quoting anywhere.
+  const suffix = key.replace(/[^A-Za-z0-9_-]/g, "").slice(-6) || GLOBAL_SCOPE;
+  return `${CONCIERGE_SESSION_NAME_PREFIX}-${suffix}`;
+}
 
 /** Small, fast seat for a best-effort handoff; never spend an Opus chat turn on bookkeeping. */
 const HANDOFF_MODEL = "claude-haiku-4-5";
@@ -1036,6 +1055,12 @@ export interface ConciergeSessionOptions {
    * itself has no route back to the Discord path, so it only reports.
    */
   onOrphanedInjection?: (messageId: string) => void;
+  /**
+   * Fired once per UNSOLICITED turn — a `result` with no ask waiting on it, i.e. a cross-session
+   * peer message that woke this session (see {@link ConciergeSession.noteUnsolicitedResult}). The
+   * owner uses it to keep the pool's idle bookkeeping honest; the session itself only reports.
+   */
+  onPeerTurn?: () => void;
 }
 
 /**
@@ -1047,6 +1072,8 @@ export interface ConciergeSessionOptions {
 export class ConciergeSession {
   private readonly config: Config;
   private readonly log: Logger;
+  /** `concierge.peer` — cross-session (peer) traffic only; see {@link noteUnsolicitedResult}. */
+  private readonly peerLog: Logger;
   private readonly cwd: string;
   /** Test-only override: when set, used verbatim as the system prompt (skips file composition). */
   private readonly staticPrompt: string | undefined;
@@ -1116,6 +1143,10 @@ export class ConciergeSession {
   private readonly onCrashLoop?: (info: { count: number; code: number }) => void;
   /** Reports a mid-flow message no turn ever answered, so the owner can re-run it (see options). */
   private readonly onOrphanedInjection?: (messageId: string) => void;
+  /** Reports an unsolicited (peer-message) turn, so the owner can keep pool idle bookkeeping honest. */
+  private readonly onPeerTurn?: () => void;
+  /** Unsolicited turns this session has absorbed — diagnostics only (`beckett status`). */
+  private peerTurns = 0;
 
   // ── turn bookkeeping (issue #24) ─────────────────────────────────────────────────────────
   /** Caller-supplied metadata of the CURRENTLY EXECUTING turn (reply-claim correlation). */
@@ -1155,12 +1186,16 @@ export class ConciergeSession {
   constructor(opts: ConciergeSessionOptions) {
     this.config = opts.config;
     this.log = (opts.logger ?? rootLog).child("concierge.session");
+    // Peer (cross-session) traffic gets its own component so an operator can grep the status
+    // relay without wading through every turn this session ran.
+    this.peerLog = (opts.logger ?? rootLog).child("concierge.peer");
     this.cwd = opts.cwd ?? defaultRepoRoot();
     this.staticPrompt = opts.systemPrompt;
     this.model = opts.config.concierge.model;
     this.rotateAtTokens = opts.config.concierge.rotate_at_tokens ?? DEFAULT_ROTATE_AT_TOKENS;
     this.onCrashLoop = opts.onCrashLoop;
     this.onOrphanedInjection = opts.onOrphanedInjection;
+    this.onPeerTurn = opts.onPeerTurn;
     this.scope = opts.scope?.trim() || GLOBAL_SCOPE;
     this.gate = opts.gate ?? null;
     this.handoffWindow = opts.handoffWindow ?? (() => "");
@@ -1668,15 +1703,15 @@ export class ConciergeSession {
       this.model,
     ];
     // Cross-session address (Claude Code ≥2.1.224): lets a live worker (or another concierge
-    // scope) reach the chat seat via SendMessage for status questions (ctx-docs.md). Fixed name
-    // — every ConciergeSession pool scope answers to it, mirroring the worker driver's --name.
+    // scope) reach the chat seat via SendMessage for status questions (ctx-docs.md). PER-SCOPE —
+    // see {@link conciergeSessionName}; a shared fixed name collides across pooled sessions.
     // Gated on the SAME cached --help probe the worker driver uses (issue #54's KILL-vs-FAIL
     // distinction applies here too): on a claude binary older than 2.1.224 (e.g. a pinned
     // /usr/bin/claude wrapper — see deploy/config.toml.example), an unconditional --name/--settings
     // would exit immediately on the unknown flag and crash-loop the whole chat lane. Fail open —
     // same as the worker driver — never fail closed over a missing flag.
     if (supportsNameFlag(this.config.harness.claude.bin, this.log)) {
-      args.push("--name", CONCIERGE_SESSION_NAME, "--settings", this.conciergeSettingsPath());
+      args.push("--name", conciergeSessionName(this.scope), "--settings", this.conciergeSettingsPath());
     }
     // Reasoning effort for the chat seat (issue #25) — a config knob; empty = CLI default.
     const effort = this.config.concierge.effort?.trim();
@@ -2081,7 +2116,10 @@ export class ConciergeSession {
         this.onOrphanedInjection?.(messageId);
       }
     }
-    if (!p) return;
+    if (!p) {
+      this.noteUnsolicitedResult(output);
+      return;
+    }
     this.clearPendingTimers(p);
     if (this.liveTurnFilingShaped && filingTurnBudgetExceeded(Date.now() - this.turnStartedAt)) {
       this.log.warn("filing-shaped turn exceeded its shape budget", {
@@ -2131,6 +2169,48 @@ export class ConciergeSession {
         ? { decision: "send", message: `${LATE_TURN_FRAME}\n\n${output.message}` }
         : output,
     );
+  }
+
+  /**
+   * A `result` frame that NO ask() is waiting on — an UNSOLICITED turn (W2B).
+   *
+   * Since W2A the session is addressable (`--name`) and accepts cross-session inbound
+   * (`crossSessionInbound: "accept"`), so an idle child starts a turn of its OWN when a peer
+   * message lands — typically a live worker answering "how's it going?" (ctx-docs.md
+   * §Cross-session messaging). That turn ends in a `result` with no pending promise, which is
+   * the shape this method exists to make safe:
+   *
+   *  - Its delivery decision is NEVER acted on. `decision:"send"` here has no trustworthy channel
+   *    binding — `currentMeta` belongs to no one, and the last mention this session answered is
+   *    not who the peer wrote about — so posting it would be a message to an arbitrary channel.
+   *    Doctrine (W3B) tells the model to relay peer news with `beckett discord reply --channel <id>`
+   *    and then return `{decision:"pass"}`; this is the backstop for when it doesn't.
+   *  - Bookkeeping is untouched by construction: no pending turn was cleared, `turnQueue`/`pumping`
+   *    (and therefore {@link queueDepth}) never saw this turn, and the next real ask() runs
+   *    normally on the same warm transcript.
+   *  - The pool's idle timer is told the scope was busy ({@link onPeerTurn}), so a peer
+   *    conversation doesn't get its child recycled out from under it as "long idle".
+   */
+  private noteUnsolicitedResult(output: DiscordTurnOutput | null): void {
+    this.peerTurns += 1;
+    const suppressed = output?.decision === "send";
+    this.peerLog.info("unsolicited concierge turn (cross-session peer message) — not delivered", {
+      sessionId: this.sessionId,
+      scope: this.scope,
+      sessionName: conciergeSessionName(this.scope),
+      decision: output?.decision ?? "none",
+      // Length only: peer prose is never logged verbatim (it can quote a private channel).
+      messageChars: output?.message ? output.message.length : 0,
+      suppressedSend: suppressed,
+      peerTurns: this.peerTurns,
+    });
+    if (suppressed) {
+      this.peerLog.warn("peer turn asked to SEND with no channel binding — suppressed", {
+        sessionId: this.sessionId,
+        scope: this.scope,
+      });
+    }
+    this.onPeerTurn?.();
   }
 
   /**
@@ -2319,6 +2399,8 @@ export class ConciergeSession {
       queueDepth: this.queueDepth(),
       consecutiveCrashes: this.consecutiveCrashes,
       liveChild: this.hasLiveChild(),
+      sessionName: conciergeSessionName(this.scope),
+      peerTurns: this.peerTurns,
     };
   }
 
@@ -2872,6 +2954,10 @@ export class Concierge {
           // A mid-flow message whose turn never absorbed it (it raced the result) gets its own
           // turn rather than dying with the discarded orphan result.
           onOrphanedInjection: (messageId) => this.requeueOrphanedInjection(messageId),
+          // A cross-session peer turn (a worker answering a status ping) is real activity on this
+          // scope; without this the pool's idle sweep only ever sees ask() traffic and can recycle
+          // the child a peer conversation is still using.
+          onPeerTurn: () => this.pool.notePeerActivity(scope),
           // Crash-loop alarm (issue #24): a repeating child crash (bad auth/config) pings the ops
           // channel instead of surfacing only as per-message "something broke" replies.
           onCrashLoop: (info) => {
