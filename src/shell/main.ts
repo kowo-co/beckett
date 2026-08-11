@@ -637,7 +637,7 @@ async function boot(): Promise<BootedSystem> {
     },
     logger: logger.child("run"),
   });
-  // `beckett task deploy` pings `run.deploy` on the control bus; `beckett run steer` pings
+  // `beckett task deploy` pings `run.deploy` on the control bus; `beckett task steer` pings
   // `run.steer`. Registered post-construction because the supervisor needs the concierge's
   // progress sink, so it cannot exist when the concierge builds its own bus surface.
   concierge.registerBusCapability({

@@ -48,8 +48,10 @@ Useful flags — defaults are right almost always:
 that clears it. Act on that line yourself, then re-run `beckett finish` — re-running is safe, it
 reuses the same PR and skips whatever already landed.
 
-- **CI failed** → the work is wrong, not the machinery. Steer the run back to the worker; don't
-  merge around a red suite.
+- **CI failed** → the work is wrong, not the machinery. The run that produced this branch is
+  already finished, so there is nobody left to steer: fix it in the checkout and re-run `finish` if
+  it's small, otherwise deploy a run against the same `--repo` with the failing output in the
+  prompt. Never merge around a red suite.
 - **Merge conflicts / behind base** → couriering, and it's yours: rebase onto `origin/main`,
   reconcile both sides' intent, push, re-run. See
   `couriering-finished-work-the-dispatche.md`.

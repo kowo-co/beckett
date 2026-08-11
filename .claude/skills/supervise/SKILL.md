@@ -29,9 +29,9 @@ honestly what's going on, and using your levers when a different path is needed.
 |---|---|---|
 | do nothing | the automation is mid-ladder (nudge/retry already in progress) and the approach is sound | — |
 | ask | you don't actually know what it's doing yet | `beckett task ask <ref>`, then `SendMessage` to its session name |
-| steer | the worker is working on the wrong thing, or you know something it doesn't | `beckett task steer <ref> "<guidance>"` — delivered to the live worker as a nudge |
-| stop | the work is genuinely not wanted | `beckett task steer <ref> "stop — we're not doing this"`; it wraps up and commits what it has |
-| redeploy | the run is wedged past saving and a fresh start (or a different seat) will do better | a new `beckett task deploy` carrying what was learned, and say so |
+| steer | the run is still going and the worker is on the wrong thing, or you know something it doesn't | `beckett task steer <ref> "<guidance>"` — prints `delivered` (nudged the live worker) or `buffered` (waiting for its next stage) |
+| stop | the work is genuinely not wanted and the run is still going | `beckett task steer <ref> "stop — we're not doing this"`; it wraps up and commits what it has rather than being killed mid-write |
+| redeploy | the run is parked, failed, or wedged past saving — a fresh start (or a different seat) will do better | a new `beckett task deploy` carrying what was learned, against the same `--repo`, and say so |
 
 ## Rules
 
@@ -39,6 +39,9 @@ honestly what's going on, and using your levers when a different path is needed.
   retry; only step in when the *pattern* is wrong — same failure across retries, a worker looping
   on the same command, or work drifting off-scope.
 - **Prefer nothing > ask > steer > stop.** Never cheap-stop good work.
+- **Steering only reaches a run that is still going.** `beckett task steer` refuses a parked,
+  failed, done, or cancelled run and tells you so — that refusal is the signal to redeploy, not
+  something to work around. Never report "it's picking back up" off a command that errored.
 - Same problem across several runs (every worker hitting the same broken tool or login) → that's
   an infrastructure problem, not a per-run one: tell the human and stop the affected runs rather
   than burning retries.

@@ -7,7 +7,9 @@ Run finished, publish failed → the run is parked with its work committed local
 blocker — publish, merge, conflicts. **Merge conflicts ARE couriering**: main moved → rebase onto
 `origin/main`, reconcile both sides' intent (worker's summary, the run's checklist), re-run
 checks. Never build features or fix the work; a conflict forcing a real design decision, not a
-reconciliation, goes back to the worker as a steering note — never a question to the human.
+reconciliation, goes back to a worker — but this run is parked, so its worker is gone and steering
+is refused. Deploy a short run against the same `--repo`, naming the branch and the decision the
+conflict forces. Never a question to the human.
 
 On `<slug>` (repo `~/Projects/<slug>`, remote `{{github_owner}}/<slug>`):
 

@@ -2558,7 +2558,7 @@ function readInvocationOrigin(raw: unknown): InvocationOrigin | null {
   return Object.keys(origin).length > 0 ? origin : null;
 }
 
-/** A framed automated ticket-update turn, addressed to an origin channel via CLI from SYSTEM_SCOPE. */
+/** A framed automated run-update turn, addressed to an origin channel via CLI from SYSTEM_SCOPE. */
 interface TicketUpdate {
   channel: string;
   text: string;
@@ -5694,7 +5694,12 @@ export class Concierge {
     const pings = found ? effectivePings(found.task, found.branch) : [];
     const pingFlags = pings.map((id) => ` --ping ${id}`).join("");
     const text =
-      `SYSTEM (automated ticket update — NOT a message from a user; do not reply to this turn as if a person typed it):\n` +
+      // v7 doctrine quotes this frame verbatim (`concierge.md`, `playbooks/proactive-updates.md`):
+      // the model's trigger for "reply via `beckett discord reply`" is anchored to these exact
+      // words, so the wording here and there move together. Runs report through this same path
+      // (a Run is adapted into the Ticket shape the stage code reads), so "run update" is what an
+      // update actually is now.
+      `SYSTEM (automated run update — NOT a message from a user; do not reply to this turn as if a person typed it):\n` +
       `${ticket.branchRef ? `Branch #${ticket.branchRef}` : `Ticket ${ticket.identifier}`} "${ticket.title}" has an update:\n\n${detail}\n\n` +
       `If this is worth telling the person who asked for it, send them a short note IN YOUR VOICE by ` +
       `running this from your Bash tool:\n` +
@@ -7620,7 +7625,7 @@ export async function commitSubjectsSince(
 
 /**
  * The SYSTEM turn that asks the Concierge to post a fun, in-voice "what's new" to `channelId`. It's
- * framed exactly like an automated ticket update (not a user message) and routes the post through
+ * framed exactly like an automated run update (not a user message) and routes the post through
  * `beckett discord reply` — the same way every non-mention turn reaches a channel.
  */
 export function buildReleaseNote(channelId: string, subjects: string[]): string {
@@ -8187,7 +8192,7 @@ function stripCommentMarker(body: string): string {
 function combineUpdateTurns(updates: string[]): string {
   const items = updates.map((u, i) => `--- update ${i + 1} of ${updates.length} ---\n${u}`).join("\n\n");
   return (
-    `SYSTEM (automated ticket updates — ${updates.length} in this batch; NOT from a user):\n` +
+    `SYSTEM (automated run updates — ${updates.length} in this batch; NOT from a user):\n` +
     `Handle ALL of the following in this one turn. Group updates for the same channel into a ` +
     `single message; skip the routine ones; reply via \`beckett discord reply\` per the ` +
     `instructions inside each update.\n\n${items}`

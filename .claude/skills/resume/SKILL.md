@@ -22,10 +22,12 @@ Then reason about what you found:
 - **Live (implementing / reviewing)** — it's actively staffed, and a restart resumes interrupted
   sessions automatically. Ask the worker where it's at and relay that; steer it with
   `beckett task steer <ref> "…"` if the person has new direction.
-- **Parked with WIP** — automation stopped (retries exhausted, a publish failure, a reviewer
-  impasse). The reason is in the run's state and journal; read it. If it just needs another go,
-  steer it and it continues from the committed work. If it stalled on a real blocker, resolve that
-  first (or tell the human).
+- **Parked with WIP** — automation stopped for good (retries exhausted, a publish failure, a
+  reviewer impasse); nothing re-staffs a parked run, and steering it is refused. The reason is in
+  the run's state and journal; read it. The work itself is safe — committed on the run's branch in
+  the same repo. If it just needs another go, **deploy a new run** that says what went wrong and
+  which branch it continues from. If it stalled on a real blocker, resolve that first (or tell the
+  human).
 - **Done** — point them at the artifact link. If they want changes, that's NEW work: deploy
   against the same `--repo` slug so it builds in the same repo.
 - **Nothing relevant** — genuinely new work; deploy it normally ([[intake]]).

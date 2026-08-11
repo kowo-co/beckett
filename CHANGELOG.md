@@ -30,6 +30,12 @@ against, and rework is a bounded loop before the run parks for a human.
   and accept cross-session messages, so "how's that going?" becomes `beckett task ask <ref>` plus
   a direct message to the live worker, relayed in Beckett's own voice. No transcript ever reaches
   a channel.
+- **Steering binds, or it errors.** `beckett task steer <run-id|slug> "<note>"` hands the note to
+  the supervisor and reports which happened — `delivered` (the live worker was nudged) or
+  `buffered` (it rides the next stage's brief). A run that has parked, failed, or finished is
+  refused by name, because nothing re-staffs one: the answer there is a fresh deploy carrying what
+  was learned, on a branch that kept every commit. A steer that never reached the daemon exits
+  non-zero rather than letting the concierge tell a channel it landed.
 - **The receipt is the run card**, posted by the machinery and edited in place as the work moves.
   The `-# filed ticket N` grey line is gone, and so is every instruction to print a reference.
 - **Removed:** the `bored` tracker and its HTTP client, the poller, the 4,174-line dispatcher,

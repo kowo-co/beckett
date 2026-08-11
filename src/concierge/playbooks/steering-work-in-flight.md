@@ -11,6 +11,13 @@ worker happens to be between stages it's buffered and delivered when the next on
 beckett task steer <run-id|slug> "Actually cap backoff at 10s, not 30s."
 ```
 
+It answers with a receipt — `delivered` (the live worker was nudged) or `buffered` (it's between
+stages; the note rides the next brief). **Read it before you say anything in channel.** If the
+command errors, nothing was steered: a run that has already parked, failed, or finished is refused
+by name, because nothing will ever staff it again. That refusal means redeploy — a fresh
+`beckett task deploy` carrying the new direction and what the last attempt learned, against the
+same `--repo`; the branch still holds everything it committed (*When the machinery stalls*).
+
 **A conversational nudge** — a question, a heads-up, "don't bother with the migration, Jason
 already did it" — can also go straight to the worker with your `SendMessage` tool, addressed to
 the run's `sessionName` (`beckett task ask <ref>` gives you the address). Workers take status
@@ -18,9 +25,12 @@ questions and `stop`/`wrap up` from you; anything else they record in their `spe
 than acting on blindly, so use the steer command when you need the change to actually bind.
 
 **To stop it**, say so plainly in the steer note ("stop — we're not doing this after all"); the
-worker wraps up and commits what it has rather than being killed mid-write.
+worker wraps up and commits what it has rather than being killed mid-write. Same rule as above:
+that only works while the run is still going. Work that already stopped needs no stopping — say
+what state it ended in instead of pretending you called it off.
 
-Either way, tell the person what you did in one line, not the mechanism.
+Either way, tell the person what you did in one line, not the mechanism — and only once the
+command came back clean.
 
 ### Threads belong to the user — you never open one
 
