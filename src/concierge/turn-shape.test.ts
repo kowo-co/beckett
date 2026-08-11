@@ -1,17 +1,17 @@
 /**
- * Turn-shape observability (log-only, no behavior change): a filing/staffing-shaped tool_use
- * block sets `liveTurnFilingShaped`, and `onResult` logs — never aborts — when the turn's
- * duration exceeds `FILING_TURN_BUDGET_MS`. A cheap, independent, complementary lever to the
+ * Turn-shape observability (log-only, no behavior change): a deploy-shaped tool_use
+ * block sets `liveTurnDeployShaped`, and `onResult` logs — never aborts — when the turn's
+ * duration exceeds `DEPLOY_TURN_BUDGET_MS`. A cheap, independent, complementary lever to the
  * mid-flow injection wiring (turn-interrupt.test.ts): that fix steers a long tool-heavy turn
  * that's already running; this one is just a signal for noticing HOW long those turns actually
- * run, before reaching for anything heavier (see index.ts's `FILING_TURN_BUDGET_MS` docstring).
+ * run, before reaching for anything heavier (see index.ts's `DEPLOY_TURN_BUDGET_MS` docstring).
  */
 
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ConciergeSession, filingTurnBudgetExceeded, isFilingShapedToolUse } from "./index.ts";
+import { ConciergeSession, deployTurnBudgetExceeded, isDeployShapedToolUse } from "./index.ts";
 import type { Config } from "../types.ts";
 
 const config = {
@@ -41,23 +41,28 @@ const quietLog = (() => {
 
 // ── pure helpers ────────────────────────────────────────────────────────────────────────
 
-test("isFilingShapedToolUse matches the filing/staffing marker list, not arbitrary commands", () => {
-  expect(isFilingShapedToolUse('beckett task deploy --prompt "add rate limiting" --channel 1')).toBe(true);
-  expect(isFilingShapedToolUse("beckett task create --title 'ship it'")).toBe(true);
-  expect(isFilingShapedToolUse("beckett task start '#42.1' --title x")).toBe(true);
-  expect(isFilingShapedToolUse("beckett ticket create --title y --project beckett")).toBe(true);
-  expect(isFilingShapedToolUse("beckett ticket state OPS-1 in_progress")).toBe(true);
-  expect(isFilingShapedToolUse("beckett plan --file wave.json")).toBe(true);
-  expect(isFilingShapedToolUse("echo hi")).toBe(false);
-  expect(isFilingShapedToolUse("git status")).toBe(false);
-  expect(isFilingShapedToolUse("bun test src/concierge/")).toBe(false);
+test("isDeployShapedToolUse matches the filing/staffing marker list, not arbitrary commands", () => {
+  expect(isDeployShapedToolUse('beckett task deploy --prompt "add rate limiting" --channel 1')).toBe(true);
+  expect(isDeployShapedToolUse("beckett task create --title 'ship it'")).toBe(true);
+  expect(isDeployShapedToolUse("beckett task start '#42.1' --title x")).toBe(true);
+  expect(isDeployShapedToolUse("beckett ticket create --title y --project beckett")).toBe(true);
+  expect(isDeployShapedToolUse("beckett ticket state OPS-1 in_progress")).toBe(true);
+  expect(isDeployShapedToolUse("beckett plan --file wave.json")).toBe(true);
+  expect(isDeployShapedToolUse("echo hi")).toBe(false);
+  expect(isDeployShapedToolUse("git status")).toBe(false);
+  expect(isDeployShapedToolUse("bun test src/concierge/")).toBe(false);
 });
 
-test("filingTurnBudgetExceeded is a strict boundary check on duration vs budget", () => {
-  expect(filingTurnBudgetExceeded(19_999, 20_000)).toBe(false);
-  expect(filingTurnBudgetExceeded(20_000, 20_000)).toBe(false); // exactly at budget: not exceeded
-  expect(filingTurnBudgetExceeded(20_001, 20_000)).toBe(true);
-  expect(filingTurnBudgetExceeded(5_000)).toBe(false); // default budget (20s) — well under
+test("deployTurnBudgetExceeded is a strict boundary check on duration vs budget", () => {
+  expect(deployTurnBudgetExceeded(19_999, 20_000)).toBe(false);
+  expect(deployTurnBudgetExceeded(20_000, 20_000)).toBe(false); // exactly at budget: not exceeded
+  expect(deployTurnBudgetExceeded(20_001, 20_000)).toBe(true);
+  expect(deployTurnBudgetExceeded(5_000, 240_000)).toBe(false); // well under the default budget
+});
+
+test("deployTurnBudgetExceeded at the real default (240s): a 3min turn does not warn, a 5min turn does", () => {
+  expect(deployTurnBudgetExceeded(3 * 60_000)).toBe(false); // p95 of a good deploy turn
+  expect(deployTurnBudgetExceeded(5 * 60_000)).toBe(true); // actually runaway
 });
 
 // ── onAssistant wiring ─────────────────────────────────────────────────────────────────────
@@ -70,7 +75,7 @@ interface SessionGuts {
     resolve: (output: unknown) => void;
     reject: (error: Error) => void;
   } | null;
-  liveTurnFilingShaped: boolean;
+  liveTurnDeployShaped: boolean;
   onAssistant(obj: Record<string, unknown>): void;
 }
 
@@ -96,26 +101,26 @@ function assistantToolUse(command: string): Record<string, unknown> {
   };
 }
 
-test("a filing-shaped tool_use block sets liveTurnFilingShaped", () => {
+test("a deploy-shaped tool_use block sets liveTurnDeployShaped", () => {
   tempBeckettDir();
   const s = makeSession();
   s.pending = pendingStub();
-  expect(s.liveTurnFilingShaped).toBe(false);
+  expect(s.liveTurnDeployShaped).toBe(false);
 
   s.onAssistant(assistantToolUse("beckett task create --title 'ship it'"));
 
-  expect(s.liveTurnFilingShaped).toBe(true);
+  expect(s.liveTurnDeployShaped).toBe(true);
   clearTimeout(s.pending!.timer);
 });
 
-test("a non-filing tool_use block leaves liveTurnFilingShaped false", () => {
+test("a non-deploy tool_use block leaves liveTurnDeployShaped false", () => {
   tempBeckettDir();
   const s = makeSession();
   s.pending = pendingStub();
 
   s.onAssistant(assistantToolUse("ls -la"));
 
-  expect(s.liveTurnFilingShaped).toBe(false);
+  expect(s.liveTurnDeployShaped).toBe(false);
   clearTimeout(s.pending!.timer);
 });
 
@@ -126,6 +131,6 @@ test("onAssistant with no live turn is a no-op (pending stays null)", () => {
 
   s.onAssistant(assistantToolUse("beckett task create --title 'ship it'"));
 
-  expect(s.liveTurnFilingShaped).toBe(false);
+  expect(s.liveTurnDeployShaped).toBe(false);
   expect(s.pending).toBeNull();
 });

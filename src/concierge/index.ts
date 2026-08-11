@@ -501,28 +501,32 @@ export function orphanedInjectionIds(
 }
 
 /**
- * Soft, log-only budget for a turn shaped like a filing/staffing arc (see
- * {@link isFilingShapedToolUse}). This is observability, NOT a gate: the owner's complaint is
+ * Soft, log-only budget for a turn shaped like a deploy arc (see
+ * {@link isDeployShapedToolUse}). This is observability, NOT a gate: the owner's complaint is
  * that a tool-heavy turn runs long and silent, and this line is how a future pass would learn
  * whether that's actually happening (and how badly) before reaching for something heavier than
  * mid-turn injection. No abort, no behavior change — a text heuristic is too blunt to kill a
  * legitimately long turn on.
+ *
+ * Sized off real v7 deploy turns, not v6 ticket-filing: p95 of a good deploy turn (writing a
+ * real spec.md, staffing workers, watching them land) runs ~3min, so 20s warned on nearly every
+ * one of them (issue #230). 4min means the warn fires on turns that are actually runaway.
  */
-const FILING_TURN_BUDGET_MS = 20_000;
+const DEPLOY_TURN_BUDGET_MS = 240_000;
 
 /**
  * Marker list for a Bash tool call that looks like it's filing/staffing work rather than, say,
  * reading a file or running a build. Deliberately a flat substring list, not a parser: this feeds
- * a LOG line (see {@link FILING_TURN_BUDGET_MS}), not a decision, so false positives/negatives on
+ * a LOG line (see {@link DEPLOY_TURN_BUDGET_MS}), not a decision, so false positives/negatives on
  * an odd quoting style cost nothing.
  */
-export function isFilingShapedToolUse(command: string): boolean {
+export function isDeployShapedToolUse(command: string): boolean {
   const markers = ["task deploy", "task create", "task start", "ticket create", "ticket state", "beckett plan"];
   return markers.some((marker) => command.includes(marker));
 }
 
 /** Pure so the boundary is testable without a live turn. */
-export function filingTurnBudgetExceeded(durationMs: number, budgetMs: number = FILING_TURN_BUDGET_MS): boolean {
+export function deployTurnBudgetExceeded(durationMs: number, budgetMs: number = DEPLOY_TURN_BUDGET_MS): boolean {
   return durationMs > budgetMs;
 }
 
@@ -1167,9 +1171,9 @@ export class ConciergeSession {
    * BETWEEN turns, which only the next `result` can settle (see {@link orphanedInjectionIds}).
    */
   private injectedRecords: InjectedMessageRecord[] = [];
-  /** True once the LIVE turn has invoked a filing/staffing-shaped tool call (see onAssistant). */
-  private liveTurnFilingShaped = false;
-  /** `Date.now()` when the LIVE turn started — the clock {@link FILING_TURN_BUDGET_MS} measures against. */
+  /** True once the LIVE turn has invoked a deploy-shaped tool call (see onAssistant). */
+  private liveTurnDeployShaped = false;
+  /** `Date.now()` when the LIVE turn started — the clock {@link DEPLOY_TURN_BUDGET_MS} measures against. */
   private turnStartedAt = 0;
   /**
    * The last tool the LIVE turn was seen invoking, already shortened for display
@@ -1551,7 +1555,7 @@ export class ConciergeSession {
     this.currentMeta = meta ?? null;
     this.liveTurnToolUsed = false;
     this.liveTurnInjections = 0;
-    this.liveTurnFilingShaped = false;
+    this.liveTurnDeployShaped = false;
     this.liveTurnLastActivity = undefined;
     this.turnStartedAt = Date.now();
     // A timeout, write failure, or malformed result must leave the shared-context cursor where
@@ -1998,7 +2002,7 @@ export class ConciergeSession {
         this.liveTurnToolUsed = true;
         const input = block.input as Record<string, unknown> | undefined;
         const command = typeof input?.command === "string" ? input.command : undefined;
-        if (command && isFilingShapedToolUse(command)) this.liveTurnFilingShaped = true;
+        if (command && isDeployShapedToolUse(command)) this.liveTurnDeployShaped = true;
         this.liveTurnLastActivity = describeToolUse(block.name, input) ?? this.liveTurnLastActivity;
       }
     }
@@ -2173,11 +2177,11 @@ export class ConciergeSession {
       return;
     }
     this.clearPendingTimers(p);
-    if (this.liveTurnFilingShaped && filingTurnBudgetExceeded(Date.now() - this.turnStartedAt)) {
-      this.log.warn("filing-shaped turn exceeded its shape budget", {
+    if (this.liveTurnDeployShaped && deployTurnBudgetExceeded(Date.now() - this.turnStartedAt)) {
+      this.log.warn("deploy-shaped turn exceeded its shape budget", {
         sessionId: this.sessionId,
         durationMs: Date.now() - this.turnStartedAt,
-        budgetMs: FILING_TURN_BUDGET_MS,
+        budgetMs: DEPLOY_TURN_BUDGET_MS,
       });
     }
     this.pending = null;
