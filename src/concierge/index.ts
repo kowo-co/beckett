@@ -33,7 +33,7 @@ import { dirname, join } from "node:path";
 // stamp the restart release note's `-#` subheader so it tracks the shipped version, never a literal.
 import pkg from "../../package.json" with { type: "json" };
 import type { Config, IncomingMessage, IncomingReaction, Logger, ProactivityMode, ThreadCreated } from "../types.ts";
-import type { Run, RunStateChange } from "../run/types.ts";
+import type { Run, RunState, RunStateChange } from "../run/types.ts";
 import type { PrPollEvent, PrRef } from "../github/types.ts";
 import type { WatchRequest } from "../github/poll.ts";
 import type { GitHubActivityEvent } from "../github/activity.ts";
@@ -117,6 +117,14 @@ import {
   type OwedMention,
   type OwedMentionStore,
 } from "./owed-mentions.ts";
+import {
+  createOwedRunNotificationStore,
+  runNotificationAlreadyAnnounced,
+  OWED_RUN_NOTIFICATION_MAX_REPLAYS,
+  type OwedRunNotification,
+  type OwedRunNotificationState,
+  type OwedRunNotificationStore,
+} from "./owed-run-notifications.ts";
 import { STOP_WORDS } from "../moss-local/index.ts";
 import { TurnGate } from "./turn-gate.ts";
 import { SessionPool, GLOBAL_SCOPE } from "./session-pool.ts";
@@ -353,6 +361,22 @@ function owedMentionsFile(config: Config, logger: Logger): string | undefined {
     return join(buildPaths(config).beckettDir, "concierge-owed-mentions.json");
   } catch (err) {
     logger.warn("owed-mention ledger path unavailable; replay across restarts disabled", {
+      error: String(err),
+    });
+    return undefined;
+  }
+}
+
+/**
+ * Same directory family as {@link owedMentionsFile}, same reason for the fallback (#233): a
+ * partial test config leaves the owed-run-notification ledger memory-only rather than making a
+ * Concierge unconstructible (see `owed-run-notifications.ts`).
+ */
+function owedRunNotificationsFile(config: Config, logger: Logger): string | undefined {
+  try {
+    return join(buildPaths(config).beckettDir, "concierge-owed-run-notifications.json");
+  } catch (err) {
+    logger.warn("owed-run-notification ledger path unavailable; replay across restarts disabled", {
       error: String(err),
     });
     return undefined;
@@ -2758,6 +2782,16 @@ interface RunUpdate {
   ident: string;
 }
 
+/**
+ * The three terminal states that owe their requester a confirmed word (issue #233): `done` is
+ * the payoff of the whole pipeline, `failed`/`parked` are the two states where work stopped and
+ * nobody would otherwise know. `cancelled` and the mid-flight restart pings are NOT owed — they
+ * are machine churn a live card already shows, or a deliberate stop, not a promise made.
+ */
+function isOwedRunNotificationState(state: RunState): state is OwedRunNotificationState {
+  return state === "done" || state === "failed" || state === "parked";
+}
+
 export class Concierge {
   private readonly config: Config;
   private readonly log: Logger;
@@ -2898,6 +2932,23 @@ export class Concierge {
    */
   private readonly owed: OwedMentionStore;
   /**
+   * The durable owed-run-notification ledger (issue #233): every run reaching `done`/`failed`/
+   * `parked` is written down here BEFORE the queued system turn that might tell its requester,
+   * and struck off only once a post is CONFIRMED (`recordBeckettPost`) — never merely attempted.
+   * See `src/concierge/owed-run-notifications.ts` for the full rationale and how its bias
+   * deliberately differs from the mention ledger's.
+   */
+  private readonly owedRuns: OwedRunNotificationStore;
+  /**
+   * Channels with a run-completion delivery attempt IN FLIGHT right now, mapped to the runIds
+   * that attempt is meant to settle. Populated right before the queued system turn that may post
+   * (`notify`'s per-channel dispatch), drained by {@link recordBeckettPost} the moment a real post
+   * is confirmed in that channel — which is exactly the signal `owedRuns.settle` needs. A turn
+   * that never posts leaves its runIds here until the attempt's `finally` clears them, and the
+   * ledger entries stay durably owed for the next boot/re-drive to pick up.
+   */
+  private readonly pendingOwedRunChannels = new Map<string, Set<string>>();
+  /**
    * Mention ids being replayed RIGHT NOW, so {@link buildTurn} can tell the session it is answering
    * late (and the model can say so in its own voice, rather than the daemon writing that line for
    * it). Held only for the duration of the replayed `onMessage`.
@@ -2933,6 +2984,12 @@ export class Concierge {
    * path that wants to wait for it — can await something. Resolved when no replay is running.
    */
   private replayDone: Promise<void> = Promise.resolve();
+  /**
+   * The boot replay drain for owed run notifications ({@link replayOwedRunNotifications}), same
+   * shape and same reason as {@link replayDone}: tests await it to know the boot-scan pass over
+   * `owedRuns` has finished.
+   */
+  private replayRunNotificationsDone: Promise<void> = Promise.resolve();
   /** Last static denial by channel+user, so denied DMs/mentions cannot spam Discord. */
   private readonly accessDenyAt = new Map<string, number>();
   /**
@@ -3092,6 +3149,11 @@ export class Concierge {
     this.owed = createOwedMentionStore({
       file: owedMentionsFile(this.config, this.log),
       logger: this.log.child("owed"),
+      now: this.nowMs,
+    });
+    this.owedRuns = createOwedRunNotificationStore({
+      file: owedRunNotificationsFile(this.config, this.log),
+      logger: this.log.child("owed-runs"),
       now: this.nowMs,
     });
     if (this.config.shared_context?.enabled) {
@@ -3765,6 +3827,9 @@ export class Concierge {
     // Taken here rather than at drain time so a mention arriving during boot is answered by its own
     // turn, exactly as always, and can never also be picked up as something to replay.
     const owedAtBoot = this.owed.list();
+    // Same snapshot discipline for run-completion pings (#233): a run finishing DURING boot goes
+    // through `notify`'s own fresh claim, never through the replay of a debt taken before boot.
+    const owedRunsAtBoot = this.owedRuns.list();
     // Fail fast on a bad launch (auth/bin/config) by bringing up the dedicated system session
     // eagerly; real channel sessions come up lazily on their first human turn.
     this.migrateLegacySessionState(SYSTEM_SCOPE);
@@ -3798,6 +3863,9 @@ export class Concierge {
     // the control socket, so it must not run before that socket is served — and it must not hold
     // the daemon's boot for as long as it takes to answer.
     this.replayDone = this.replayOwedMentions(owedAtBoot);
+    // Same for run-completion pings this daemon never confirmed delivered (#233) — independent
+    // drain, own budget, own dedupe bias (see owed-run-notifications.ts's header).
+    this.replayRunNotificationsDone = this.replayOwedRunNotifications(owedRunsAtBoot);
     // Announce the boot (with the live commit) once the gateway is up. Best-effort + non-blocking:
     // a failed post must never hold up — or crash — the daemon coming online.
     void this.announceStartup();
@@ -3991,6 +4059,96 @@ export class Concierge {
     const target = around.findIndex((message) => message.isTarget);
     if (target < 0) return true; // the message is gone (deleted) — nothing to answer
     return around.slice(target + 1).some((message) => message.isBeckett);
+  }
+
+  /**
+   * Answer the run-completion pings this daemon inherited unconfirmed (issue #233) — the same
+   * shape as {@link replayOwedMentions}, applied to the outbound direction: a run reached `done`/
+   * `failed`/`parked` and nothing durable ever confirmed the requester was told.
+   *
+   * Sequential and best-effort per entry, same reasoning as the mention drain: one bad channel
+   * must not strand the rest of the queue.
+   */
+  private async replayOwedRunNotifications(owed: readonly OwedRunNotification[]): Promise<void> {
+    if (owed.length === 0) return;
+    this.log.info("replaying run-completion pings this daemon never confirmed delivered", { count: owed.length });
+    for (const entry of owed) {
+      if (this.stopping) return;
+      try {
+        if (this.runAlreadyAnnounced(entry)) {
+          this.log.info("owed run notification was already announced before the restart — settling, not replaying", {
+            runId: entry.runId,
+            channelId: entry.channelId,
+          });
+          this.owedRuns.settle(entry.runId);
+          continue;
+        }
+        const attempt = this.owedRuns.noteReplay(entry.runId);
+        if (attempt > OWED_RUN_NOTIFICATION_MAX_REPLAYS) {
+          this.log.warn("owed run notification exhausted its replays — giving up quietly", {
+            runId: entry.runId,
+            channelId: entry.channelId,
+            replays: attempt,
+          });
+          this.owedRuns.settle(entry.runId);
+          continue;
+        }
+        this.log.info("replaying an owed run notification", { runId: entry.runId, channelId: entry.channelId, attempt });
+        await this.dispatchRunNotificationDelivery(entry);
+      } catch (err) {
+        // The entry stays owed (settle only happens on a confirmed post), so the next boot picks
+        // it up again — within its replay budget.
+        this.log.warn("owed run notification replay failed", {
+          runId: entry.runId,
+          channelId: entry.channelId,
+          error: String(err),
+        });
+      }
+    }
+  }
+
+  /**
+   * Circumstantial boot-dedupe for a `delivering`-phase entry (see the module header on
+   * `owed-run-notifications.ts` for why the bias here is the OPPOSITE of {@link alreadyAnswered}):
+   * with no durable shared record to check, or nothing in it, this REPLAYS rather than stays
+   * silent — a duplicate mention costs far less than a run that finished without a word.
+   */
+  private runAlreadyAnnounced(entry: OwedRunNotification): boolean {
+    if (entry.phase !== "delivering") return false; // never reached a delivery attempt — nothing to check
+    if (!this.channelStore) return false;
+    return runNotificationAlreadyAnnounced(this.channelStore.recent(entry.channelId), entry.createdAt);
+  }
+
+  /**
+   * Run ONE delivery attempt for an owed run notification: stamp `delivering` (already stamped
+   * for a genuine replay, harmless no-op then), register the channel/runId in
+   * {@link pendingOwedRunChannels} so a confirmed post during the attempt settles it via
+   * {@link recordBeckettPost}, then queue the same SYSTEM_SCOPE update lane as a live ping. The
+   * framed text intentionally carries only what the durable record itself knows — it is honest
+   * about being a recovered notice rather than pretending to reconstruct the original one.
+   */
+  private dispatchRunNotificationDelivery(entry: OwedRunNotification): Promise<void> {
+    this.owedRuns.markDelivering(entry.runId);
+    const pendingForChannel = this.pendingOwedRunChannels.get(entry.channelId) ?? new Set<string>();
+    pendingForChannel.add(entry.runId);
+    this.pendingOwedRunChannels.set(entry.channelId, pendingForChannel);
+    const pingFlags = entry.requesterIds.map((id) => ` --ping ${id}`).join("");
+    const label =
+      entry.state === "done" ? "reached done" : entry.state === "failed" ? "failed" : "was parked for a human";
+    const framed =
+      `SYSTEM (recovered run-completion notice — I never confirmed this was told to anyone before a ` +
+      `restart; NOT a message from a user):\n` +
+      `Run ${entry.runId} ${label}, and I have no durable record of telling anyone.\n\n` +
+      `If this hasn't already been said in this channel, send a short note IN YOUR VOICE by running:\n` +
+      `  beckett discord reply --channel ${entry.channelId}${pingFlags} "<your message>"\n` +
+      `If it's genuinely already been said (check the channel), do nothing.`;
+    return this.askUpdate(framed, `run-replay:${entry.runId}`)
+      .catch(() => undefined)
+      .finally(() => {
+        const set = this.pendingOwedRunChannels.get(entry.channelId);
+        set?.delete(entry.runId);
+        if (set && set.size === 0) this.pendingOwedRunChannels.delete(entry.channelId);
+      });
   }
 
   /** Wire the on-demand Git/GitHub branch card provider after shell construction. */
@@ -5458,6 +5616,17 @@ export class Concierge {
       if (!update) continue; // not worth surfacing, or no channel to route back to
       this.markMilestoneNotified(key);
       framed.push(update);
+      // The durable half of #233: a terminal state that resolved to a real, routable update is a
+      // debt from here on. Written BEFORE the queued system turn below ever runs — claim() is the
+      // "record written before any delivery attempt" step the boot scan and settle() rely on.
+      if (isOwedRunNotificationState(event.to)) {
+        this.owedRuns.claim({
+          runId: event.run.id,
+          state: event.to,
+          channelId: update.channel,
+          requesterIds: event.run.requesterId ? [event.run.requesterId] : [],
+        });
+      }
     }
     if (framed.length === 0) return;
     const byChannel = new Map<string, { texts: string[]; idents: string[] }>();
@@ -5467,9 +5636,29 @@ export class Concierge {
       bucket.idents.push(update.ident);
       byChannel.set(update.channel, bucket);
     }
-    for (const [, bucket] of byChannel) {
+    for (const [channel, bucket] of byChannel) {
       const combined = bucket.texts.length === 1 ? bucket.texts[0]! : combineUpdateTurns(bucket.texts);
-      void this.askUpdate(combined, bucket.idents.join(",")).catch(() => undefined);
+      // idents this batch owes a CONFIRMED post for (see claim() above; non-owed idents — the
+      // mid-flight/cancelled pings — make owedRuns.has() false and are simply not tracked here).
+      const owedIdents = bucket.idents.filter((id) => this.owedRuns.has(id));
+      for (const id of owedIdents) this.owedRuns.markDelivering(id);
+      if (owedIdents.length > 0) {
+        const pending = this.pendingOwedRunChannels.get(channel) ?? new Set<string>();
+        for (const id of owedIdents) pending.add(id);
+        this.pendingOwedRunChannels.set(channel, pending);
+      }
+      void this.askUpdate(combined, bucket.idents.join(","))
+        .catch(() => undefined)
+        .finally(() => {
+          // Whatever happened, this attempt is over: an owed id NOT settled by a confirmed post
+          // (see recordBeckettPost) by now stays queued for the next boot/re-drive, exactly like a
+          // mention whose turn died before answering.
+          if (owedIdents.length === 0) return;
+          const pending = this.pendingOwedRunChannels.get(channel);
+          if (!pending) return;
+          for (const id of owedIdents) pending.delete(id);
+          if (pending.size === 0) this.pendingOwedRunChannels.delete(channel);
+        });
     }
   }
 
@@ -6684,6 +6873,14 @@ export class Concierge {
     // continuation check (which still verifies who it addresses) instead of another classifier
     // call. Deliberately BEFORE the store guard so legacy flag-off configs still hold conversations.
     this.ambient?.noteBeckettPost(channelId);
+    // The durable half of #233: THIS is the confirmed-delivery signal — a real post just landed
+    // in `channelId`. Settle every owed run notification whose delivery attempt is in flight
+    // here (see `notify`'s per-channel dispatch), independent of whether shared context is on.
+    const pendingRuns = this.pendingOwedRunChannels.get(channelId);
+    if (pendingRuns && pendingRuns.size > 0) {
+      for (const runId of pendingRuns) this.owedRuns.settle(runId);
+      pendingRuns.clear();
+    }
     if (!this.channelStore) return;
     this.channelStore.append(channelId, {
       messageId: messageId ?? `beckett-${this.nowMs().toString(36)}`,
