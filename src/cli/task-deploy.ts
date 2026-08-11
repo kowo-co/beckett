@@ -18,10 +18,17 @@
  * returns it — see `runId()`/`buildRun()` below. If W1A's real `RunStore.create()` instead wants
  * a partial input and mints its own id, the integrator only has to adjust the one `store.create`
  * call site in {@link deployRun}, not this file's argv/validation/output contract.
+ *
+ * OPEN INTEGRATION QUESTION (same-day same-slug redeploy): `runId()` is `run-YYYYMMDD-<slug>`, so
+ * retrying the same prompt/title the same day collides on id and `store.create()` throws (surfaced
+ * as a clean `error: …` via the top-level `fail()` — no data loss, and `--title` is a workaround).
+ * Whether a same-day collision should suffix (`-2`, `-3`, …), reject as it does today, or something
+ * else is a dedup/UX policy call that belongs with W1A/the supervisor lanes at integration, not
+ * baked in here unilaterally against the placeholder store.
  */
 import { readFileSync } from "node:fs";
 import type { Casting } from "../tracker/types.ts";
-import { parseCastJson, validateCasting } from "../tracker/cast.ts";
+import { validateCasting } from "../tracker/cast.ts";
 import type { Run, RunStage } from "../run/types.ts";
 import { fail, out, parse } from "./io.ts";
 
@@ -93,19 +100,35 @@ function defaultTitle(prompt: string): string {
 
 /** Cast validation reuses the existing zod-backed `Casting` path (`tracker/cast.ts`) and layers
  * on ONE more rule specific to runs: a run only ever casts `implement`/`review`, so an
- * otherwise-valid ticket-style cast naming e.g. `design` is refused, not silently dropped. */
+ * otherwise-valid ticket-style cast naming e.g. `design` is refused, not silently dropped.
+ *
+ * Unlike `parseCastJson` (the ticket-hydration reader, deliberately tolerant so a corrupted
+ * ticket body never crashes a poller), `--cast` is a fresh, human-typed invocation: bad JSON, a
+ * typo'd harness, or an invalid effort must be REJECTED, not silently degraded to `{}` and
+ * deployed on defaults. So this parses the raw string itself and runs `validateCasting` directly
+ * on the parsed value — it already returns per-path zod shape errors — instead of routing through
+ * the tolerant reader first. */
 function resolveCast(raw: string | boolean | undefined): Casting | null {
   if (raw === undefined) return null;
-  const casting = parseCastJson(String(raw));
-  const errors = [...validateCasting(casting)];
-  for (const stage of Object.keys(casting)) {
-    if (!RUN_STAGES.has(stage as RunStage)) {
-      errors.push(`${stage}: unknown stage — a run only casts implement|review`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(String(raw));
+  } catch (err) {
+    usage(`--cast is not valid JSON: ${(err as Error).message}`);
+  }
+  const errors = [...validateCasting(parsed)];
+  const isPlainObject = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed);
+  if (isPlainObject) {
+    for (const stage of Object.keys(parsed as Record<string, unknown>)) {
+      if (!RUN_STAGES.has(stage as RunStage)) {
+        errors.push(`${stage}: unknown stage — a run only casts implement|review`);
+      }
     }
   }
   if (errors.length > 0) {
     usage(`refusing to deploy a broken cast:\n  - ${errors.join("\n  - ")}`);
   }
+  const casting = parsed as Casting;
   return Object.keys(casting).length > 0 ? casting : null;
 }
 
@@ -189,12 +212,17 @@ function outputOf(run: Run): TaskDeployOutput {
  * mint the Run, and (unless `--dry`) persist it + ping the bus, exactly once. Throws
  * {@link TaskDeployUsageError} on a bad invocation; the caller ({@link runTaskDeploy}) is the only
  * one that turns that into `fail()`.
+ *
+ * `--dry` returns the FULL {@link Run} object — per spec ("print the Run JSON, write nothing")
+ * that's the whole operational point of `--dry`: previewing the resolved title/slug/prompt/cast/
+ * taskRef before anything is persisted, not the same 5-field summary a wet deploy prints. A wet
+ * deploy still returns the narrow {@link TaskDeployOutput} the concierge parses.
  */
-export async function deployRun(argv: string[], deps: TaskDeployDeps): Promise<TaskDeployOutput> {
+export async function deployRun(argv: string[], deps: TaskDeployDeps): Promise<Run | TaskDeployOutput> {
   const input = parseTaskDeployArgs(argv);
   const now = deps.now ? deps.now() : new Date();
   const run = buildRun(input, now);
-  if (input.dry) return outputOf(run);
+  if (input.dry) return run;
   const created = await deps.store.create(run);
   await deps.notifyBus("run.deploy", { runId: created.id, channelId: created.channelId });
   return outputOf(created);

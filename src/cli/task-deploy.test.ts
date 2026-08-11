@@ -130,17 +130,55 @@ test("parseTaskDeployArgs: a hard-blocked model is rejected", () => {
   ).toThrow(TaskDeployUsageError);
 });
 
+test("parseTaskDeployArgs: garbage JSON in --cast is rejected, not silently degraded to {}", () => {
+  expect(() => parseTaskDeployArgs(["--prompt", "x", "--cast", "{not json"])).toThrow(TaskDeployUsageError);
+});
+
+test("parseTaskDeployArgs: a typo'd harness in --cast is rejected, not silently dropped", () => {
+  expect(() =>
+    parseTaskDeployArgs(["--prompt", "x", "--cast", JSON.stringify({ implement: { harness: "clade" } })]),
+  ).toThrow(TaskDeployUsageError);
+});
+
+test("parseTaskDeployArgs: an invalid effort in --cast is rejected, not silently dropped", () => {
+  expect(() =>
+    parseTaskDeployArgs(["--prompt", "x", "--cast", JSON.stringify({ implement: { harness: "codex", effort: "ultra" } })]),
+  ).toThrow(TaskDeployUsageError);
+});
+
 // ── dry run ────────────────────────────────────────────────────────────────────────────────
 
-test("deployRun: --dry builds the Run JSON but writes nothing and pings no bus", async () => {
+test("deployRun: --dry prints the full Run JSON but writes nothing and pings no bus", async () => {
   const deps = fakeDeps();
-  const result = await deployRun(["--prompt", "add oauth middleware", "--dry"], deps);
+  const result = await deployRun(
+    ["--prompt", "add oauth middleware", "--channel", "chan-9", "--requester", "user-9", "--task", "12.1", "--dry"],
+    deps,
+  );
+  // --dry's whole point is previewing the resolved title/slug/prompt/cast/taskRef before anything
+  // is persisted — a wet deploy's narrow 5-field {runId, sessionName, branch, specPath, state}
+  // summary would defeat that, so --dry returns the FULL Run object instead.
   expect(result).toEqual({
-    runId: "run-20260810-add-oauth-middleware",
-    sessionName: "beckett-run-add-oauth-middleware",
-    branch: "beckett/run-add-oauth-middleware",
-    specPath: null,
+    id: "run-20260810-add-oauth-middleware",
+    slug: "add-oauth-middleware",
+    title: "add oauth middleware",
+    prompt: "add oauth middleware",
+    channelId: "chan-9",
+    requesterId: "user-9",
+    taskRef: "#12.1",
+    ultracode: false,
+    cast: null,
+    repo: null,
     state: "queued",
+    createdAt: "2026-08-10T12:00:00.000Z",
+    updatedAt: "2026-08-10T12:00:00.000Z",
+    workspace: null,
+    branch: "beckett/run-add-oauth-middleware",
+    baseSha: null,
+    sessionIds: {},
+    sessionName: "beckett-run-add-oauth-middleware",
+    reviewCycles: 0,
+    prUrl: null,
+    error: null,
   });
   expect(deps.created).toEqual([]);
   expect(deps.busPings).toEqual([]);

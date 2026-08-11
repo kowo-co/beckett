@@ -986,7 +986,15 @@ export async function runTask(argv: string[]): Promise<void> {
       });
     }
     const task = store.getTask(ref);
-    if (!task) fail(`no such task: #${normalizeTaskNumber(ref)}`);
+    if (!task) {
+      // A run whose title is all-digits (e.g. "2048") slugifies to an all-digits slug, which
+      // matches the numeric-ref guard above and lands here instead of the run-lookup branch.
+      // Still reachable by full `run-*` id; fall back to a slug lookup before giving up so it's
+      // reachable by its short slug too.
+      const run = runStore().bySlug(ref);
+      if (run) out({ run, checklist: readRunChecklist(run.workspace) });
+      fail(`no such task: #${normalizeTaskNumber(ref)}`);
+    }
     out(publicTask(task));
   }
 
