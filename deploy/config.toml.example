@@ -122,6 +122,10 @@ max_live_sessions = 6
 idle_recycle_minutes = 30
 directed_settle_ms = 0
 
+[concierge.chilltext]
+url = "https://chilltext.ssh.codes"
+timeout_ms = 5000
+
 [quick]
 enabled = true
 model = "claude-sonnet-5"
@@ -174,3 +178,6 @@ hard_timeout_s = 1800
 output_token_budget = 80000
 memories_per_session_max = 5
 channel_id = ""
+
+[social]
+chill = true

@@ -305,14 +305,17 @@ test("routines.add validates at the seam, may restate but never redirect the rep
   });
   expect((await ext.store().list()).length).toBe(0);
 
+  // A vault entry name unrelated to "x.com" — the routine store's boot-time credsEntry
+  // migration (W4A: heals the dead "x.com" jingle entry to "x-account") would otherwise rewrite
+  // it on the next load, which is not what THIS test is exercising (plain add pass-through).
   const added = await registry.invoke(
-    { capabilityId: "routines.add", args: { ...ADD_ARGS, channelId: "chan", credsEntry: "x.com" }, origin: ORIGIN },
+    { capabilityId: "routines.add", args: { ...ADD_ARGS, channelId: "chan", credsEntry: "example-vault-entry" }, origin: ORIGIN },
     deps,
   );
   expect(added.ok).toBeTrue();
   expect(added.data).toMatchObject({ id: "daily-check", enabled: true, window: "09:00-09:40 America/New_York" });
   const stored = await ext.store().get("daily-check");
-  expect(stored!.action).toEqual({ kind: "browser", task: "check the thing", credsEntry: "x.com", channelId: "chan" });
+  expect(stored!.action).toEqual({ kind: "browser", task: "check the thing", credsEntry: "example-vault-entry", channelId: "chan" });
 
   // The store's own duplicate guard surfaces as a result, never an exit.
   const dup = await registry.invoke({ capabilityId: "routines.add", args: ADD_ARGS, origin: ORIGIN }, deps);

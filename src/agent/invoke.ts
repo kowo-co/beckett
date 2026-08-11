@@ -201,3 +201,112 @@ export function createAgentRunner(deps: CreateAgentRunnerDeps): AgentRunner {
 function truncate(value: string, maxChars: number): string {
   return value.length <= maxChars ? value : `${value.slice(0, maxChars)}...`;
 }
+
+// =======================================================================================
+// X-post composition (issue: social-media tune, W4A) — the agent authors ONLY the post text
+// (`POST: <text>` per the OUTPUT CONTRACT in src/agent/builtins.ts); CODE builds the actual
+// browser task from it, routing the draft through chilltext's tone pass first. Splitting it
+// this way is what makes the post text extractable for the chill pass instead of buried inside
+// freeform browser-task prose the agent wrote itself.
+// =======================================================================================
+
+const POST_PREFIX = /^POST:\s*/i;
+
+/** X's own character cap — the hard ceiling the composed post must clear before it ships. */
+export const X_POST_MAX_CHARS = 280;
+
+/**
+ * Pull the post text out of an agent's `POST: <text>` output contract. Only the FIRST line is
+ * honored (the contract forbids a second line); returns null if the output doesn't follow the
+ * contract at all, so a caller can fall back to treating `agentOutput` as a legacy self-authored
+ * browser task instead (back-compat for any agent that hasn't adopted the new contract).
+ */
+export function extractPostText(agentOutput: string): string | null {
+  const firstLine = agentOutput.trim().split("\n", 1)[0] ?? "";
+  if (!POST_PREFIX.test(firstLine)) return null;
+  const text = firstLine.replace(POST_PREFIX, "").trim();
+  return text.length > 0 ? text : null;
+}
+
+/** Truncate `text` to at most `maxChars`, cutting at the last word boundary rather than mid-word. */
+export function truncateAtWordBoundary(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const slice = text.slice(0, maxChars);
+  const lastSpace = slice.lastIndexOf(" ");
+  return (lastSpace > 0 ? slice.slice(0, lastSpace) : slice).trimEnd();
+}
+
+/**
+ * The self-contained browser instruction, built by CODE from the exact post text — never by the
+ * agent. The safety lines (already-authenticated, don't touch credentials, verbatim text,
+ * confirm + report the URL, stop-and-report on a block) carry the same facts the agent used to
+ * be trusted to restate itself.
+ */
+export function buildXPostBrowserTask(account: string, text: string): string {
+  return [
+    `Go to https://x.com and post a new tweet from the logged-in account ${account}. The session is`,
+    "already authenticated — do not log in or touch any credential field.",
+    "",
+    "Post this exact text, verbatim, and nothing else:",
+    text,
+    "",
+    "Open the compose box, type that text, publish, then confirm it went live and report the URL of",
+    "the published post.",
+    "",
+    "If anything blocks posting (a checkpoint, a rate limit, a changed UI), stop and report what you",
+    "saw instead of guessing.",
+  ].join("\n");
+}
+
+export interface ChillPassDeps {
+  /** Never throws in practice (chilltext.ts's `chillTransform` already fails open), but a
+   *  rejecting fake is still tolerated below — this pass must never surface a chilltext error. */
+  chillTransform: (req: {
+    agentOutput: string;
+    input?: string;
+    system?: string;
+    single?: boolean;
+    max_bubbles?: number;
+  }) => Promise<{ messages: string[] } | null>;
+}
+
+/** chilltext's personality request for a social post: brief, in-voice, facts intact. */
+export const X_POST_CHILL_SYSTEM = "snarky, extremely online, keep it under 280 chars, keep facts";
+
+/**
+ * Route `draft` through chilltext's tone pass (when `chillEnabled`) and enforce X's char cap.
+ * FAIL OPEN at every step: a null/erroring transform, or a transformed result that blows the cap,
+ * falls back to the original draft; a draft that itself blows the cap is truncated at a word
+ * boundary rather than sent broken. Never throws.
+ */
+export async function applyChillPass(draft: string, chillEnabled: boolean, deps: ChillPassDeps): Promise<string> {
+  let candidate = draft;
+  if (chillEnabled) {
+    const result = await deps
+      .chillTransform({
+        agentOutput: draft,
+        system: X_POST_CHILL_SYSTEM,
+        single: true,
+        max_bubbles: 1,
+      })
+      .catch(() => null);
+    const chilled = result?.messages[0]?.trim();
+    if (chilled) candidate = chilled;
+  }
+  if (candidate.length <= X_POST_MAX_CHARS) return candidate;
+  // The chilled candidate (or an unexpectedly long draft) blew the cap — fall back to the draft.
+  if (draft.length <= X_POST_MAX_CHARS) return draft;
+  // The draft itself is over cap — truncate rather than ship a clipped sentence mid-word.
+  return truncateAtWordBoundary(draft, X_POST_MAX_CHARS);
+}
+
+/** Compose the final browser task for a `POST:`-authored draft: chill pass + cap, then template. */
+export async function composeXPostBrowserTask(
+  postText: string,
+  account: string,
+  chillEnabled: boolean,
+  deps: ChillPassDeps,
+): Promise<string> {
+  const finalText = await applyChillPass(postText, chillEnabled, deps);
+  return buildXPostBrowserTask(account, finalText);
+}

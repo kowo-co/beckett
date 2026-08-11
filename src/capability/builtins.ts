@@ -544,6 +544,17 @@ export const configFragments = {
         .min(0)
         .default(0)
         .transform((ms) => Math.min(ms, DIRECTED_SETTLE_MAX_MS)),
+      // chilltext — a friend's homelab tone-rewrite service (src/chilltext.ts). W3A owns the
+      // concierge's own chilltext gate; other callers (the social-media chill pass — [social]
+      // below) reuse this url/timeout rather than each carrying their own copy. Fails open by
+      // contract: nothing downstream should treat a chilltext outage as a hard error.
+      chilltext: z
+        .object({
+          url: z.string().default("https://chilltext.ssh.codes"),
+          timeout_ms: posInt.default(5_000),
+        })
+        .strict()
+        .default({}),
     })
     .default({}),
   // Quick agents — the no-ticket lane. Sonnet at medium: these are errands where
@@ -674,6 +685,17 @@ export const configFragments = {
     })
     .strict()
     .default({}),
+  // The social-media agent's chill pass (W4A tune): route its composed X posts through
+  // chilltext's tone rewrite before they reach the browser lane. Reuses
+  // `concierge.chilltext`'s url/timeout rather than duplicating them.
+  social: z
+    .object({
+      // false uses the agent's draft as-is. chilltext already fails open on any error/timeout,
+      // so this is purely a taste toggle, not a reliability one.
+      chill: z.boolean().default(true),
+    })
+    .strict()
+    .default({}),
 } satisfies { [K in keyof Config]: z.ZodType<Config[K], z.ZodTypeDef, unknown> };
 
 // =======================================================================================
@@ -706,6 +728,7 @@ const BUILTIN_CAPABILITY_INFO: {
   dream: { id: "dream", summary: "Nightly dream pass: token ceiling + model for the self-lane day replay." },
   progress: { id: "progress", summary: "Zero-token per-ticket progress cards: code-edited Discord status messages." },
   free_time: { id: "free-time", summary: "Weekly self-directed session: trigger, walls, token ceiling, share channel." },
+  social: { id: "social", summary: "Social-media agent's chilltext chill-pass toggle." },
 };
 
 /**

@@ -997,6 +997,13 @@ export interface Config {
      * today's behavior byte-for-byte. Clamped to 3000 by the schema.
      */
     directed_settle_ms: number;
+    /** chilltext (src/chilltext.ts) — a friend's homelab tone-rewrite service. W3A's own gate
+     *  reads this; other chill-pass callers (e.g. `[social].chill`) reuse it rather than each
+     *  carrying a copy. Fails open by contract: an outage is never a hard error downstream. */
+    chilltext: {
+      url: string;
+      timeout_ms: number;
+    };
   };
   /**
    * Quick agents — the NO-TICKET lane: short-lived specialist `claude -p` harnesses
@@ -1123,6 +1130,12 @@ export interface Config {
     memories_per_session_max: number;
     /** Channel the optional one-line share posts to. Empty = the session says nothing to anyone. */
     channel_id: string;
+  };
+  /** The social-media agent's chilltext chill pass (W4A tune): reuses `concierge.chilltext`. */
+  social: {
+    /** Route composed X posts through chilltext before they reach the browser lane. Default
+     *  true; chilltext already fails open, so false is purely a taste toggle. */
+    chill: boolean;
   };
 }
 
