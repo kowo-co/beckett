@@ -44,3 +44,26 @@ test("StderrRing keeps only the newest N lines", () => {
   ring.record("four");
   expect(ring.tail()).toBe("two\nthree\nfour");
 });
+
+test("StderrRing also bounds by BYTES when asked (issue #226 — the concierge's 8KB tail)", () => {
+  const ring = new StderrRing(400, 40);
+  for (let i = 0; i < 20; i += 1) ring.record(`line-${String(i).padStart(2, "0")}-xxxxx`);
+  const tail = ring.tail();
+  expect(tail.length).toBeLessThanOrEqual(40);
+  expect(tail).toContain("line-19"); // the newest survives
+  expect(tail).not.toContain("line-00"); // the oldest was evicted
+});
+
+test("StderrRing keeps a single oversized line rather than emptying itself", () => {
+  const ring = new StderrRing(400, 10);
+  ring.record("a stack trace far longer than the byte bound");
+  expect(ring.tail()).toBe("a stack trace far longer than the byte bound");
+});
+
+test("StderrRing without a byte bound is unchanged (every driver relies on this)", () => {
+  const ring = new StderrRing(3);
+  ring.record("x".repeat(50_000));
+  ring.record("short");
+  expect(ring.tail()).toContain("short");
+  expect(ring.tail().length).toBeGreaterThan(50_000);
+});

@@ -43,6 +43,7 @@ import { loadConfig } from "../config.ts";
 import { buildPaths } from "../paths.ts";
 import { renderClaudeSettings } from "../hooks/registry.ts";
 import { supportsNameFlag } from "../drivers/claude.ts";
+import { StderrRing } from "../drivers/failure.ts";
 import { DispatchDigestFeed } from "../dispatch/digest-feed.ts";
 import type { DispatchEvent } from "../dispatch/events.ts";
 import { serveBus, type BusRequest, type BusResponse } from "../shell/control-bus.ts";
@@ -445,6 +446,30 @@ export function conciergeSessionName(scope: string): string {
   const suffix = key.replace(/[^A-Za-z0-9_-]/g, "").slice(-6) || GLOBAL_SCOPE;
   return `${CONCIERGE_SESSION_NAME_PREFIX}-${suffix}`;
 }
+
+/**
+ * How much of a chat child's stderr is retained per process (issue #226). The concierge used to
+ * DISCARD it — `concierge claude process exited code:1` with no cause, four times in 100 minutes on
+ * rc.1/rc.2 and nothing to diagnose from. A `claude` death writes its reason here (an unknown flag,
+ * an auth failure, a `--name` collision), so a bounded tail of it is the whole future diagnosis.
+ * Bounded by BYTES as well as lines: one stack trace can be a single very long line.
+ */
+const STDERR_RING_LINES = 400;
+const STDERR_RING_BYTES = 8_000;
+/** Chars of that ring folded into the nonzero-exit log line (the ring itself keeps more). */
+const STDERR_LOG_CHARS = 2_000;
+
+/**
+ * How long to wait before retrying a `--resume` that died before init (issue #226).
+ *
+ * The prod pattern the retry answers: session `3e12148f` was CREATED by the running binary and its
+ * resume STILL failed seven minutes later, so binary skew cannot explain it; twice the death was
+ * preceded ~50ms by `discord shard reconnecting`. Both fit a predecessor process that is still
+ * holding the session's `--name` registration/socket while it dies. That contention clears in
+ * milliseconds, so ONE short-delayed retry of the same resume should win — and whether it does is
+ * logged either way, which is how the collision hypothesis gets confirmed or killed from prod data.
+ */
+export const RESUME_RETRY_DELAY_MS = 350;
 
 /** Small, fast seat for a best-effort handoff; never spend an Opus chat turn on bookkeeping. */
 const HANDOFF_MODEL = "claude-haiku-4-5";
@@ -933,6 +958,25 @@ class ResumeBeforeInitError extends Error {
 }
 
 /**
+ * Thrown when a `--resume` launch dies before init for the FIRST time (issue #226). Unlike
+ * {@link ResumeBeforeInitError} the session id is NOT rotated: the transcript is presumed fine and
+ * the same resume is retried once after {@link RESUME_RETRY_DELAY_MS}. Only if that second resume
+ * also dies before init does onExit demote the session to a fresh seeded one and throw the
+ * unresumable error — so the fresh-session fallback is unchanged, just one rung further down.
+ */
+class ResumeRetryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ResumeRetryError";
+  }
+}
+
+/** Non-blocking sleep for the one delayed resume retry (issue #226). */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
  * Thrown when an INITIALIZED session's turn reaches its `result` with no valid delivery object at
  * all (issue #3). Caught by {@link ConciergeSession.runTurn}, which re-drives the same turn once
  * on the same session before anyone is told the turn died.
@@ -1131,6 +1175,20 @@ export class ConciergeSession {
   private stopped = false;
   /** Latest summed input-token count (input + cache_creation + cache_read) — the live context size. */
   private lastContextTokens = 0;
+  /**
+   * True once the CURRENT turn reported per-request usage on a streamed `assistant` frame. That
+   * number is the live context size; the terminal `result` frame's `usage` is the turn's CUMULATIVE
+   * total across every API request it made, so it is only a fallback (issue #229 — see
+   * {@link recordUsage}). Mirrors ClaudeDriver's `tokensFromStream` latch.
+   */
+  private sawStreamedUsage = false;
+  /**
+   * Inline errands (a bus op the child is BLOCKED on — `browser.exec` holding the browser lease, a
+   * `quick.run` specialist) outstanding for this scope. A rotation kills the child, so it must not
+   * run while one is live even though no turn is pumping: the turn that issued the errand can have
+   * been reaped by a deadline while its errand kept going (issue #229).
+   */
+  private inlineErrands = 0;
   /** True while we're deliberately swapping the child for a rotation/reload — suppresses onExit's relaunch. */
   private rotating = false;
   /** Set by {@link requestReload} when the persona file changed; applied at the next turn boundary. */
@@ -1141,6 +1199,12 @@ export class ConciergeSession {
   private lastLaunchWasResume = false;
   /** Force the next (re)launch to start a FRESH session (set when a resume proved unresumable). */
   private freshNextLaunch = false;
+  /**
+   * The ONE retry of a `--resume` that died before init has been spent (issue #226). Cleared the
+   * moment any launch reaches `system/init` — a resume that worked spends nothing — so the retry is
+   * per-failure, not once per process.
+   */
+  private resumeRetryUsed = false;
   /** A handoff note to fold into the head of the next turn (fresh-session re-grounding). */
   private seedPending: string | null = null;
   /** The most recent rotation handoff note — persisted so a failed resume can still re-ground. */
@@ -1216,6 +1280,12 @@ export class ConciergeSession {
   // the first stdin line arrives, so start() must NOT block waiting for init (that deadlocks —
   // claude waits for input, we'd wait for init). We track initSeen for diagnostics only.
   private initSeen = false;
+  /**
+   * Per-child stderr ring (issue #226). Keyed by the child handle rather than held as one field so
+   * a superseded process draining its last bytes can never contaminate the current child's tail —
+   * the same isolation {@link handleLine}'s `from !== this.child` guard gives stdout.
+   */
+  private readonly childStderr = new WeakMap<object, StderrRing>();
 
   constructor(opts: ConciergeSessionOptions) {
     this.config = opts.config;
@@ -1557,6 +1627,35 @@ export class ConciergeSession {
         });
         return await this.driveTurn(prependTurnNote(message, reDriveNote()), meta);
       }
+      // RUNG 1 of the resume ladder (issue #226): the `--resume` died before init, but the
+      // transcript is presumed intact — onExit kept the session id and only marked the retry
+      // spent. Wait out a dying predecessor's `--name`/socket registration and resume AGAIN. If
+      // that works, nobody loses their transcript over a race that clears in milliseconds; if it
+      // doesn't, the second death arrives as ResumeBeforeInitError and RUNG 2 (the pre-existing
+      // fresh seeded session) runs exactly as it always did.
+      if (err instanceof ResumeRetryError) {
+        this.log.warn("concierge --resume died before init — retrying the same resume once", {
+          sessionId: this.sessionId,
+          delayMs: RESUME_RETRY_DELAY_MS,
+        });
+        await delay(RESUME_RETRY_DELAY_MS);
+        try {
+          const output = await this.driveTurn(message, meta);
+          // The answer prod needs: a resume that fails once and succeeds on an immediate retry IS
+          // the collision hypothesis confirmed (a predecessor still held the registration).
+          this.log.info("concierge --resume retry SUCCEEDED — the first failure was transient", {
+            sessionId: this.sessionId,
+            delayMs: RESUME_RETRY_DELAY_MS,
+          });
+          return output;
+        } catch (retryErr) {
+          if (!(retryErr instanceof ResumeBeforeInitError)) throw retryErr;
+          this.log.warn("concierge --resume died before init TWICE — falling back to a fresh seeded session", {
+            sessionId: this.sessionId,
+          });
+          return await this.driveTurn(message, meta);
+        }
+      }
       if (!(err instanceof ResumeBeforeInitError)) throw err;
       // The `--resume` transcript was gone and the in-flight turn died before init. onExit has
       // already minted a fresh session id, re-seeded the last handoff note, and armed
@@ -1578,6 +1677,8 @@ export class ConciergeSession {
     if (!child) throw new Error("concierge session has no live process");
     this.currentMeta = meta ?? null;
     this.liveTurnToolUsed = false;
+    // Per-turn: this turn's own streamed usage decides whether its `result` total is believable.
+    this.sawStreamedUsage = false;
     this.liveTurnInjections = 0;
     this.liveTurnDeployShaped = false;
     this.liveTurnLastActivity = undefined;
@@ -1732,6 +1833,8 @@ export class ConciergeSession {
       throw new Error(`concierge: failed to spawn ${bin} — ${(err as Error).message}`);
     }
     this.child = child;
+    // Arm this child's stderr ring BEFORE the pump starts writing into it (issue #226).
+    this.childStderr.set(child, new StderrRing(STDERR_RING_LINES, STDERR_RING_BYTES));
 
     void this.consumeStdout(child).catch((err) =>
       this.log.error("concierge stdout loop crashed", { err: String(err) }),
@@ -1868,7 +1971,18 @@ export class ConciergeSession {
     this.peerTurnLive = false;
     this.deferredTurn = null;
     if (this.stopped) return;
-    this.log.warn("concierge claude process exited", { code, sessionId: this.sessionId });
+    // Issue #226: say WHY. A nonzero exit carries the child's own last words — an unknown flag, an
+    // auth failure, a `--name` already registered — which is the only evidence that survives the
+    // process. Truncated to one loggable chunk; the ring itself holds more.
+    const stderrTail = code === 0 ? "" : (this.childStderr.get(exited)?.tail() ?? "");
+    this.log.warn("concierge claude process exited", {
+      code,
+      sessionId: this.sessionId,
+      scope: this.scope,
+      wasResume: this.lastLaunchWasResume,
+      initSeen: this.initSeen,
+      ...(code === 0 ? {} : { stderrTail: stderrTail ? stderrTail.slice(-STDERR_LOG_CHARS) : "(nothing on stderr)" }),
+    });
 
     // Crash-loop visibility (issue #24): a repeating crash (bad auth, broken config) must reach
     // the ops channel instead of surfacing only as per-message generic failures.
@@ -1877,12 +1991,19 @@ export class ConciergeSession {
       this.onCrashLoop?.({ count: this.consecutiveCrashes, code });
     }
 
-    // A `--resume` launch that died before ever initializing means the persisted session is
-    // unresumable (deleted transcript, harness drift). Fall back to a FRESH session seeded with
-    // the last handoff note — the user re-explains nothing (issue #24). The in-flight turn is
-    // re-driven on this fresh session rather than dropped (issue #98).
-    const resumeUnrecoverable = this.lastLaunchWasResume && !this.initSeen;
+    // A `--resume` launch that died before ever initializing MAY mean the persisted session is
+    // unresumable (deleted transcript, harness drift) — but it may equally be a transient
+    // collision with a dying predecessor that still holds the session's registration (issue #226).
+    // So the ladder has two rungs: retry the SAME resume once (session id untouched, transcript
+    // kept), and only if that also dies before init fall back to a FRESH session seeded with the
+    // last handoff note (issue #24) whose in-flight turn is re-driven rather than dropped (#98).
+    const resumeDiedBeforeInit = this.lastLaunchWasResume && !this.initSeen;
+    const retryResume = resumeDiedBeforeInit && !this.resumeRetryUsed;
+    if (retryResume) this.resumeRetryUsed = true;
+    const resumeUnrecoverable = resumeDiedBeforeInit && !retryResume;
     if (resumeUnrecoverable) {
+      // The ladder is spent for this session id; the fresh one starts with a full retry budget.
+      this.resumeRetryUsed = false;
       this.sessionId = crypto.randomUUID();
       this.freshNextLaunch = true;
       if (this.lastHandoff) this.seedPending = this.lastHandoff;
@@ -1894,17 +2015,20 @@ export class ConciergeSession {
     }
 
     // The current process is gone; the next ask() relaunches (resume or seeded-fresh). Any turn
-    // that was in flight is failed so the human gets an error rather than a hang — EXCEPT the
-    // resume-before-init case, whose typed error tells runTurn to re-drive the turn ONCE on the
-    // fresh session it just seeded (issue #98), so the person's message is answered, not lost.
+    // that was in flight is failed so the human gets an error rather than a hang — EXCEPT the two
+    // resume-before-init rungs, whose typed errors tell runTurn to re-drive the turn: once on the
+    // SAME session after a short delay (#226), then once on the fresh session this just seeded
+    // (#98), so the person's message is answered, not lost.
     if (this.pending) {
       this.clearPendingTimers(this.pending);
       this.pending.reject(
-        resumeUnrecoverable
-          ? new ResumeBeforeInitError(
-              `concierge: --resume session unrecoverable (exit ${code} before init)`,
-            )
-          : new Error(`concierge: claude exited (code ${code}) mid-turn`),
+        retryResume
+          ? new ResumeRetryError(`concierge: --resume died before init (exit ${code}) — retrying once`)
+          : resumeUnrecoverable
+            ? new ResumeBeforeInitError(
+                `concierge: --resume session unrecoverable (exit ${code} before init)`,
+              )
+            : new Error(`concierge: claude exited (code ${code}) mid-turn`),
       );
       this.pending = null;
     }
@@ -1935,9 +2059,15 @@ export class ConciergeSession {
     }
   }
 
+  /**
+   * Pump the child's stderr into ITS ring (issue #226) as well as the debug log. Before this the
+   * bytes were logged at debug and then dropped, so an exit-code-1 crash in production carried no
+   * cause at all; {@link onExit} now folds the tail into the warn line every nonzero exit writes.
+   */
   private async drainStderr(child: Child): Promise<void> {
     const stream = child.stderr;
     if (!(stream instanceof ReadableStream)) return;
+    const ring = this.childStderr.get(child);
     const reader = stream.getReader();
     const decoder = new TextDecoder();
     try {
@@ -1945,7 +2075,10 @@ export class ConciergeSession {
         const { done, value } = await reader.read();
         if (done) break;
         const text = decoder.decode(value, { stream: true }).trim();
-        if (text) this.log.debug("concierge stderr", { text });
+        if (text) {
+          ring?.record(text);
+          this.log.debug("concierge stderr", { text });
+        }
       }
     } catch {
       /* stderr is diagnostic only */
@@ -1985,11 +2118,11 @@ export class ConciergeSession {
           if (obj.subtype === "init") this.onInit();
           break;
         case "assistant":
-          this.recordUsage((obj.message as Record<string, unknown> | undefined)?.usage);
+          this.recordUsage((obj.message as Record<string, unknown> | undefined)?.usage, "assistant");
           this.onAssistant(obj);
           break;
         case "result":
-          this.recordUsage(obj.usage);
+          this.recordUsage(obj.usage, "result");
           this.onResult(obj);
           break;
         default:
@@ -2004,6 +2137,9 @@ export class ConciergeSession {
     // Diagnostic only now — init no longer gates the launch (see launch() note).
     if (!this.initSeen) this.log.debug("concierge session init seen");
     this.initSeen = true;
+    // A launch that reached init spends nothing from the resume ladder: the NEXT failed resume
+    // (hours later, a different collision) gets its own retry rather than going straight to fresh.
+    this.resumeRetryUsed = false;
   }
 
   private onAssistant(obj: Record<string, unknown>): void {
@@ -2351,15 +2487,34 @@ export class ConciergeSession {
   }
 
   /**
-   * Track the live context size from a turn's `usage`. The context size is the SUM of every
-   * input-side field on the latest turn — `input_tokens` alone is only the uncached delta (a
+   * Track the LIVE context size from a turn's `usage`. The context size is the SUM of every
+   * input-side field of ONE API request — `input_tokens` alone is only the uncached delta (a
    * handful of tokens on a warm cached session) and would never cross the threshold. On a warm
    * session most of the mass sits in `cache_read`; after a >5-min gap the same mass reappears as
-   * `cache_creation`. Each turn re-sends the whole context, so the latest sum IS the current size.
+   * `cache_creation`. Every request re-sends the whole context, so the LATEST request's sum IS the
+   * current size.
+   *
+   * ── WHY THE SOURCE MATTERS (issue #229) ────────────────────────────────────────────────
+   * Streamed `assistant` frames carry the usage of the single API request that produced them —
+   * that is live context, exactly. The terminal `result` frame carries the turn's CUMULATIVE
+   * total across every request it made, and a tool-heavy turn makes many: prod logged
+   * `contextTokens: 905697` against a 160k watermark, which is not a context size any 200k model
+   * could hold — it is ~6 requests' worth of the same ~160k context counted again each time.
+   * Taking that number as "live context" made the re-grounder fire on lifetime throughput.
+   *
+   * So streamed usage wins whenever the turn produced any (the normal case), and `result.usage` is
+   * kept ONLY as the fallback for a turn that streamed none — where it is a single request's total
+   * and therefore correct. Same latch ClaudeDriver uses for its per-turn token accounting.
    */
-  private recordUsage(raw: unknown): void {
+  private recordUsage(raw: unknown, source: "assistant" | "result"): void {
     const ctx = contextTokensFromUsage(raw);
-    if (ctx > 0) this.lastContextTokens = ctx;
+    if (ctx <= 0) return;
+    if (source === "assistant") {
+      this.lastContextTokens = ctx;
+      this.sawStreamedUsage = true;
+      return;
+    }
+    if (!this.sawStreamedUsage) this.lastContextTokens = ctx;
   }
 
   /**
@@ -2378,13 +2533,56 @@ export class ConciergeSession {
   }
 
   /**
+   * TRULY idle — nothing this scope owns is mid-flight, so killing the child costs no work
+   * (issue #229). `pumping` and the queue alone were NOT enough: prod re-grounded a scope whose
+   * turn chain still had an inline browser errand holding the lease. Every signal is checked:
+   *
+   *   - `pumping` / `turnQueue` — a turn running or waiting for its slot;
+   *   - `pending` — a turn awaiting its `result` boundary. Normally implied by `pumping`, but a
+   *     turn reaped by a deadline can leave one behind, and it is the cheap direct check;
+   *   - `peerTurnLive` / `deferredTurn` — an unsolicited cross-session turn is executing on this
+   *     child (W2B), or a human's user line is held back waiting for it to settle;
+   *   - `inlineErrands` — a bus op the child is blocked on (a browser lease, a quick agent) that
+   *     can outlive the turn that issued it. THE #229 case.
+   */
+  private idleForRotation(): boolean {
+    return (
+      !this.pumping &&
+      this.turnQueue.length === 0 &&
+      this.pending === null &&
+      !this.peerTurnLive &&
+      this.deferredTurn === null &&
+      this.inlineErrands === 0
+    );
+  }
+
+  /**
+   * Mark an inline errand started — a bus op this session's child is BLOCKED on while it runs
+   * (`browser.exec` holding the browser lease, a `quick.run` specialist). The returned function
+   * settles it and is safe to call more than once, so a `finally` can always fire it.
+   *
+   * This exists because "is a turn pumping?" does not answer "is this scope busy?". The errand
+   * outlives its turn whenever that turn is reaped by a deadline while its bus op keeps running,
+   * and a rotation in that window SIGTERMs the child out from under real work (issue #229).
+   */
+  noteInlineErrand(): () => void {
+    this.inlineErrands += 1;
+    let settled = false;
+    return () => {
+      if (settled) return;
+      settled = true;
+      this.inlineErrands = Math.max(0, this.inlineErrands - 1);
+    };
+  }
+
+  /**
    * Run the rotation check only while this channel is quiet. Deliberately public for the pool's
    * idle maintenance path; it never acquires the shared TurnGate because there is no live chat
    * turn to meter here. `pumping` is the per-channel mutex, so an ask racing this check waits
    * safely without making unrelated channels wait.
    */
   async rotateWhileIdle(): Promise<boolean> {
-    if (this.pumping || this.turnQueue.length > 0) return false;
+    if (!this.idleForRotation()) return false;
     this.pumping = true;
     const rotations = this.rotations;
     try {
@@ -2404,6 +2602,17 @@ export class ConciergeSession {
    */
   private async maybeRotate(): Promise<void> {
     if (this.stopped || this.rotating) return;
+    // The last gate before a SIGTERM, so it covers BOTH callers — the idle sweep and pump()'s
+    // hard-edge fallback, which runs between turns while an errand may still be outstanding.
+    // A deferred reload/rotation simply happens at the next boundary (issue #229).
+    if (this.inlineErrands > 0) {
+      this.log.debug("deferring concierge re-ground — an inline errand is still outstanding", {
+        sessionId: this.sessionId,
+        scope: this.scope,
+        inlineErrands: this.inlineErrands,
+      });
+      return;
+    }
     const reload = this.reloadPending;
     if (!reload) {
       if (this.lastContextTokens < this.rotateAtTokens) return;
@@ -4983,6 +5192,9 @@ export class Concierge {
               const runId = `inline-${crypto.randomUUID()}`;
               const controlToken = crypto.randomUUID();
               const artifactsDir = join(buildPaths(this.config).beckettDir, "browser-agent", "inline", runId);
+              // THE #229 errand: the issuing scope is busy for as long as this holds the lease,
+              // even if its turn is reaped meanwhile — so its re-grounder must not kill the child.
+              const settleErrand = this.pool.beginInlineErrand(req.token ?? "");
               try {
                 await this.browserRuntime.acquire({ runId, channelId: mention.channelId, artifactsDir, controlToken });
                 const data = await this.browserRuntime.evaluate(runId, code, controlToken);
@@ -4995,6 +5207,7 @@ export class Concierge {
                 if (this.browserRuntime.hasLease(runId)) {
                   await this.browserRuntime.release(runId, false).catch(() => undefined);
                 }
+                settleErrand();
               }
             },
           },
@@ -5025,10 +5238,15 @@ export class Concierge {
                 return { ok: false, error: 'usage: beckett quick <agent> "<task>" [--channel <id>]' };
               }
               const mention = this.issuerMention(req.token);
+              // Same errand bookkeeping as `browser.exec` (issue #229): the issuing scope is
+              // waiting on this specialist, so its re-grounder must not SIGTERM the child mid-wait.
+              const settleErrand = this.pool.beginInlineErrand(req.token ?? "");
               try {
                 return { ok: true, data: await this.quickRunner.run(agent, task, requestedChannelId, mention?.userId || null) };
               } catch (err) {
                 return { ok: false, error: (err as Error).message };
+              } finally {
+                settleErrand();
               }
             },
           },
@@ -6221,9 +6439,15 @@ export class Concierge {
         // THE restart-window case (issue #3), and the one exit that must not settle: the daemon is
         // going down, this turn died with it, and anything we post now is racing a closing gateway.
         // Leave the debt on the books — the next boot replays it and the person never re-asks.
-        this.log.warn("directed turn lost to a shutdown — left owed for replay after boot", {
+        // Say what actually happened, not a diagnosis (issue #226): the old wording asserted BOTH
+        // a shutdown as the cause and a boot as the recovery, and prod printed it for turns that
+        // died to a failed `--resume` with no restart anywhere in sight — an operator reading it
+        // went looking for a deploy that never occurred. The truthful facts are: this turn failed,
+        // nothing was posted, and the debt is still on the ledger, which replays it.
+        this.log.warn("directed turn failed and was not answered — left owed; the mention ledger replays it", {
           channelId: m.channelId,
           messageId: m.messageId,
+          err: String(err),
         });
       } else {
         // A live daemon that failed this turn owes a word NOW, not at the next restart: the session
