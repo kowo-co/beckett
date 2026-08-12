@@ -140,10 +140,14 @@ export function selectPersonaForGate(persona: string, budget: number = personaBu
   return { text: kept.length > 0 ? kept.join("\n\n") : tailLines(candidate, budget), how: "trimmed" };
 }
 
+/** Framing + delimited voice reference — the one place the prompt's shape is written. */
+function compose(personaText: string): string {
+  return `${CHILL_GATE_PREAMBLE}\n\n${OPEN}\n${personaText}\n${CLOSE}`;
+}
+
 /** Compose the gate's system prompt from persona text. Pure — the seam every test drives. */
 export function buildChillSystemPrompt(persona: string, budget: number = personaBudget()): string {
-  const { text } = selectPersonaForGate(persona, budget);
-  return `${CHILL_GATE_PREAMBLE}\n\n${OPEN}\n${text}\n${CLOSE}`;
+  return compose(selectPersonaForGate(persona, budget).text);
 }
 
 /** Default persona location, mirroring `buildPaths().personaFile` without needing a Config. */
@@ -184,7 +188,7 @@ export function chillSystemPrompt(
       `voice in <!-- chill:start --> / <!-- chill:end --> to choose the slice yourself.`,
     );
   }
-  return `${CHILL_GATE_PREAMBLE}\n\n${OPEN}\n${selection.text}\n${CLOSE}`;
+  return compose(selection.text);
 }
 
 /** Log `message(path)` the first time a path warrants it — one line per process, not per message. */

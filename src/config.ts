@@ -202,7 +202,7 @@ export function dropRetiredChilltextSystem(raw: unknown, warn: (message: string)
       "config.toml (edit persona.md to change how Beckett sounds, or set system_override to " +
       "force a one-off prompt).",
   );
-  return { ...cloneRecord(raw), concierge: { ...cloneRecord(concierge), chilltext } };
+  return { ...raw, concierge: { ...concierge, chilltext } };
 }
 
 export interface LoadConfigOptions {

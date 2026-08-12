@@ -10,17 +10,29 @@ prompt appends, what Beckett rewrites when asked to change its vibe) and a hand-
 Tune one and the other drifts.
 
 - The gate's system prompt is now composed at call time from the persona file
-  (`src/chill-system.ts`): the WHOLE file, wrapped in a short framing preamble that states the
-  gate's job — rewrite text that is already Beckett's, preserve meaning, facts, numbers, links and
-  code exactly, leave the bubble split to the request. The persona is handed over as a labelled
-  voice reference, not as instructions, so the model restyles the message instead of trying to be
+  (`src/chill-system.ts`), wrapped in a short framing preamble that states the gate's job —
+  rewrite text that is already Beckett's, preserve meaning, facts, numbers, links and code
+  exactly, leave the bubble count to the request. The persona goes in as a labelled voice
+  reference, not as instructions, so the model restyles the message instead of trying to be
   Beckett and answer it. Read fresh per call: edit `persona.md`, `beckett reload`, done.
+- chilltext caps `system` at 2000 chars (`413 system too long`, which would mean nothing gets
+  chilled at all), and the live persona is ~8k. A persona that fits is sent whole; one that does
+  not is carved to whole `##` sections from the END of the file, because a persona opens with
+  identity and job — the material that makes a rewrite gate try to BE the person — and closes with
+  how they type. A persona can override that guess by wrapping the part that IS the voice in
+  `<!-- chill:start -->` / `<!-- chill:end -->`; the seeded default now ships with those markers.
+  No section name is hardcoded anywhere in the daemon.
 - `[concierge.chilltext] system` is retired. A config.toml that still carries it is stripped with
   one loud deprecation line instead of blocking the boot. The replacement, `system_override`, is
   an explicit escape hatch: empty by default, and a non-empty value replaces the persona voice for
   every message.
 - Fail safe: a missing or unreadable persona file just omits the `system` field (chilltext falls
   back to its own default voice) and logs once. Nobody's message is lost to a missing file.
+
+  Operator note for an existing install: `~/.beckett/persona.md` predates the markers, so the gate
+  carves its tail (the sample lines) until you wrap a slice — putting `<!-- chill:start -->` above
+  `## how beckett types` and `<!-- chill:end -->` below it is the one-line upgrade, and measurably
+  more on-voice than the tail guess.
 
 ## v7.0.3 (2026-08-12)
 
