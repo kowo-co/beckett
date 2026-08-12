@@ -29,6 +29,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import { chromium } from "playwright";
 import type { Logger } from "../types.ts";
 import { openTrustedBrowserAttachment, type TrustedBrowserAttachment } from "./attachments.ts";
@@ -107,7 +108,7 @@ export interface CreateIsolatedBrowserRuntimeDeps {
   cloakCacheDir?: string;
   /** Host Obscura install root bound read-only into the betterwright sandbox. */
   obscuraRoot?: string;
-  /** Host BetterWright Chromium fork artifact root bound read-only into the betterwright sandbox. */
+  /** Host BetterChromium (1.8+) install root bound read-only into the betterwright sandbox. */
   chromiumForkRoot?: string;
   repoRoot?: string;
   bwrapPath?: string;
@@ -139,8 +140,10 @@ interface BuildBrowserHostLaunchOptions {
   cloakCacheDir?: string;
   /** Host Obscura install root bound read-only into the betterwright sandbox. */
   obscuraRoot?: string;
-  /** Host BetterWright Chromium fork artifact root bound read-only into the betterwright sandbox. */
+  /** Host BetterChromium (1.8+) install root bound read-only into the betterwright sandbox. */
   chromiumForkRoot?: string;
+  /** Installed betterwright version; overridable so the fork layout stays unit-testable. */
+  betterwrightVersion?: string;
   /**
    * Host directory holding the CloakBrowser wrapper shim's `dist/index.js`. Only the
    * betterwright backend loads it; without it the lane keeps CloakBrowser's fabricated
@@ -187,33 +190,82 @@ export function obscuraLaunch(options: {
 }
 
 /**
- * Per-platform binary layout under a BetterWright Chromium fork artifact root, mirroring
- * betterwright's own (unexported) `PLATFORM_LAYOUT` in `src/chromium-fork.ts`. Duplicated
- * here rather than imported because the resolver is internal to the package; only the
- * shipped platforms (macOS arm64, Linux x64, Windows x64) have an artifact at all.
+ * Where betterwright's own `PLATFORM_LAYOUT` (dist/src/chromium-fork.js) puts the fork
+ * binary under the fork root. Mirrored rather than imported: the constant lives behind
+ * a deep path the package's `exports` map does not publish.
+ *
+ * 1.8.0 renamed the fork to BetterChromium and renamed the binaries with it, so which
+ * name to probe depends on the installed package. This is not cosmetic — resolution is
+ * STRICT on both sides of the rename, so handing 1.7.x a root that holds only a 1.8
+ * binary makes it throw `Chromium binary not found` where it used to fall back to
+ * Obscura/CloakBrowser. Probing the installed version's own name keeps each version on
+ * exactly the behavior it had before this mount existed.
  */
-const CHROMIUM_FORK_PLATFORM_LAYOUT: Record<string, string> = {
-  "darwin-arm64": join("mac-arm64", "Chromium.app", "Contents", "MacOS", "Chromium"),
-  "linux-x64": join("linux-x64", "chrome"),
-  "win32-x64": join("win-x64", "chrome.exe"),
+const CHROMIUM_FORK_LAYOUTS = {
+  /** betterwright >= 1.8.0 */
+  betterchromium: {
+    "darwin-arm64": join("mac-arm64", "BetterChromium.app", "Contents", "MacOS", "BetterChromium"),
+    "linux-x64": join("linux-x64", "betterchromium"),
+    "win32-x64": join("win-x64", "betterchromium.exe"),
+  } as Record<string, string>,
+  /** betterwright < 1.8.0, when the fork was still named Chromium */
+  chromium: {
+    "darwin-arm64": join("mac-arm64", "Chromium.app", "Contents", "MacOS", "Chromium"),
+    "linux-x64": join("linux-x64", "chrome"),
+    "win32-x64": join("win-x64", "chrome.exe"),
+  } as Record<string, string>,
 };
 
 /**
- * BetterWright Chromium fork enablement for the sandboxed betterwright host, mirroring
- * obscuraLaunch above for the same reason: the sandbox sets HOME=/tmp/home, so
+ * Installed betterwright version, or "" when it cannot be read.
+ *
+ * Deliberately a CommonJS require rather than `import … from "betterwright/package.json"`:
+ * this module is bundled into the host, which runs under Node, and a bare ESM JSON import
+ * of an external package fails there with ERR_IMPORT_ATTRIBUTE_MISSING.
+ */
+function installedBetterwrightVersion(): string {
+  try {
+    return String(createRequire(import.meta.url)("betterwright/package.json").version ?? "");
+  } catch {
+    return "";
+  }
+}
+
+/** Which fork-binary naming the installed betterwright expects; null if unreadable. */
+function chromiumForkLayoutFor(version: string): Record<string, string> | null {
+  const [major = NaN, minor = NaN] = version.trim().split(".", 2).map((part) => Number.parseInt(part, 10));
+  if (!Number.isInteger(major) || !Number.isInteger(minor)) return null;
+  return major > 1 || (major === 1 && minor >= 8) ? CHROMIUM_FORK_LAYOUTS.betterchromium : CHROMIUM_FORK_LAYOUTS.chromium;
+}
+
+/**
+ * BetterChromium enablement for the sandboxed betterwright host, the same shape as
+ * obscuraLaunch and for the same reason: the sandbox sets HOME=/tmp/home, so
  * betterwright's implicit ~/.betterwright/chromium discovery can never find the host
- * install, and BETTERWRIGHT_CHROMIUM_ROOT never survives bwrap's --clearenv unless it is
- * both re-set with --setenv and its target directory is bound into the sandbox's mount
- * namespace. When the pinned fork artifact exists on the host we point
- * BETTERWRIGHT_CHROMIUM_ROOT at it (and bind it read-only in bwrap); explicit roots are
- * STRICT in betterwright (a configured-but-missing binary throws), which is why the env
- * var is gated on the binary existing. When it does not exist we set nothing: implicit
- * discovery inside the sandbox finds nothing and betterwright falls back to managed
- * CloakBrowser. A root configured as "off" keeps the CloakBrowser-only path as an
- * operator kill switch.
+ * install, and --clearenv drops any BETTERWRIGHT_CHROMIUM_ROOT the parent had. When
+ * the pinned fork binary exists on the host we point BETTERWRIGHT_CHROMIUM_ROOT at it
+ * (and bind the root read-only in bwrap).
+ *
+ * The env var is gated on the binary existing, under the name the INSTALLED betterwright
+ * expects (see CHROMIUM_FORK_LAYOUTS), because an explicit root is STRICT on both sides
+ * of the 1.8.0 rename: resolveChromiumForkBinary throws on a configured-but-missing
+ * binary, and selectManagedBrowserBackend refuses to read an invalid explicit
+ * configuration as permission to fall back. Setting nothing is the safe degrade —
+ * betterwright then does exactly what it did before this mount existed: 1.8.x routes to
+ * managed CloakBrowser or reports the missing backend itself, and 1.7.x falls back to
+ * Obscura/CloakBrowser. A root configured as "off" is forwarded verbatim as
+ * betterwright's documented kill switch (honored by 1.7.x and 1.8.x alike), pinning the
+ * lane to CloakBrowser.
+ *
+ * Note that the bwrap sandbox mounts a minimal --dev, so /dev/dri is absent inside it;
+ * betterwright 1.8.1's GPU check therefore selects managed CloakBrowser even when this
+ * mount is present. That is deliberate on their side (issue #109) and costs nothing
+ * here: the mount is what lets betterwright make that choice instead of failing closed.
  */
 export function chromiumForkLaunch(options: {
-  chromiumRoot: string;
+  chromiumForkRoot: string;
+  /** Installed betterwright version; decides which fork-binary name to probe for. */
+  betterwrightVersion?: string;
   platform?: NodeJS.Platform;
   arch?: string;
   exists?: (path: string) => boolean;
@@ -221,12 +273,11 @@ export function chromiumForkLaunch(options: {
   const platform = options.platform ?? process.platform;
   const arch = options.arch ?? process.arch;
   const exists = options.exists ?? existsSync;
-  const root = options.chromiumRoot.trim();
-  if (root.toLowerCase() === "off") return { env: { BETTERWRIGHT_CHROMIUM_PATH: "off" }, mountRoot: null };
-  const layout = CHROMIUM_FORK_PLATFORM_LAYOUT[`${platform}-${arch}`];
-  if (!layout) return { env: {}, mountRoot: null };
-  const binary = join(root, layout);
-  if (!exists(binary)) return { env: {}, mountRoot: null };
+  const root = options.chromiumForkRoot.trim();
+  if (root.toLowerCase() === "off") return { env: { BETTERWRIGHT_CHROMIUM_ROOT: "off" }, mountRoot: null };
+  const layouts = chromiumForkLayoutFor(options.betterwrightVersion ?? installedBetterwrightVersion());
+  const layout = layouts?.[`${platform}-${arch}`];
+  if (!layout || !exists(join(root, layout))) return { env: {}, mountRoot: null };
   return { env: { BETTERWRIGHT_CHROMIUM_ROOT: root }, mountRoot: root };
 }
 
@@ -269,7 +320,11 @@ export function buildBrowserHostLaunch(options: BuildBrowserHostLaunchOptions): 
     ? obscuraLaunch({ obscuraRoot: options.obscuraRoot, platform: options.platform })
     : { env: {}, mountRoot: null };
   const chromiumFork = options.backend === "betterwright" && options.chromiumForkRoot
-    ? chromiumForkLaunch({ chromiumRoot: options.chromiumForkRoot, platform: options.platform })
+    ? chromiumForkLaunch({
+      chromiumForkRoot: options.chromiumForkRoot,
+      betterwrightVersion: options.betterwrightVersion,
+      platform: options.platform,
+    })
     : { env: {}, mountRoot: null };
   // The shim reads the budget from the environment and appends CloakBrowser's
   // --fingerprint-storage-quota, the only switch that moves what
@@ -407,9 +462,9 @@ export function buildBrowserHostLaunch(options: BuildBrowserHostLaunchOptions): 
     // Obscura's pinned binary, read-only at its host path (BETTERWRIGHT_OBSCURA_ROOT
     // points here). obscuraLaunch only emits a mountRoot when the binary exists.
     if (obscura.mountRoot) args.push("--ro-bind", obscura.mountRoot, obscura.mountRoot);
-    // BetterWright Chromium fork artifact root, read-only at its host path
-    // (BETTERWRIGHT_CHROMIUM_ROOT points here). chromiumForkLaunch only emits a
-    // mountRoot when the binary exists, mirroring Obscura above.
+    // BetterChromium's pinned fork, read-only at its host path (BETTERWRIGHT_CHROMIUM_ROOT
+    // points here). chromiumForkLaunch only emits a mountRoot when the binary exists, so a
+    // 1.7.x host — or a box that never ran `betterwright setup` — binds nothing.
     if (chromiumFork.mountRoot) args.push("--ro-bind", chromiumFork.mountRoot, chromiumFork.mountRoot);
     // Read-only, and beside the host bundle rather than under /repo/src, so the shim
     // resolves `cloakbrowser` from the node_modules already bound below.
@@ -550,9 +605,10 @@ export function createIsolatedBrowserRuntime(deps: CreateIsolatedBrowserRuntimeD
   // Mirror betterwright's own Obscura resolution (BETTERWRIGHT_OBSCURA_ROOT, else
   // ~/.betterwright/obscura); obscuraLaunch gates the env var on the binary existing.
   const obscuraRoot = deps.obscuraRoot ?? (process.env.BETTERWRIGHT_OBSCURA_ROOT?.trim() || join(homedir(), ".betterwright", "obscura"));
-  // Mirror betterwright's own Chromium fork resolution (BETTERWRIGHT_CHROMIUM_ROOT, else
+  // Mirror betterwright's own fork resolution (BETTERWRIGHT_CHROMIUM_ROOT, else
   // ~/.betterwright/chromium); chromiumForkLaunch gates the env var on the binary existing.
-  const chromiumForkRoot = deps.chromiumForkRoot ?? (process.env.BETTERWRIGHT_CHROMIUM_ROOT?.trim() || join(homedir(), ".betterwright", "chromium"));
+  const chromiumForkRoot = deps.chromiumForkRoot
+    ?? (process.env.BETTERWRIGHT_CHROMIUM_ROOT?.trim() || join(homedir(), ".betterwright", "chromium"));
   const repoRoot = deps.repoRoot ?? resolve(MODULE_DIR, "../..");
 
   let child: HostChild | null = null;
