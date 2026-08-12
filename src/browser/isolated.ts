@@ -292,6 +292,18 @@ export function buildBrowserHostLaunch(options: BuildBrowserHostLaunchOptions): 
     const value = options.parentEnv?.[name];
     if (typeof value === "string" && value.length > 0) leaseEnv[name] = value;
   }
+  // BetterWright >=1.8.2 picks its backend by probing /dev/dri for an accessible render
+  // device. The sandbox's minimal --dev exposes no such device, so the lane always reads
+  // as GPU-less and auto-routes to managed CloakBrowser even on a GPU-equipped host.
+  // BETTERWRIGHT_BACKEND=auto|chromium-fork|cloak is upstream's documented override for
+  // exactly this case (containers and OS sandboxes that hide the device tree), and it
+  // cannot survive --clearenv unless forwarded. Forwarded only when the operator set it,
+  // so a default launch's command line is byte-for-byte unchanged and `auto` still rules.
+  const backendEnv: Record<string, string> = {};
+  if (options.backend === "betterwright") {
+    const value = options.parentEnv?.BETTERWRIGHT_BACKEND;
+    if (typeof value === "string" && value.trim().length > 0) backendEnv.BETTERWRIGHT_BACKEND = value.trim();
+  }
   const baseEnv: Record<string, string> = {
     PATH: "/usr/bin:/bin",
     HOME: hostHome,
@@ -305,6 +317,7 @@ export function buildBrowserHostLaunch(options: BuildBrowserHostLaunchOptions): 
     ...cloakEnv,
     ...obscura.env,
     ...chromiumFork.env,
+    ...backendEnv,
     ...storageEnv(false),
     ...leaseEnv,
     ...(encodedBudgets ? { BECKETT_BROWSER_HOST_BUDGETS: encodedBudgets } : {}),
@@ -366,6 +379,7 @@ export function buildBrowserHostLaunch(options: BuildBrowserHostLaunchOptions): 
     for (const [name, value] of Object.entries(cloakEnv)) args.push("--setenv", name, value);
     for (const [name, value] of Object.entries(obscura.env)) args.push("--setenv", name, value);
     for (const [name, value] of Object.entries(chromiumFork.env)) args.push("--setenv", name, value);
+    for (const [name, value] of Object.entries(backendEnv)) args.push("--setenv", name, value);
     for (const [name, value] of Object.entries(storageEnv(true))) args.push("--setenv", name, value);
     for (const [name, value] of Object.entries(leaseEnv)) args.push("--setenv", name, value);
     args.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp");

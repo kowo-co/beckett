@@ -21,7 +21,7 @@
  * short-lived renderer still shows up in the CPU-seconds figure.
  */
 
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -94,11 +94,14 @@ function createTreeSampler(rootPid: number) {
 
   function recordBinary(pid: number): void {
     try {
-      const argv0 = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0")[0] ?? "";
-      const classified = argv0 ? classifyBrowserBinary(argv0) : null;
+      // readlink over cmdline: Chromium overwrites its own argv to set a process
+      // title, so /proc/<pid>/cmdline is one blob rather than NUL-separated argv.
+      // /proc/<pid>/exe is the kernel's record of the file actually executed.
+      const exe = readlinkSync(`/proc/${pid}/exe`);
+      const classified = classifyBrowserBinary(exe);
       if (classified) browserBinaries.add(classified);
     } catch {
-      // A process that exits between readdir and read is expected; skip it.
+      // A process that exits between readdir and readlink is expected; skip it.
     }
   }
 
@@ -261,12 +264,20 @@ try {
   const identity = await runtime
     .evaluate(
       runId,
-      `return JSON.stringify({
+      `return await page.evaluate(() => JSON.stringify({
          ua: navigator.userAgent,
          platform: navigator.platform,
          webdriver: navigator.webdriver,
          cores: navigator.hardwareConcurrency,
-       });`,
+         webglRenderer: (() => {
+           try {
+             const gl = document.createElement('canvas').getContext('webgl');
+             if (!gl) return null;
+             const ext = gl.getExtension('WEBGL_debug_renderer_info');
+             return ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : 'no-debug-renderer-info';
+           } catch (error) { return 'error: ' + String(error); }
+         })(),
+       }));`,
       token,
     )
     .then((result) => {
