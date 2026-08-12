@@ -263,6 +263,40 @@ test("Beckett's auto-posted reply joins the record: the next mention's window ca
   expect(turn).not.toContain("beckett (user:");
 });
 
+test("a chilled multi-bubble reply records one entry per bubble — no 'mega' entry re-concatenating them (ro's aug 11-12 report)", async () => {
+  // ro's report: a "mega" message re-concatenating text already sent seconds/milliseconds earlier
+  // as separate standalone messages, same-ms duplicate ids under the channel-store evidence. Root
+  // cause: `deliverChilled`'s `recordPost` callback only covered bubbles AFTER the first, so every
+  // caller recorded the FIRST bubble itself — against the full pre-chill reply text, not that
+  // bubble's own text — leaving a store entry that duplicated what the later bubbles already
+  // recorded correctly. Fixed by having `deliverChilled` record every bubble it actually posts.
+  const realFetch = globalThis.fetch;
+  const FULL_REPLY = "found it: X lives in foo.ts, wired up exactly the way you described in the mention";
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ messages: ["hey", "found it", "check foo.ts"] }), { status: 200 })) as unknown as typeof fetch;
+  try {
+    const h = harness({
+      access: [MEMBER],
+      reply: FULL_REPLY,
+      config: { concierge: { chilltext: { enabled: true, bubble_delay_ms: 0 } } },
+    });
+    await h.concierge.onMessage(msg("m1", "where's the config parsing", 0, { mentionsBot: true }));
+    expect(h.posts.map((p) => p.text)).toEqual(["hey", "found it", "check foo.ts"]);
+
+    await h.concierge.onMessage(msg("m2", "thanks", 10, { mentionsBot: true }));
+    const turn = text(h.asks[1]);
+    // Every bubble that actually posted is its own line in the record...
+    expect(turn).toContain("beckett: hey");
+    expect(turn).toContain("beckett: found it");
+    expect(turn).toContain("beckett: check foo.ts");
+    expect(turn.match(/beckett: /g) ?? []).toHaveLength(3); // exactly three — no fourth, "mega" entry
+    // ...and the full pre-chill reply never appears as a duplicate entry alongside its own parts.
+    expect(turn).not.toContain(FULL_REPLY);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test("approval turns are consumed at code level: no session ask, and the code never lands in the record", async () => {
   const h = harness({ access: [MEMBER], owner: OWNER });
   await h.concierge.onMessage(msg("m1", "context before approval", 0));
