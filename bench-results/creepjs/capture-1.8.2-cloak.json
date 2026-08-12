@@ -1,0 +1,39 @@
+{
+  "ok": true,
+  "result": {
+    "ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+    "webdriver": false,
+    "platform": "Linux x86_64",
+    "cores": 8,
+    "deviceMemory": 8,
+    "vendor": "Google Inc.",
+    "webgl": {
+      "ok": true,
+      "vendor": "Google Inc. (NVIDIA Corporation)",
+      "renderer": "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 4070 Laptop GPU/PCIe/SSE2, OpenGL 4.5.0 NVIDIA 565.77)",
+      "params": 442
+    },
+    "webrtc": "available",
+    "headlessSection": "headless: 28f22dbe 0% headless: 52defe05 0% stealth: 0c019315 platform hints: Arial 0:73:100:91:91 0.60ms Resistanceeb6b354a privacy: unknown security: unknown mode: unknown extension: unknown 722.60ms ServiceWorkerGlobalScope Worker19710031 lang/timezone: en-US (1 US dollar) America/Los_Angeles (420) confidence: high gpu: Google Inc. (NVIDIA Corporation) ANGLE (NVIDIA Corporation, NVIDIA GeForce ",
+    "liesSection": null,
+    "fpId": "FP ID: 4359350da9686f28342f2d817541a19cc57fb8b81691c16c5091f6dc9c5187e9 Fuzzy: ee2a08f1ab211beaff4926c13d2ba1adfff532133",
+    "body": "FP ID: 4359350da9686f28342f2d817541a19cc57fb8b81691c16c5091f6dc9c5187e9 Fuzzy: ee2a08f1ab211beaff4926c13d2ba1adfff532133fec1ef81b76000000000000 1470.60 ms WebRTC54268b42 host connection: blocked foundation/ip: unsupported blocked sdp capabilities: 979f41d7 stun connection: blocked devices (1): audio 264.20ms Timezoneb258f311 Pacific Daylight Time America, Los Angeles -27028656422000 420 9.80ms Intl3f3bdda9 en-US July at Pacific Daylight Time American English 21 million next year 0 or 1 one 18.90ms Headlessf006da0d chromium: true 44% like headless: 28f22dbe 0% headless: 52defe05 0% stealth: 0c019315 platform hints: Arial 0:73:100:91:91 0.60ms Resistanceeb6b354a privacy: unknown security: unknown mode: unknown extension: unknown 722.60ms ServiceWorkerGlobalScope Worker19710031 lang/timezone: en-US (1 US dollar) America/Los_Angeles (420) confidence: high gpu: Google Inc. (NVIDIA Corporation) ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 4070 Laptop GPU/PCIe/SSE2, OpenGL 4.5.0 NVIDIA 565.77) userAgent: ua reduction Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 device: Linux (Linux x86_64) Linux x86_64 cores: 8, ram: 8 userAgentData: Google Chrome 146 (146.0.7680.177) Linux 6.11.0 x86_64 258.70ms WebGLebc2646c images:34cd2641 pixels:59d56fe4 params (78): f9de02bd exts (59): 3d4749fe gpu: confidence: high Google Inc. (NVIDIA Corporation) ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 4070 Laptop GPU/PCIe/SSE2, OpenGL 4.5.0 NVIDIA 565.77) 0.30ms Screen5ccbceb6 ...screen: 1920 x 1080 ....avail: 1920 x 1080 touch: false depth: 24|24 viewport: 1920 1920 1920 1078 947 947 browser landscape landscape-primary 1 71.00ms Canvas 2d4561f20c data: 780d469b rendering: textMetrics: 0.003710057776626302 😀☺⌨...♂▪↪ 100.20ms Fonts34102710 load (6/51): Like undefined apps: unsupported \"Liberation Mono\", \"Noto Color Emoji\", \"Noto Sans Canadian Aboriginal Regular\", \"Noto Sans Gunjala Gondi Regular\", \"Noto Sans Masaram Gondi Regular\", \"Noto Serif Yezidi Regular\" 0.012270470000000002 😀☺⌨ 4.60ms DOMRect6fb5d886 elems A: 0.2603722493811035 elems B: 0.2603722518811035 range A: 0.2603722493811035 range B: 0.2603722518811035 0.012282722778320314 😀☺⌨ 33.30ms SVGRect6aa315a9 bBox: 0.0682 char: 0.03736906280517578 subs: 0.024975050354003905 text: 0.024975050354003905 0.00489776351928711 😀☺⌨ 105.10ms Audio3f4bb4df sum: 124.04347943148605 gain: -20.538288116455078 freq: 164537.64796829224 time: 502.5999283068122 trap: 1001.1628194458974 unique: 5000 data:fe44c4a7 copy:fe44c4a7 values: dfc44fc6 Speech local (0): blocked remote (0): blocked lang (0): blocked default: blocked 55.20ms Mediad0ec3aa6 mimes (10/12): 91101bd8 9.60ms Features: 113-115+ JS/DOM: df08a511 (v114-115) CSS: 379baeb6 (v114-115) Window: 3e4205d3 (v113-115) 46.10ms CSS Media Queries202401c6 @media: ff9efd09 matchMedia: ff9efd09 touch device: unknown screen query: 1920 x 1080 12.80ms Computed Style07ea6cd8 keys (1313): 1a580e3b system styles: 3628d046 0.80ms Math54cd8264 results: details 2.30ms Error92b51d39 results: details 1.80ms Window2b4f450a keys (1219): details 0.20ms HTMLElementa0747426 keys (340): details 297.50ms Navigator114dac51 properties (80): 61dcd4d9 dnt: null gpc: unsupported lang: en-US (en-US) mimeTypes (2): 11003d7c permissions (6): b02221aa plugins (5): 6488a554 vendor: Google Inc. webgpu: 667d2148 userAgentData: Google Chrome 146 (146.0.7680.177) Linux 6.11.0 x86_64 device: Linux (Linux x86_64) Linux x86_64 cores: 8, ram: 8, touch: 0 ua parsed: Chrome 146 userAgent: ua reduction Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 appVersion: 5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Status4a8b0680 network: rtt: 0, downlink: 10 effectiveType: 4g saveData: false battery: level: 100% charging: true charge time: fully charged discharge time: charging available: storage: 0.48GB [515031762] memory: 4GB [4294967296] timing res: 0.09999990463256836 0.10000002384185791 stack: 17876 Tests Workers Iframes Fonts Timezone Window Version Screen Prototype DOMRect Emojis Math Machine Chrome Extensions JS Proxy"
+  },
+  "warnings": [
+    "The existing browser profile was upgraded by Chromium 151.0.7922.108; the Chromium 146.0.7680.177.5 compatibility backend is using /home/beckett/.betterwright/browser/profile/.betterwright-compat-chromium-146 instead. The original profile and its logins were preserved.",
+    "Browser backend: CloakBrowser, forced by BETTERWRIGHT_BACKEND=cloak."
+  ],
+  "profileMode": "persistent",
+  "pages": [
+    {
+      "type": "Page",
+      "pageId": "page-1",
+      "url": "https://abrahamjuliot.github.io/creepjs/",
+      "title": "CreepJS",
+      "closed": false,
+      "active": true
+    }
+  ],
+  "durationMs": 23875.8,
+  "session": "default"
+}

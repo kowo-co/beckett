@@ -1,0 +1,35 @@
+{
+  "ok": true,
+  "result": {
+    "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+    "webdriver": false,
+    "platform": "Win32",
+    "cores": 8,
+    "deviceMemory": 4,
+    "vendor": "Google Inc.",
+    "webgl": {
+      "ok": true,
+      "vendor": "Google Inc. (NVIDIA)",
+      "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+      "params": 0
+    },
+    "webrtc": "available",
+    "headlessSection": "headless: 0% headless: 0% stealth: platform hints: Resistance privacy: security: mode: extension: Worker lang/timezone: gpu: userAgent: device: userAgentData: WebGL images: pixels: params (0): exts (0): gpu: Screen ...screen: ....avail: touch: depth: viewport: Canvas 2d data: rendering: textMetrics: Fonts load (0): apps: DOMRect elems A: elems B: range A: range B: SVGRect bBox: char: subs: text: A",
+    "liesSection": null,
+    "fpId": "FP ID: Computing... Fuzzy: 0000000000000000000000000000000000000000000000000000000000000000 0 ms WebRTC host connection:",
+    "body": "FP ID: Computing... Fuzzy: 0000000000000000000000000000000000000000000000000000000000000000 0 ms WebRTC host connection: foundation/ip: sdp capabilities: stun connection: devices (0): Timezone Intl Headless chromium: 0% like headless: 0% headless: 0% stealth: platform hints: Resistance privacy: security: mode: extension: Worker lang/timezone: gpu: userAgent: device: userAgentData: WebGL images: pixels: params (0): exts (0): gpu: Screen ...screen: ....avail: touch: depth: viewport: Canvas 2d data: rendering: textMetrics: Fonts load (0): apps: DOMRect elems A: elems B: range A: range B: SVGRect bBox: char: subs: text: Audio sum: gain: freq: time: trap: unique: data: copy: values: Speech local (0): remote (0): lang (0): default: Media mimes (0): devices (0): Features: JS/DOM: CSS: Window: CSS Media Queries @media: matchMedia: touch device: screen query: Computed Style keys (0): system styles: system Math results: 0% of engine Error results: 0% of engine Window keys (0): 0% of version HTMLElement keys (0): 0% engine Navigator properties (0): dnt: gpc: lang: mimeTypes (0): permissions (0): plugins (0): vendor: webgpu: userAgentData: device: ua parsed: userAgent: appVersion: Status network: battery: available: Tests Workers Iframes Fonts Timezone Window Version Screen Prototype DOMRect Emojis Math Machine Chrome Extensions JS Proxy"
+  },
+  "profileMode": "persistent",
+  "pages": [
+    {
+      "type": "Page",
+      "pageId": "page-1",
+      "url": "https://abrahamjuliot.github.io/creepjs/",
+      "title": "CreepJS",
+      "closed": false,
+      "active": true
+    }
+  ],
+  "durationMs": 22978.8,
+  "session": "default"
+}

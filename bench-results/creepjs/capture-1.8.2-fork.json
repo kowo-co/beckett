@@ -1,0 +1,35 @@
+{
+  "ok": true,
+  "result": {
+    "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+    "webdriver": false,
+    "platform": "MacIntel",
+    "cores": 12,
+    "deviceMemory": 16,
+    "vendor": "Google Inc.",
+    "webgl": {
+      "ok": false
+    },
+    "webrtc": "available",
+    "headlessSection": "headless: d5b759d8 0% headless: 52defe05 0% stealth: 295d4148 platform hints: Arial 0:73:100:91:91 0.60ms Resistanceeb6b354a privacy: unknown security: unknown mode: unknown extension: unknown 214.70ms ServiceWorkerGlobalScope Workercd13ce88 lang/timezone: en-US (1 US dollar) America/Los_Angeles (420) gpu: unsupported userAgent: ua reduction Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWeb",
+    "liesSection": null,
+    "fpId": "FP ID: 66403abcb93f8b5e9618488962478e5f1bd3c26de713942e2f5fc70901873616 Fuzzy: c68ff25d912e1bfd1c4955a032d49e23ffba07334",
+    "body": "FP ID: 66403abcb93f8b5e9618488962478e5f1bd3c26de713942e2f5fc70901873616 Fuzzy: c68ff25d912e1bfd1c4955a032d49e23ffba07334f75e06f1319000000000000 571.70 ms WebRTC483025bc host connection: blocked foundation/ip: unsupported blocked sdp capabilities: 19da0cf7 stun connection: blocked devices (1): audio 22.30ms Timezoneb258f311 Pacific Daylight Time America, Los Angeles -27028656422000 420 9.70ms Intl3f3bdda9 en-US July at Pacific Daylight Time American English 21 million next year 0 or 1 one 9.30ms Headless25f55725 chromium: true 44% like headless: d5b759d8 0% headless: 52defe05 0% stealth: 295d4148 platform hints: Arial 0:73:100:91:91 0.60ms Resistanceeb6b354a privacy: unknown security: unknown mode: unknown extension: unknown 214.70ms ServiceWorkerGlobalScope Workercd13ce88 lang/timezone: en-US (1 US dollar) America/Los_Angeles (420) gpu: unsupported userAgent: ua reduction Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 device: Mac (MacIntel) macOS Catalina cores: 12, ram: 16 userAgentData: macOS 10_15_7 x86 WebGL images: blocked pixels: blocked params (0): blocked exts (0): blocked gpu: blocked 0.10ms Screen80ca5143 ...screen: 1800 x 1169 ....avail: 1800 x 1049 touch: false depth: 24|24 viewport: 1800 1800 1800 1169 1082 1082 browser landscape landscape-primary 2 38.70ms Canvas 2dee9369c6 data: eab107a8 rendering: 16% rgba noise textMetrics: 0.00371005859375 😀☺⌨...♂▪↪ 117.90ms Fonts4618f6c8 load (6/51): Like undefined apps: unsupported \"Liberation Mono\", \"Noto Color Emoji\", \"Noto Sans Canadian Aboriginal Regular\", \"Noto Sans Gunjala Gondi Regular\", \"Noto Sans Masaram Gondi Regular\", \"Noto Serif Yezidi Regular\" 0.012260230000000002 😀☺⌨ 4.90ms DOMRect9bf2ffac elems A: 0.2603901939318848 elems B: 0.2603901939318848 range A: 0.2603901939318848 range B: 0.2603901939318848 0.012272478179931642 😀☺⌨ 13.60ms SVGRectfc6981f5 bBox: 0.06870000438690185 char: 0.03741901245117187 subs: 0.024975050354003905 text: 0.024975050354003905 0.004897685470581055 😀☺⌨ 33.80ms Audiodaa03d4f sum: 124.04347681390936 gain: -20.538288116455078 freq: 164537.64796829224 time: 502.5999283068122 trap: 3.769892433780342e-7 unique: 4999 data:924ff345 copy:924ff345 values: dfc44fc6 Speech local (0): blocked remote (0): blocked lang (0): blocked default: blocked 13.60ms Mediad0ec3aa6 mimes (10/12): 91101bd8 5.80ms Features: 113-115+ JS/DOM: df08a511 (v114-115) CSS: 379baeb6 (v114-115) Window: 3e4205d3 (v113-115) 6.40ms CSS Media Queriesf2176f93 @media: 7545fad8 matchMedia: 7545fad8 touch device: unknown screen query: 1800 x 1169 11.30ms Computed Style5f5f5ba8 keys (1400): 529fcd92 system styles: 8d98ebe8 0.40ms Mathc43a763a results: details 0.80ms Error92b51d39 results: details 1.10ms Window2d370278 keys (1228): details 0.10ms HTMLElement1b5e16d3 keys (346): details 7.70ms Navigator716cc011 properties (79): e1c99e3f dnt: null gpc: unsupported lang: en-US (en-US) mimeTypes (2): 11003d7c permissions (6): b02221aa plugins (5): 6488a554 vendor: Google Inc. webgpu: unsupported userAgentData: Google Chrome 151 (151.0.7922.108) macOS 10_15_7 x86_64 device: Mac (MacIntel) macOS Catalina cores: 12, ram: 16, touch: 0 ua parsed: Chrome 151 userAgent: ua reduction Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 appVersion: 5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 Status2d2602fc network: rtt: 100, downlink: 1.3 effectiveType: 4g saveData: false battery: level: 100% charging: true charge time: fully charged discharge time: charging available: storage: 10GB [10737418240] memory: 4.09GB [4395630592] timing res: 0.09999990463256836 0.10000002384185791 stack: 17855 Tests Workers Iframes Fonts Timezone Window Version Screen Prototype DOMRect Emojis Math Machine Chrome Extensions JS Proxy"
+  },
+  "warnings": [
+    "Browser backend: BetterChromium, forced by BETTERWRIGHT_BACKEND=chromium-fork."
+  ],
+  "profileMode": "persistent",
+  "pages": [
+    {
+      "type": "Page",
+      "pageId": "page-1",
+      "url": "https://abrahamjuliot.github.io/creepjs/",
+      "title": "CreepJS",
+      "closed": false,
+      "active": true
+    }
+  ],
+  "durationMs": 22350.6,
+  "session": "default"
+}
