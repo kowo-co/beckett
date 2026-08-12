@@ -71,33 +71,80 @@ describe("chillTransform — the contract POST", () => {
     expect(capturedInit?.signal).toBeInstanceOf(AbortSignal);
   });
 
-  test("system omitted when cfg.system is empty and no per-call override", async () => {
+  test("the persona file becomes the system prompt, wrapped in the rewrite-gate framing", async () => {
     let body: Record<string, unknown> = {};
     const fetchFn = (async (_url: string, init?: RequestInit) => {
       body = JSON.parse(String(init?.body));
       return new Response(JSON.stringify({ messages: ["ok"] }), { status: 200 });
     }) as unknown as typeof fetch;
-    await chillTransform(cfg({ system: "" }), { agentOutput: "hi" }, fetchFn);
+    const persona = join(tmp(), "persona.md");
+    writeFileSync(persona, "# persona: beckett\n\nall lowercase. no period at the end of a message");
+
+    await chillTransform(cfg(), { agentOutput: "hi there", personaPath: persona }, fetchFn);
+
+    const system = String(body.system);
+    expect(system).toContain("no period at the end of a message"); // the persona reached the wire
+    expect(system).toContain(CHILL_GATE_PREAMBLE); // …behind the framing, not as a bare cat
+    expect(system.indexOf(CHILL_GATE_PREAMBLE)).toBeLessThan(system.indexOf("all lowercase"));
+  });
+
+  test("editing the persona file changes the very next call's system prompt (no restart)", async () => {
+    const sent: string[] = [];
+    const fetchFn = (async (_url: string, init?: RequestInit) => {
+      sent.push(String(JSON.parse(String(init?.body)).system));
+      return new Response(JSON.stringify({ messages: ["ok"] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const persona = join(tmp(), "persona.md");
+
+    writeFileSync(persona, "talk like a pirate, arr");
+    await chillTransform(cfg(), { agentOutput: "hi there", personaPath: persona }, fetchFn);
+    writeFileSync(persona, "talk like a lighthouse keeper");
+    await chillTransform(cfg(), { agentOutput: "hi there", personaPath: persona }, fetchFn);
+
+    expect(sent[0]).toContain("talk like a pirate, arr");
+    expect(sent[1]).toContain("talk like a lighthouse keeper");
+    expect(sent[1]).not.toContain("pirate");
+  });
+
+  test("system omitted when the persona file is missing and nothing overrides it", async () => {
+    let body: Record<string, unknown> = {};
+    const fetchFn = (async (_url: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ messages: ["ok"] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    await chillTransform(cfg(), { agentOutput: "hi", personaPath: noPersona() }, fetchFn);
     expect(body.system).toBeUndefined();
   });
 
-  test("system falls back to cfg.system when no per-call override is given", async () => {
+  test("cfg.system_override replaces the persona-derived prompt (the escape hatch)", async () => {
     let body: Record<string, unknown> = {};
     const fetchFn = (async (_url: string, init?: RequestInit) => {
       body = JSON.parse(String(init?.body));
       return new Response(JSON.stringify({ messages: ["ok"] }), { status: 200 });
     }) as unknown as typeof fetch;
-    await chillTransform(cfg({ system: "be snarky and brief" }), { agentOutput: "hi" }, fetchFn);
+    const persona = join(tmp(), "persona.md");
+    writeFileSync(persona, "talk like a pirate, arr");
+    await chillTransform(
+      cfg({ system_override: "be snarky and brief" }),
+      { agentOutput: "hi", personaPath: persona },
+      fetchFn,
+    );
     expect(body.system).toBe("be snarky and brief");
   });
 
-  test("a per-call system overrides cfg.system", async () => {
+  test("a per-call system (the social lane) outranks both the override and the persona", async () => {
     let body: Record<string, unknown> = {};
     const fetchFn = (async (_url: string, init?: RequestInit) => {
       body = JSON.parse(String(init?.body));
       return new Response(JSON.stringify({ messages: ["ok"] }), { status: 200 });
     }) as unknown as typeof fetch;
-    await chillTransform(cfg({ system: "be snarky" }), { agentOutput: "hi", system: "be formal" }, fetchFn);
+    const persona = join(tmp(), "persona.md");
+    writeFileSync(persona, "talk like a pirate, arr");
+    await chillTransform(
+      cfg({ system_override: "be snarky" }),
+      { agentOutput: "hi", system: "be formal", personaPath: persona },
+      fetchFn,
+    );
     expect(body.system).toBe("be formal");
   });
 
@@ -107,7 +154,7 @@ describe("chillTransform — the contract POST", () => {
       body = JSON.parse(String(init?.body));
       return new Response(JSON.stringify({ messages: ["ok"] }), { status: 200 });
     }) as unknown as typeof fetch;
-    await chillTransform(cfg(), { agentOutput: "hi", single: true }, fetchFn);
+    await chillTransform(cfg(), { agentOutput: "hi", single: true, personaPath: noPersona() }, fetchFn);
     expect(body.single).toBe(true);
   });
 
@@ -118,7 +165,7 @@ describe("chillTransform — the contract POST", () => {
       return new Response(JSON.stringify({ messages: ["ok"] }), { status: 200 });
     }) as unknown as typeof fetch;
     const long = "x".repeat(7_000);
-    await chillTransform(cfg(), { input: long, agentOutput: long }, fetchFn);
+    await chillTransform(cfg(), { input: long, agentOutput: long, personaPath: noPersona() }, fetchFn);
     expect((body.input as string).length).toBe(6_000);
     expect((body.agentOutput as string).length).toBe(6_000);
   });

@@ -8,7 +8,13 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defaultConfigToml, dropRetiredSections, loadConfig, validateConfig } from "./config.ts";
+import {
+  defaultConfigToml,
+  dropRetiredChilltextSystem,
+  dropRetiredSections,
+  loadConfig,
+  validateConfig,
+} from "./config.ts";
 import { browserHostSettings } from "./browser/runtime.ts";
 
 /**
@@ -91,6 +97,36 @@ describe("retired sections", () => {
     seen.length = 0;
     const clean = { runs: { max_live: 3 } };
     expect(dropRetiredSections(clean, warn)).toBe(clean); // untouched object, not a clone
+    expect(seen).toHaveLength(0);
+  });
+
+  // The chilltext voice string got the same treatment when the gate's prompt moved to persona.md:
+  // prod's config.toml carries `system = "..."` and the slice is strict, so the choice was "strip
+  // it loudly" or "the daemon stops booting on a file the deploy never touches".
+  test("[concierge.chilltext] system is stripped, and the rest of the slice still applies", () => {
+    const config = loadToml(
+      `[concierge.chilltext]\nenabled = true\nsystem = "be a pirate"\nmax_bubbles = 2\n`,
+    );
+    expect(config.concierge.chilltext).not.toHaveProperty("system");
+    expect(config.concierge.chilltext.system_override).toBe(""); // the empty-by-default escape hatch
+    expect(config.concierge.chilltext.enabled).toBe(true);
+    expect(config.concierge.chilltext.max_bubbles).toBe(2);
+  });
+
+  test("the retired chilltext voice is announced once, and untouched configs are left alone", () => {
+    const seen: string[] = [];
+    const warn = (message: string) => void seen.push(message);
+    const stripped = dropRetiredChilltextSystem(
+      { concierge: { chilltext: { enabled: true, system: "be a pirate" } } },
+      warn,
+    );
+    expect(stripped).toEqual({ concierge: { chilltext: { enabled: true } } });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatch(/persona\.md/);
+
+    seen.length = 0;
+    const clean = { concierge: { chilltext: { enabled: true } } };
+    expect(dropRetiredChilltextSystem(clean, warn)).toBe(clean); // untouched object, not a clone
     expect(seen).toHaveLength(0);
   });
 });

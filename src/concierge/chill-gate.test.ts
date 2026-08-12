@@ -5,8 +5,11 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { deliverChilled } from "./chill-gate.ts";
-import type { ChilltextConfig, ChillTransformResult } from "../chilltext.ts";
+import { chillTransform, type ChilltextConfig, type ChillTransformResult } from "../chilltext.ts";
 import type { DiscordGateway, ReplyOptions } from "../types.ts";
 
 const CHAN = "chan-1";
@@ -218,5 +221,67 @@ describe("deliverChilled — multi-bubble posting order/opts", () => {
       },
     });
     expect(sawInput).toBe("what's the status");
+  });
+
+  test("personaPath is forwarded to the transform call (the voice comes from that file)", async () => {
+    const { gateway } = fakeGateway();
+    let sawPersonaPath: string | undefined;
+    await deliverChilled(CHAN, "here is my answer", {
+      gateway,
+      cfg: cfg(),
+      personaPath: "/tmp/some/persona.md",
+      transform: async (_cfg, input) => {
+        sawPersonaPath = input.personaPath;
+        return { messages: ["all good"] };
+      },
+    });
+    expect(sawPersonaPath).toBe("/tmp/some/persona.md");
+  });
+});
+
+describe("deliverChilled — a missing persona file never costs a message", () => {
+  test("the real transform + a missing persona: the reply still lands, chilled, with no system", async () => {
+    // No `transform` injected: this drives the REAL chillTransform (with a fake fetch) so the
+    // persona read is on the path. The file does not exist — the send must survive that.
+    const { gateway, posts } = fakeGateway();
+    const missingPersona = join(mkdtempSync(join(tmpdir(), "beckett-gate-")), "gone.md");
+    let sentBody: Record<string, unknown> = {};
+    const fetchFn = (async (_url: string, init?: RequestInit) => {
+      sentBody = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ messages: ["yeah it landed"] }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const id = await deliverChilled(CHAN, "a normal reply that would have been chilled", {
+      gateway,
+      cfg: cfg(),
+      personaPath: missingPersona,
+      transform: (c, i) => chillTransform(c, i, fetchFn),
+    });
+
+    expect(sentBody.system).toBeUndefined(); // degraded to chilltext's own voice…
+    expect(posts).toEqual([
+      { channelId: CHAN, text: "yeah it landed", opts: { singleMessage: true } },
+    ]); // …and the message still went out
+    expect(id).toBe("msg-1");
+  });
+
+  test("a missing persona AND a dead chilltext: the original text still posts once", async () => {
+    const { gateway, posts } = fakeGateway();
+    const missingPersona = join(mkdtempSync(join(tmpdir(), "beckett-gate-")), "gone.md");
+    const fetchFn = (async () => {
+      throw new Error("ECONNREFUSED");
+    }) as unknown as typeof fetch;
+
+    const id = await deliverChilled(CHAN, "a normal reply that would have been chilled", {
+      gateway,
+      cfg: cfg(),
+      personaPath: missingPersona,
+      transform: (c, i) => chillTransform(c, i, fetchFn),
+    });
+
+    expect(posts).toEqual([
+      { channelId: CHAN, text: "a normal reply that would have been chilled", opts: undefined },
+    ]);
+    expect(id).toBe("msg-1");
   });
 });
