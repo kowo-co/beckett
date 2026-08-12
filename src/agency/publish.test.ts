@@ -187,6 +187,45 @@ test("case 2 — repo we already own: integrate remote (fetch+rebase) then push 
   expect(calls.some((c) => c.startsWith("gh pr create"))).toBe(false); // owned repo → no PR
 });
 
+test("#246 — a run's raw checkpoint commits squash into ONE before push, and prUrl is a real commit URL (never the bare repo root)", async () => {
+  const { gh, calls } = cli((j) => {
+    if (j.startsWith("git remote get-url origin")) return fail("no origin");
+    if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}'); // exists
+    if (j.includes("api --method PATCH")) return ok(); // setPublic
+    if (j.includes("--json defaultBranchRef")) return ok("main");
+    if (j.startsWith("git rev-parse --verify --quiet HEAD")) return ok("tipsha0000000");
+    if (j.startsWith("git rev-parse --verify --quiet wk_base")) return ok("basesha0000000");
+    if (j.startsWith("git merge-base --is-ancestor")) return ok(); // base IS an ancestor of the checkpoints
+    if (j.startsWith("git rev-list --count")) return ok("5"); // five raw checkpoint commits, like f9383c0..07d1480
+    if (j.startsWith("git reset --soft basesha0000000")) return ok();
+    if (j.startsWith("git -c commit.gpgsign=false commit")) return ok();
+    if (j.startsWith("git fetch")) return ok(); // remote tip present
+    if (j.startsWith("git rebase")) return ok(); // clean rebase (the squashed commit applies cleanly)
+    if (j.startsWith("git push")) return ok();
+    if (j === "git rev-parse HEAD") return ok("landedsha0000000"); // the sha actually pushed
+    return undefined;
+  });
+  const r = await gh.ensurePublished({
+    slug: "beckett",
+    sourceDir: "/src",
+    ticket: "run-20260812-fix-double-posting",
+    baseSha: "wk_base",
+    commitMessage: "run title\n\nreview summary / mechanism writeup",
+  });
+  expect(r.kind).toBe("pushed");
+  // Squashed BEFORE the fetch/rebase/push — the raw checkpoint history never even reaches them.
+  expect(calls.some((c) => c.startsWith("git reset --soft basesha0000000"))).toBe(true);
+  const commit = calls.find((c) => c.startsWith("git -c commit.gpgsign=false commit"))!;
+  expect(commit).toContain("run title");
+  expect(commit).toContain("review summary / mechanism writeup");
+  // Exactly one squash commit landed — not five raw "checkpoint (wk_...)" commits.
+  expect(calls.filter((c) => c.startsWith("git -c commit.gpgsign=false commit")).length).toBe(1);
+  // prUrl is a REAL, non-root URL (the commit), matching what the Discord publish announcement renders.
+  expect(r.prUrl).toBeDefined();
+  expect(r.prUrl).toContain("/commit/landedsha0000000");
+  expect(r.prUrl).not.toBe(`${"https://github.com"}/0xbeckett/beckett`);
+});
+
 test("case 2 — a non-main target branch publishes to THAT branch and never touches main (OPS-185)", async () => {
   const { gh, calls } = cli((j) => {
     if (j.startsWith("git remote get-url origin")) return fail("no origin");
