@@ -1,0 +1,24 @@
+{
+  "ok": true,
+  "result": {
+    "trustText": null,
+    "liesText": null,
+    "headlessText": "FP ID: 66403abcb93f8b5e9618488962478e5f1bd3c26de713942e2f5fc70901873616 Fuzzy: c88ff25d912e1bfd1c4955a032d49e23ffba07334f75e06f1319000000000000 621.60 ms WebRTC483025bc host connection: blocked foundation/ip: unsupported blocked sdp capabilities: .modal-creep-webrtc-sdp-capabilities:checked ~ .modal",
+    "percentages": [
+      "level: 100%"
+    ]
+  },
+  "profileMode": "persistent",
+  "pages": [
+    {
+      "type": "Page",
+      "pageId": "page-1",
+      "url": "https://abrahamjuliot.github.io/creepjs/",
+      "title": "CreepJS",
+      "closed": false,
+      "active": true
+    }
+  ],
+  "durationMs": 23211.1,
+  "session": "default"
+}

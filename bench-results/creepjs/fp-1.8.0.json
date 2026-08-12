@@ -1,0 +1,28 @@
+{
+  "ok": true,
+  "result": {
+    "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+    "webdriver": false,
+    "platform": "MacIntel",
+    "cores": 12,
+    "deviceMemory": 16,
+    "vendor": "Google Inc.",
+    "webgl": {
+      "ok": false
+    },
+    "body": "FP ID: 66403abcb93f8b5e9618488962478e5f1bd3c26de713942e2f5fc70901873616\nFuzzy: c98ff25d912e1bfd1c4955a032d49e23ffba07334f75e06f1319000000000000\n730.00 ms\nWebRTC483025bc\nhost connection:\nblocked\nfoundation/ip:\nunsupported\nblocked\nsdp capabilities: 19da0cf7\nstun connection:\nblocked\ndevices (1):\naudio\n32.70ms\nTimezoneb258f311\nPacific Daylight Time\nAmerica, Los Angeles\n-27028656422000\n420\n13.60ms\nIntl3f3bdda9\nen-US\nJuly at Pacific Daylight Time\nAmerican English\n21 million\nnext year\n0 or 1\none\n16.90ms\nHeadless25f55725\nchromium: true\n44% like headless: d5b759d8\n0% headless: 52defe05\n0% stealth: 295d4148\nplatform hints:\nArial\n0:73:100:91:91\n\n0.60ms\nResistanceeb6b354a\nprivacy: unknown\nsecurity: unknown\nmode: unknown\nextension: unknown\n364.30ms\nServiceWorkerGlobalScope\nWorkercd13ce88\nlang/timezone:\nen-US (1 US dollar)\nAmerica/Los_Angeles (420)\ngpu:\nunsupported\nuserAgent:\nua reduction\nMozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36\ndevice:\nMac (MacIntel)\nmacOS Catalina\ncores: 12, ram: 16\nuserAgentData:\n\nmacOS 10_15_7 x86\nWebGL\nimages: blocked\npixels: blocked\nparams (0): blocked\nexts (0): blocked\ngpu:\nblocked\n0.60ms\nScreen80ca5143\n...screen: 1800 x 1169\n....avail: 1800 x 1049\ntouch: false\ndepth: 24|24\nviewport:\n1800\n1800\n1800\n1169\n1082\n1082\nbrowser\nlandscape\nlandscape-primary\n2\n66.80ms\nCanvas 2d1103576b\ndata: b8d10171\nrendering: 16% rgba noise \ntextMetrics:\n0.00371005859375\n😀☺⌨...♂▪↪\n223.80ms\nFonts4618f6c8\nload (6/51): Like undefined\napps: unsupported\n\"Liberation Mono\", \"Noto Color Emoji\", \"Noto Sans Canadian Aboriginal Regular\", \"Noto Sans Gunjala Gondi Regular\", \"Noto Sans Masaram Gondi Regular\", \"Noto Serif Yezidi Regular\"\n\n0.012260230000000002\n😀☺⌨\n7.90ms\nDOMRect9bf2ffac\nelems A: 0.2603901939318848\nelems B: 0.2603901939318848\nrange A: 0.2603901939318848\nrange B: 0.2603901939318848\n0.012272478179931642\n😀☺⌨\n15.60ms\nSVGRectfc6981f5\nbBox: 0.06870000438690185\nchar: 0.03741901245117187\nsubs: 0.024975050354003905\ntext: 0.024975050354003905\n0.004897685470581055\n😀☺⌨\n47.50ms\nAudiodaa03d4f\nsum: 124.04347681390936\ngain: -20.538288116455078\nfreq: 164537.64796829224\ntime: 502.5999283068122\ntrap: 3.769892433780342e-7\nunique: 4999\ndata:924ff345\ncopy:924ff345\nvalues: dfc44fc6\nSpeech\nlocal (0): blocked\nremote (0): blocked\nlang (0): blocked\ndefault:\nblocked\n0.90ms\nMediad0ec3aa6\nmimes (10/12): 91101bd8\n10.60ms\nFeatures: 113-115+\nJS/DOM: df08a511 (v114-115)\nCSS: 379baeb6 (v114-115)\nWindow: 3e4205d3 (v113-115)\n13.40ms\nCSS Media Queriesf2176f93\n@media: 7545fad8\nmatchMedia: 7545fad8\ntouch device: unknown\nscreen query: 1800 x 1169\n18.20ms\nComputed Style5f5f5ba8\nkeys (1400): 529fcd92\nsystem styles: 8d98ebe8\n0.60ms\nMathc43a763a\nresults: details\n0.80ms\nError92b51d39\nresults: details\n2.80ms\nWindow2d370278\nkeys (1228): details\n0.30ms\nHTMLElement1b5e16d3\nkeys (346): details\n11.10ms\nNavigator716cc011\nproperties (79): e1c99e3f\ndnt: null\ngpc: unsupported\nlang: en-US (en-US)\nmimeTypes (2): 11003d7c\npermissions (6): b02221aa\nplugins (5): 6488a554\nvendor: Google Inc.\nwebgpu: unsupported\nuserAgentData:\nGoogle Chrome 151 (151.0.7922.108)\nmacOS 10_15_7 x86_64\ndevice:\nMac (MacIntel)\nmacOS Catalina\ncores: 12, ram: 16, touch: 0\nua parsed: Chrome 151\nuserAgent:\nua reduction\nMozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36\nappVersion:\n5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36\nStatus2d2602fc\nnetwork:\nrtt: 100, downlink: 1.45\neffectiveType: 4g\nsaveData: false\nbattery:\nlevel: 100%\ncharging: true\ncharge time: fully charged\ndischarge time: charging\navailable:\nstorage: 10GB\n[10737418240]\nmemory: 4.09GB\n[4395630592]\ntiming res:\n0.09999990463256836\n0.10000002384185791\nstack: 17855\nTests\nWorkers\nIframes\nFonts\nTimezone\nWindow Version\nScreen\nPrototype\nDOMRect\nEmojis\nMath\nMachine\nChrome Extensions\nJS Proxy"
+  },
+  "profileMode": "persistent",
+  "pages": [
+    {
+      "type": "Page",
+      "pageId": "page-1",
+      "url": "https://abrahamjuliot.github.io/creepjs/",
+      "title": "CreepJS",
+      "closed": false,
+      "active": true
+    }
+  ],
+  "durationMs": 23333.3,
+  "session": "default"
+}
