@@ -1107,13 +1107,19 @@ export class RunSupervisor {
       return { status: "skipped" };
     }
     try {
+      // #246: the squashed publish commit is the ONLY place the review summary/mechanism writeup can
+      // land once a direct push carries no PR body — so its message must carry both the run's title
+      // (the subject a `git log`/commit-URL reader sees first) and the review summary (the body). No
+      // invented commitMessage when there's no summary (e.g. a crash-recovery re-attempt whose
+      // reviewer summary didn't survive) — `description: run.title` already covers the squash
+      // fallback title downstream (`GitHubCli.ensurePublished`'s `p.commitMessage ?? title`).
       const result = await this.publishRepo({
         slug: runProjectSlug(run),
         repoRoot: run.workspace ?? this.resolveRepoRoot(run),
         description: run.title,
         ticket: run.id,
         ...(run.baseSha ? { baseSha: run.baseSha } : {}),
-        ...(summary.trim() ? { commitMessage: summary } : {}),
+        ...(summary.trim() ? { commitMessage: `${run.title}\n\n${summary.trim()}` } : {}),
       });
       return await this.recordPublication(run, result);
     } catch (err) {

@@ -915,9 +915,17 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
       // main's), so no fetch/rebase/push ever references the default branch. Absent ⇒ the default
       // branch, byte-for-byte as before.
       const target = this.integrationTarget(p.targetBranch);
-      await this.pushToBranch(p.sourceDir, repo, target ?? undefined, p.baseSha, p.commitMessage ?? title);
+      const sha = await this.pushToBranch(p.sourceDir, repo, target ?? undefined, p.baseSha, p.commitMessage ?? title);
       this.opts.logger.info("published via push to branch", { repo, branch: target ?? "(default)" });
-      return { nameWithOwner: repo, url: `${this.gitHost()}/${repo}`, kind: "pushed" };
+      // #246: `prUrl` is what the Discord publish announcement renders — it must point at something
+      // real (the landed commit), never the bare repo root. `url` stays the repo root for callers
+      // that want the repo itself (e.g. the task registry's publication link).
+      return {
+        nameWithOwner: repo,
+        url: `${this.gitHost()}/${repo}`,
+        kind: "pushed",
+        ...(sha ? { prUrl: `${this.gitHost()}/${repo}/commit/${sha}` } : {}),
+      };
     }
 
     // Case 3 — brand-new project we own: create the empty repo, then push the source tree's HEAD to
@@ -975,6 +983,12 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
    * harmlessly and the push creates it. On a rebase conflict, a dependent worker may be carrying a
    * predecessor's pre-squash commits. In that one shape, retry its recorded *own* base..tip delta as
    * one patch over a freshly fetched remote tip; this avoids replaying already-landed checkpoints.
+   *
+   * Before any of that, {@link squashLocalCommits} collapses `workerBaseSha..HEAD` into ONE commit
+   * carrying `summary` (#246): a feature run's worktree accumulates one raw `checkpoint (wk_…)`
+   * commit per worker turn, and those must never land on the shared branch — squash-on-publish is
+   * the option ro picked over reserving direct-push for release bumps only. Returns the pushed
+   * commit's sha (for a real, non-root `prUrl`), or `undefined` if it couldn't be determined.
    */
   private async pushToBranch(
     cwd: string,
@@ -982,16 +996,20 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
     branch?: string,
     workerBaseSha?: string,
     summary?: string,
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const base = branch ?? await this.defaultBranch(repo);
     const url = `${this.gitHost()}/${repo}.git`;
+    await this.squashLocalCommits(cwd, workerBaseSha, summary);
     const fetch = await this.runner(["git", "fetch", url, base], { cwd, env: this.gitEnv() });
     if (fetch.code === 0) {
       const rebase = await this.runner(["git", "rebase", "FETCH_HEAD"], { cwd, env: this.gitEnv() });
       if (rebase.code !== 0) {
         await this.runner(["git", "rebase", "--abort"], { cwd, env: this.gitEnv() });
         try {
-          if (await this.squashApplyWorkerDelta(cwd, url, base, workerBaseSha, summary)) return await this.gitPush(cwd, repo, "HEAD", base);
+          if (await this.squashApplyWorkerDelta(cwd, url, base, workerBaseSha, summary)) {
+            await this.gitPush(cwd, repo, "HEAD", base);
+            return await this.currentSha(cwd);
+          }
         } catch (err) {
           // A failed apply reports only the remaining files. Do not bury the useful answer under
           // the original 20-commit rebase transcript.
@@ -1004,6 +1022,46 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
       }
     }
     await this.gitPush(cwd, repo, "HEAD", base);
+    return await this.currentSha(cwd);
+  }
+
+  /**
+   * Collapse `workerBaseSha..HEAD` into a single commit whose message is `summary` (falling back to
+   * the run/ticket title callers already pass as `summary` when there's no review write-up) — the
+   * squash-on-publish half of #246. Best-effort and silent: an absent/invalid `workerBaseSha`, a base
+   * that isn't actually an ancestor of HEAD, or a range that's already a single commit all leave the
+   * checkout untouched rather than guess. Runs BEFORE the fetch/rebase below, so the normal path never
+   * even sees the raw checkpoint history.
+   */
+  private async squashLocalCommits(cwd: string, workerBaseSha: string | undefined, summary: string | undefined): Promise<void> {
+    if (!workerBaseSha?.trim()) return;
+    const tip = await this.runner(["git", "rev-parse", "--verify", "--quiet", "HEAD"], { cwd, env: this.gitEnv() });
+    const base = await this.runner(["git", "rev-parse", "--verify", "--quiet", `${workerBaseSha}^{commit}`], { cwd, env: this.gitEnv() });
+    if (tip.code !== 0 || base.code !== 0) return;
+    const baseSha = base.stdout.trim();
+    const tipSha = tip.stdout.trim();
+    if (!baseSha || !tipSha || baseSha === tipSha) return;
+    // A non-ancestor base makes this a guess, not a squash — never gamble with history.
+    const ancestor = await this.runner(["git", "merge-base", "--is-ancestor", baseSha, tipSha], { cwd, env: this.gitEnv() });
+    if (ancestor.code !== 0) return;
+    const count = await this.runner(["git", "rev-list", "--count", `${baseSha}..${tipSha}`], { cwd, env: this.gitEnv() });
+    if (count.code !== 0 || Number(count.stdout.trim() || "0") <= 1) return; // already one commit (or none)
+    const reset = await this.runner(["git", "reset", "--soft", baseSha], { cwd, env: this.gitEnv() });
+    if (reset.code !== 0) return;
+    const commit = await this.runner(
+      ["git", "-c", "commit.gpgsign=false", "commit", "--no-verify", "-m", summary?.trim() || "beckett: squash run checkpoints"],
+      { cwd, env: this.gitEnv() },
+    );
+    if (commit.code !== 0) {
+      // Restore the original tip rather than leave the checkout mid-squash with nothing committed.
+      await this.runner(["git", "reset", "--hard", tipSha], { cwd, env: this.gitEnv() });
+    }
+  }
+
+  /** `HEAD`'s sha, or `undefined` if it can't be read — never throws, callers treat it as best-effort. */
+  private async currentSha(cwd: string): Promise<string | undefined> {
+    const r = await this.runner(["git", "rev-parse", "HEAD"], { cwd, env: this.gitEnv() });
+    return r.code === 0 ? r.stdout.trim() || undefined : undefined;
   }
 
   /**
