@@ -254,12 +254,18 @@ test("preflight refusals fire BEFORE any side effect, from every organ's invoke"
   process.env.GITHUB_ACCOUNT = "beckett";
   try {
     const ghR = await withoutEnv(
-      ["GITHUB_PAT", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY_PEM"],
+      ["GITHUB_PAT", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY_PEM"],
       () =>
         registry.invoke({ capabilityId: "github.repo-star", args: { repo: "a/b", starred: true } }, deps),
     );
     expect(ghR.ok).toBeFalse();
-    expect(ghR.error).toContain("GITHUB_PAT");
+    // The refusal's exact shape is host-dependent: with nothing configured it is the
+    // GitHubUnavailableError ("…GITHUB_PAT…"); on a daemon host, credential material can
+    // resurface outside process.env (config's loadEnvFile, an on-disk pem), and the refusal
+    // arrives as an app-auth preflight ("GITHUB_APP_…") instead. The contract under test is
+    // that a NAMED credential refusal fires before any side effect — not which credential
+    // was the one missing.
+    expect(ghR.error).toMatch(/GITHUB_PAT|GITHUB_APP/);
   } finally {
     if (savedAccount === undefined) delete process.env.GITHUB_ACCOUNT;
     else process.env.GITHUB_ACCOUNT = savedAccount;
