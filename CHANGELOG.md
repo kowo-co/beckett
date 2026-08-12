@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v7.0.6 (2026-08-12)
+
 ### One voice: the chilltext gate's prompt is derived from persona.md
 
 Beckett's voice lived in two places — `~/.beckett/persona.md` (what the Concierge's own system
