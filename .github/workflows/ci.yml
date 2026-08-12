@@ -63,3 +63,8 @@ jobs:
       - run: bun run test
       - if: steps.lanes.outputs.browser == 'true'
         run: bun run test:browser
+      # Every test above forces process isolation (sandbox: "none") for speed, so it never
+      # exercises the bubblewrap wrapper production actually launches through. This is the
+      # one test that doesn't — see src/browser/isolated.sandboxed.test.ts (#250).
+      - if: steps.lanes.outputs.browser == 'true'
+        run: bun run test:browser:sandboxed

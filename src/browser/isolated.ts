@@ -107,6 +107,8 @@ export interface CreateIsolatedBrowserRuntimeDeps {
   cloakCacheDir?: string;
   /** Host Obscura install root bound read-only into the betterwright sandbox. */
   obscuraRoot?: string;
+  /** Host BetterWright Chromium fork artifact root bound read-only into the betterwright sandbox. */
+  chromiumForkRoot?: string;
   repoRoot?: string;
   bwrapPath?: string;
   sandboxExecPath?: string;
@@ -137,6 +139,8 @@ interface BuildBrowserHostLaunchOptions {
   cloakCacheDir?: string;
   /** Host Obscura install root bound read-only into the betterwright sandbox. */
   obscuraRoot?: string;
+  /** Host BetterWright Chromium fork artifact root bound read-only into the betterwright sandbox. */
+  chromiumForkRoot?: string;
   /**
    * Host directory holding the CloakBrowser wrapper shim's `dist/index.js`. Only the
    * betterwright backend loads it; without it the lane keeps CloakBrowser's fabricated
@@ -182,6 +186,50 @@ export function obscuraLaunch(options: {
   return { env: { BETTERWRIGHT_OBSCURA_ROOT: root }, mountRoot: root };
 }
 
+/**
+ * Per-platform binary layout under a BetterWright Chromium fork artifact root, mirroring
+ * betterwright's own (unexported) `PLATFORM_LAYOUT` in `src/chromium-fork.ts`. Duplicated
+ * here rather than imported because the resolver is internal to the package; only the
+ * shipped platforms (macOS arm64, Linux x64, Windows x64) have an artifact at all.
+ */
+const CHROMIUM_FORK_PLATFORM_LAYOUT: Record<string, string> = {
+  "darwin-arm64": join("mac-arm64", "Chromium.app", "Contents", "MacOS", "Chromium"),
+  "linux-x64": join("linux-x64", "chrome"),
+  "win32-x64": join("win-x64", "chrome.exe"),
+};
+
+/**
+ * BetterWright Chromium fork enablement for the sandboxed betterwright host, mirroring
+ * obscuraLaunch above for the same reason: the sandbox sets HOME=/tmp/home, so
+ * betterwright's implicit ~/.betterwright/chromium discovery can never find the host
+ * install, and BETTERWRIGHT_CHROMIUM_ROOT never survives bwrap's --clearenv unless it is
+ * both re-set with --setenv and its target directory is bound into the sandbox's mount
+ * namespace. When the pinned fork artifact exists on the host we point
+ * BETTERWRIGHT_CHROMIUM_ROOT at it (and bind it read-only in bwrap); explicit roots are
+ * STRICT in betterwright (a configured-but-missing binary throws), which is why the env
+ * var is gated on the binary existing. When it does not exist we set nothing: implicit
+ * discovery inside the sandbox finds nothing and betterwright falls back to managed
+ * CloakBrowser. A root configured as "off" keeps the CloakBrowser-only path as an
+ * operator kill switch.
+ */
+export function chromiumForkLaunch(options: {
+  chromiumRoot: string;
+  platform?: NodeJS.Platform;
+  arch?: string;
+  exists?: (path: string) => boolean;
+}): { env: Record<string, string>; mountRoot: string | null } {
+  const platform = options.platform ?? process.platform;
+  const arch = options.arch ?? process.arch;
+  const exists = options.exists ?? existsSync;
+  const root = options.chromiumRoot.trim();
+  if (root.toLowerCase() === "off") return { env: { BETTERWRIGHT_CHROMIUM_PATH: "off" }, mountRoot: null };
+  const layout = CHROMIUM_FORK_PLATFORM_LAYOUT[`${platform}-${arch}`];
+  if (!layout) return { env: {}, mountRoot: null };
+  const binary = join(root, layout);
+  if (!exists(binary)) return { env: {}, mountRoot: null };
+  return { env: { BETTERWRIGHT_CHROMIUM_ROOT: root }, mountRoot: root };
+}
+
 /** Pure command builder, exported so Linux/macOS sandbox policy remains unit-testable. */
 export function buildBrowserHostLaunch(options: BuildBrowserHostLaunchOptions): BrowserHostLaunch {
   const repoRoot = resolve(options.repoRoot);
@@ -220,6 +268,9 @@ export function buildBrowserHostLaunch(options: BuildBrowserHostLaunchOptions): 
   const obscura = options.backend === "betterwright" && options.obscuraRoot
     ? obscuraLaunch({ obscuraRoot: options.obscuraRoot, platform: options.platform })
     : { env: {}, mountRoot: null };
+  const chromiumFork = options.backend === "betterwright" && options.chromiumForkRoot
+    ? chromiumForkLaunch({ chromiumRoot: options.chromiumForkRoot, platform: options.platform })
+    : { env: {}, mountRoot: null };
   // The shim reads the budget from the environment and appends CloakBrowser's
   // --fingerprint-storage-quota, the only switch that moves what
   // navigator.storage.estimate() reports. Inside bubblewrap the shim is bound beside
@@ -253,6 +304,7 @@ export function buildBrowserHostLaunch(options: BuildBrowserHostLaunchOptions): 
     BECKETT_BROWSER_BACKEND: options.backend ?? "playwright",
     ...cloakEnv,
     ...obscura.env,
+    ...chromiumFork.env,
     ...storageEnv(false),
     ...leaseEnv,
     ...(encodedBudgets ? { BECKETT_BROWSER_HOST_BUDGETS: encodedBudgets } : {}),
@@ -313,6 +365,7 @@ export function buildBrowserHostLaunch(options: BuildBrowserHostLaunchOptions): 
     if (encodedBudgets) args.push("--setenv", "BECKETT_BROWSER_HOST_BUDGETS", encodedBudgets);
     for (const [name, value] of Object.entries(cloakEnv)) args.push("--setenv", name, value);
     for (const [name, value] of Object.entries(obscura.env)) args.push("--setenv", name, value);
+    for (const [name, value] of Object.entries(chromiumFork.env)) args.push("--setenv", name, value);
     for (const [name, value] of Object.entries(storageEnv(true))) args.push("--setenv", name, value);
     for (const [name, value] of Object.entries(leaseEnv)) args.push("--setenv", name, value);
     args.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp");
@@ -354,6 +407,10 @@ export function buildBrowserHostLaunch(options: BuildBrowserHostLaunchOptions): 
     // Obscura's pinned binary, read-only at its host path (BETTERWRIGHT_OBSCURA_ROOT
     // points here). obscuraLaunch only emits a mountRoot when the binary exists.
     if (obscura.mountRoot) args.push("--ro-bind", obscura.mountRoot, obscura.mountRoot);
+    // BetterWright Chromium fork artifact root, read-only at its host path
+    // (BETTERWRIGHT_CHROMIUM_ROOT points here). chromiumForkLaunch only emits a
+    // mountRoot when the binary exists, mirroring Obscura above.
+    if (chromiumFork.mountRoot) args.push("--ro-bind", chromiumFork.mountRoot, chromiumFork.mountRoot);
     // Read-only, and beside the host bundle rather than under /repo/src, so the shim
     // resolves `cloakbrowser` from the node_modules already bound below.
     if (options.backend === "betterwright" && options.cloakShimDir) {
@@ -388,6 +445,7 @@ export function buildBrowserHostLaunch(options: BuildBrowserHostLaunchOptions): 
         browserRoot,
         cloakCacheDir: options.backend === "betterwright" ? options.cloakCacheDir : undefined,
         obscuraRoot: obscura.mountRoot ?? undefined,
+        chromiumForkRoot: chromiumFork.mountRoot ?? undefined,
         profileDir: options.settings.profileDir,
         artifactsRoot: options.settings.artifactsRoot,
         attachmentRoots: attachmentRoots(options.settings),
@@ -492,6 +550,9 @@ export function createIsolatedBrowserRuntime(deps: CreateIsolatedBrowserRuntimeD
   // Mirror betterwright's own Obscura resolution (BETTERWRIGHT_OBSCURA_ROOT, else
   // ~/.betterwright/obscura); obscuraLaunch gates the env var on the binary existing.
   const obscuraRoot = deps.obscuraRoot ?? (process.env.BETTERWRIGHT_OBSCURA_ROOT?.trim() || join(homedir(), ".betterwright", "obscura"));
+  // Mirror betterwright's own Chromium fork resolution (BETTERWRIGHT_CHROMIUM_ROOT, else
+  // ~/.betterwright/chromium); chromiumForkLaunch gates the env var on the binary existing.
+  const chromiumForkRoot = deps.chromiumForkRoot ?? (process.env.BETTERWRIGHT_CHROMIUM_ROOT?.trim() || join(homedir(), ".betterwright", "chromium"));
   const repoRoot = deps.repoRoot ?? resolve(MODULE_DIR, "../..");
 
   let child: HostChild | null = null;
@@ -676,6 +737,7 @@ export function createIsolatedBrowserRuntime(deps: CreateIsolatedBrowserRuntimeD
       chromiumExecutable,
       cloakCacheDir,
       obscuraRoot,
+      chromiumForkRoot,
       cloakShimDir,
       repoRoot,
       bwrapPath: deps.bwrapPath,
@@ -1135,6 +1197,7 @@ function macSandboxProfile(paths: {
   browserRoot: string;
   cloakCacheDir?: string;
   obscuraRoot?: string;
+  chromiumForkRoot?: string;
   profileDir: string;
   artifactsRoot: string;
   attachmentRoots: string[];
@@ -1152,6 +1215,7 @@ function macSandboxProfile(paths: {
     paths.browserRoot,
     ...(paths.cloakCacheDir ? [paths.cloakCacheDir] : []),
     ...(paths.obscuraRoot ? [paths.obscuraRoot] : []),
+    ...(paths.chromiumForkRoot ? [paths.chromiumForkRoot] : []),
     paths.profileDir,
     paths.artifactsRoot,
     ...paths.attachmentRoots,
