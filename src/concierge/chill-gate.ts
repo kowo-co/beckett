@@ -29,9 +29,12 @@ export interface DeliverChilledOptions {
   /** Force one bubble (the early-ack seam: a progress line must stay one atomic message). */
   single?: boolean;
   /**
-   * Called for every bubble AFTER the first, so the shared context record stays coherent when a
-   * chilled reply becomes several Discord messages. The caller still records the first bubble
-   * itself, exactly as it did before chilltext existed — this only covers what it can't see.
+   * Called once for every message this delivery actually posts (each chilled bubble, or the
+   * single bypass/fallback post), so the shared context record stays exactly in step with what
+   * landed in Discord. Owned entirely by `deliverChilled` — a caller that ALSO records the
+   * returned id against its own full pre-chill `text` duplicates whatever this already recorded
+   * for the first bubble under that same id (the OPS-80 "mega message" bug: one store entry
+   * claiming the whole reply, sitting alongside the individual bubbles it was chilled into).
    */
   recordPost?: (channelId: string, text: string, messageId: string | null) => void;
   /** Test seam: skip the real delay. Defaults to `Bun.sleep`. */
@@ -58,7 +61,9 @@ export async function deliverChilled(
   const transform = opts.transform ?? chillTransform;
 
   if (shouldBypassChill(text, cfg)) {
-    return gateway.post(channelId, text, postOpts);
+    const messageId = await gateway.post(channelId, text, postOpts);
+    recordPost?.(channelId, text, messageId);
+    return messageId;
   }
 
   let result: ChillTransformResult | null = null;
@@ -72,7 +77,9 @@ export async function deliverChilled(
   }
 
   if (!result) {
-    return gateway.post(channelId, text, postOpts);
+    const messageId = await gateway.post(channelId, text, postOpts);
+    recordPost?.(channelId, text, messageId);
+    return messageId;
   }
 
   let firstId: string | null = null;
@@ -81,11 +88,8 @@ export async function deliverChilled(
     const bubble = result.messages[i]!;
     const bubbleOpts: ReplyOptions = { ...(i === 0 ? postOpts : {}), singleMessage: true };
     const messageId = await gateway.post(channelId, bubble, bubbleOpts);
-    if (i === 0) {
-      firstId = messageId;
-    } else {
-      recordPost?.(channelId, bubble, messageId);
-    }
+    if (i === 0) firstId = messageId;
+    recordPost?.(channelId, bubble, messageId);
   }
   return firstId!;
 }

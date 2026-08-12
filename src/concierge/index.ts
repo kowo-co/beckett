@@ -5612,11 +5612,12 @@ export class Concierge {
                     gateway: this.gateway,
                     cfg: this.config.concierge.chilltext,
                     logger: this.log,
+                    // OPS-80: a CLI reply is Beckett speaking in a channel — `deliverChilled` records
+                    // every message it actually posts (one entry per bubble, or one plain entry on
+                    // bypass); recording `text` again here on top of that produced the "mega message"
+                    // duplicate (a full-text entry sitting alongside the individual bubbles).
                     recordPost: (chId, bubbleText, bubbleId) => this.recordBeckettPost(chId, bubbleText, bubbleId),
                   });
-                  // OPS-80: a CLI reply is Beckett speaking in a channel — into the shared record it goes
-                  // as one logical entry even when the native chunker sends several messages.
-                  this.recordBeckettPost(channelId, text, messageId);
                   if (claimsActiveTurn && active) {
                     // The FIRST CLI reply IS the turn's ack. A later reply in the same turn (a wrap-up
                     // after filing) must NOT replace it — dedupe and correlation key on the first.
@@ -6438,6 +6439,10 @@ export class Concierge {
         // of them, that is several answers — each posts under the message it actually answers.
         // Anything ambiguous returns null and delivers whole, exactly as it always did.
         const segments = splitByAddressee(text, this.burstAnchors(m, windowEntries));
+        // OPS-80: our own reply joins the shared record — `deliverChilled`/`deliverPerAddressee`
+        // record every message they actually post via `recordPost`, one entry per bubble/segment,
+        // so nothing further is recorded here (a second, full-text record on top of that was the
+        // "mega message" duplicate bug).
         const ackId = segments
           ? await this.deliverPerAddressee(m, segments, turnContent)
           : await deliverChilled(m.channelId, text, {
@@ -6448,10 +6453,6 @@ export class Concierge {
               logger: this.log,
               recordPost: (chId, bubbleText, bubbleId) => this.recordBeckettPost(chId, bubbleText, bubbleId),
             });
-        // OPS-80: our own reply joins the shared record (a CLI reply was already recorded on the
-        // bus path — this covers the auto-post half, so exactly one entry either way). A split
-        // delivery recorded each of its segments as it posted them.
-        if (!segments) this.recordBeckettPost(m.channelId, text, ackId);
         mention.ackMessageId = ackId;
       } else if (mention.superseded && !mention.repliedViaCli) {
         // This turn was killed mid-answer by a superseding message (issue #138): cancelLiveTurn
@@ -6572,6 +6573,9 @@ export class Concierge {
     });
     let firstId: string | null = null;
     for (const segment of segments) {
+      // `deliverChilled` records every message it actually posts for this segment (one entry per
+      // bubble it was chilled into, or one plain entry on bypass) — recording `segment.text` again
+      // here on top of that duplicated the segment's first bubble under its own id.
       const postedId = await deliverChilled(m.channelId, segment.text, {
         input: turnContent || undefined,
         postOpts: {
@@ -6583,8 +6587,6 @@ export class Concierge {
         logger: this.log,
         recordPost: (chId, bubbleText, bubbleId) => this.recordBeckettPost(chId, bubbleText, bubbleId),
       });
-      // Each segment is its own message in the room, so each is its own line in the record.
-      this.recordBeckettPost(m.channelId, segment.text, postedId);
       firstId ??= postedId;
     }
     return firstId!;
@@ -7063,6 +7065,9 @@ export class Concierge {
         postedId = claim.ackMessageId; // the bus path already recorded this post (OPS-80)
       } else {
         // Restyled through chilltext when enabled — fail-open to the exact plain post below.
+        // OPS-80: an ambient interjection is a real Beckett post in the channel; `deliverChilled`
+        // records every message it actually posts via `recordPost`, so nothing further is
+        // recorded here (a second, full-text record on top of that was the "mega message" bug).
         postedId = await deliverChilled(turn.channelId, reply, {
           input: turn.transcript.at(-1)?.content || undefined,
           gateway: this.gateway,
@@ -7070,8 +7075,6 @@ export class Concierge {
           logger: this.log,
           recordPost: (chId, bubbleText, bubbleId) => this.recordBeckettPost(chId, bubbleText, bubbleId),
         });
-        // OPS-80: an ambient interjection is a real Beckett post in the channel — record it.
-        this.recordBeckettPost(turn.channelId, reply, postedId);
       }
       if (turn.kind === "candidate" && !turn.engaged) {
         // Only a COLD interjection arms the offer/consent machinery. An engaged continuation is
@@ -7208,11 +7211,12 @@ export class Concierge {
 
   /**
    * Record one of Beckett's own channel posts into the shared record (OPS-80) — the half of every
-   * exchange the old ring buffer omitted entirely. Called from the three meaningful post sites
-   * (mention auto-post, `discord.reply` bus path, ambient post); fast-acks, denials, and error
-   * apologies are deliberately NOT recorded (noise — and the session already knows it said them).
-   * The native chunker may split a post into several Discord messages; the record keeps ONE entry
-   * with the full text — it is a model-facing record, not a Discord mirror (§8).
+   * exchange the old ring buffer omitted entirely. Called once per message actually posted (via
+   * `deliverChilled`'s `recordPost`, which fires for every bubble a chilled reply becomes, or once
+   * for a plain bypass post) — never separately by the caller with the pre-chill full text, or the
+   * store ends up with a "mega" entry duplicating what the individual bubbles already recorded.
+   * Fast-acks, denials, and error apologies are deliberately NOT recorded (noise — and the session
+   * already knows it said them).
    */
   private recordBeckettPost(channelId: string, text: string, messageId: string | null): void {
     const content = text.trim();

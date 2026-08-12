@@ -155,7 +155,12 @@ describe("deliverChilled — multi-bubble posting order/opts", () => {
     expect(calls).toEqual([]);
   });
 
-  test("bubbles after the first are recorded via recordPost; the first is left to the caller", async () => {
+  test("every bubble is recorded via recordPost, including the first — the caller records nothing extra", async () => {
+    // Regression (ro's "mega message" report, aug 11-12): the old contract left the FIRST bubble
+    // for the caller to record, and every real caller recorded it against the full pre-chill
+    // `text` instead of the bubble's own text — producing a store entry that re-concatenated
+    // content already recorded correctly for the later bubbles. `deliverChilled` now owns 100% of
+    // the recording, one call per message it actually posted, each with that message's own text.
     const { gateway } = fakeGateway();
     const recorded: Array<[string, string, string | null]> = [];
     await deliverChilled(CHAN, "the original long reply", {
@@ -166,9 +171,23 @@ describe("deliverChilled — multi-bubble posting order/opts", () => {
       recordPost: (channelId, text, messageId) => recorded.push([channelId, text, messageId]),
     });
     expect(recorded).toEqual([
+      [CHAN, "hey", "msg-1"],
       [CHAN, "so about that", "msg-2"],
       [CHAN, "done!", "msg-3"],
     ]);
+    // Never the full pre-chill text under any id — that's the "mega message" duplicate.
+    expect(recorded.some(([, text]) => text === "the original long reply")).toBe(false);
+  });
+
+  test("a bypass post is recorded once, with the exact text posted", async () => {
+    const { gateway } = fakeGateway();
+    const recorded: Array<[string, string, string | null]> = [];
+    await deliverChilled(CHAN, "a normal reply here", {
+      gateway,
+      cfg: cfg({ enabled: false }),
+      recordPost: (channelId, text, messageId) => recorded.push([channelId, text, messageId]),
+    });
+    expect(recorded).toEqual([[CHAN, "a normal reply here", "msg-1"]]);
   });
 
   test("single:true is forwarded to the transform call (the ack seam)", async () => {
