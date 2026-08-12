@@ -284,7 +284,9 @@ The style contract is unchanged from v0, because it worked:
   schema (`beckett config print-default`), so it cannot drift. The same posture applies at the
   MCP boundary: reject bad input, never silently degrade.
 - **No new enum states, ever.** New semantics are rows, `hold` strings, or event kinds.
-- **Gates before commit:** `bun x tsc --noEmit` clean and `bun test` green. The deploy script
-  typechecks before restart — prod never restarts onto broken code.
+- **Gates before commit:** `bun x tsc --noEmit` clean and `bun run test` green (the fast lane;
+  add `bun run test:browser` when touching `src/browser/**`, `bun run test:all` for everything).
+  The deploy script typechecks and runs the fast lane on the prod host before restart — prod
+  never restarts onto broken code.
 - **Doctrine is lazy.** Trigger-scoped skills, not monolithic prompts; rules are cut by
   inventory-audit (every imperative traced to its new home), never by vibes.
