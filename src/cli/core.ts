@@ -1265,6 +1265,10 @@ export async function runDeployState(argv: string[]): Promise<void> {
   const data = (res.data ?? {}) as Record<string, any>;
   const ledger = readUptime(uptimeLedgerPath(paths.beckettDir));
   const daemonBootedAt = typeof data.bootedAt === "string" ? data.bootedAt : null;
+  // Exact string equality, no tolerance window: the daemon's `bootedAt` and the ledger's boot
+  // line are now the SAME value by construction (both trace back to the one `recordBoot` call in
+  // `src/shell/main.ts` boot — see its comment), so a real mismatch means the ledger and the live
+  // process have actually diverged and is worth surfacing verbatim, not fuzzed away.
   const ledgerCorroborates = Boolean(daemonBootedAt && ledger.bootedAt === daemonBootedAt);
   const payload = {
     ok: true,

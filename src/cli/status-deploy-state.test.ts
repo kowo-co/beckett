@@ -13,6 +13,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { serveBus } from "../shell/control-bus.ts";
+import { recordBoot, uptimeLedgerPath } from "../uptime.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -26,6 +27,20 @@ const FAKE_STATUS = {
   bootedAt: "2026-08-12T20:51:45.000Z",
   uptimeSecs: 90,
 };
+
+/**
+ * Writes the ledger's boot line through the REAL `recordBoot` code path (the one `src/shell/
+ * main.ts` calls at boot) and returns the exact `at` it produced, instead of hand-writing a JSONL
+ * line string-equal to a separately-chosen mocked bus payload. A prior version of this file did
+ * the latter, which let `ledgerCorroborates` pass in CI while the real daemon (two independent
+ * `Date.now()` reads) could never agree — see issue #248's review finding 1. Callers feed this
+ * `at` back into their mocked bus `bootedAt`, mirroring how main.ts's status provider now threads
+ * the SAME captured instant through rather than sampling a second clock.
+ */
+function realBootLedgerLine(dir: string): string {
+  const events = recordBoot(uptimeLedgerPath(dir));
+  return events[events.length - 1]!.at;
+}
 
 async function statusCli(args: string[], dir: string): Promise<{ exit: number; stdout: string; stderr: string }> {
   const proc = Bun.spawn(
@@ -49,8 +64,14 @@ async function statusCli(args: string[], dir: string): Promise<{ exit: number; s
 test("deploy-state answers from the daemon's own reply, corroborated by a matching ledger boot line", async () => {
   const dir = mkdtempSync(join(tmpdir(), "beckett-deploy-state-"));
   dirs.push(dir);
-  const stop = serveBus(join(dir, "control.sock"), () => ({ ok: true, data: FAKE_STATUS }));
-  writeFileSync(join(dir, "uptime.jsonl"), `\n${JSON.stringify({ kind: "boot", at: FAKE_STATUS.bootedAt })}\n`);
+  // The ledger's boot line comes from the real `recordBoot` path; the mocked bus reply then
+  // reuses that SAME instant, exactly as main.ts's status provider now does at daemon boot — not
+  // a hand-written literal chosen to match. This is what actually pins finding 1's fix: if the
+  // daemon ever went back to sampling a second `Date.now()` for its own `bootedAt`, the two
+  // values here would have to be independently kept in sync to still pass, same as production.
+  const bootedAt = realBootLedgerLine(dir);
+  const status = { ...FAKE_STATUS, bootedAt };
+  const stop = serveBus(join(dir, "control.sock"), () => ({ ok: true, data: status }));
   try {
     const { exit, stdout } = await statusCli([], dir);
     expect(exit).toBe(0);
@@ -61,11 +82,33 @@ test("deploy-state answers from the daemon's own reply, corroborated by a matchi
       version: "7.0.5",
       commit: "abc1234",
       pid: 4242,
-      bootedAt: FAKE_STATUS.bootedAt,
+      bootedAt,
       uptimeSecs: 90,
-      ledgerBootedAt: FAKE_STATUS.bootedAt,
+      ledgerBootedAt: bootedAt,
       ledgerCorroborates: true,
     });
+  } finally {
+    stop();
+  }
+});
+
+test("deploy-state: a daemon that reverts to a second, independent boot-time clock read no longer corroborates", async () => {
+  // Pins the regression directly: if the daemon's reply carries a bootedAt even 1ms off from
+  // what recordBoot actually wrote — the exact shape of the pre-fix two-clock bug — the CLI must
+  // report the mismatch, never paper over it with a tolerance window.
+  const dir = mkdtempSync(join(tmpdir(), "beckett-deploy-state-"));
+  dirs.push(dir);
+  const ledgerBootedAt = realBootLedgerLine(dir);
+  const driftedBootedAt = new Date(Date.parse(ledgerBootedAt) + 1).toISOString();
+  const status = { ...FAKE_STATUS, bootedAt: driftedBootedAt };
+  const stop = serveBus(join(dir, "control.sock"), () => ({ ok: true, data: status }));
+  try {
+    const { exit, stdout } = await statusCli([], dir);
+    expect(exit).toBe(0);
+    const data = JSON.parse(stdout);
+    expect(data.ledgerCorroborates).toBe(false);
+    expect(data.bootedAt).toBe(driftedBootedAt);
+    expect(data.ledgerBootedAt).toBe(ledgerBootedAt);
   } finally {
     stop();
   }
