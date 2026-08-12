@@ -8,6 +8,9 @@
   "scripts": {
     "v4": "bun src/shell/main.ts",
     "beckett": "bun src/cli/beckett.ts",
+    "test": "bun test --path-ignore-patterns src/browser/runtime.test.ts --path-ignore-patterns src/browser/isolated.test.ts --path-ignore-patterns src/browser/agent.test.ts",
+    "test:browser": "bun test ./src/browser/runtime.test.ts ./src/browser/isolated.test.ts ./src/browser/agent.test.ts",
+    "test:all": "bun test",
     "browser:smoke": "bun scripts/ops/browser-smoke.ts",
     "shot": "bun scripts/shot.ts",
     "browser:bench": "bun scripts/bench/browser-lane.ts",
@@ -24,8 +27,7 @@
     "memory:bench": "bun scripts/bench/recall-memory.ts",
     "recall:bench": "bun scripts/bench/recall-relevance.ts",
     "recall:agent-bench": "bun scripts/bench/recall-agent.ts",
-    "typecheck": "bun x tsc --noEmit",
-    "test": "bun test"
+    "typecheck": "bun x tsc --noEmit"
   },
   "dependencies": {
     "@discordjs/voice": "^0.19.2",

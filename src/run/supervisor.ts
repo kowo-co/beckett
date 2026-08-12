@@ -85,7 +85,7 @@ import {
 import { appendSpendRecord, readSpendLedger, spendForTicket, type SpendOutcome } from "../spend.ts";
 import { resolveProjectOwner, selfProjectSlug } from "../github/owner.ts";
 import { specGateSpec } from "../hooks/registry.ts";
-import { parseSpecChecklist, renderSpecScaffold, type ParsedSpecChecklist } from "./spec-file.ts";
+import { parseSpecChecklist, renderSpecScaffold, specRunId, type ParsedSpecChecklist } from "./spec-file.ts";
 import { runAsWorkItem } from "./adapter.ts";
 import type { RunStore } from "./store.ts";
 import type { Run, RunStage, RunStateChange } from "./types.ts";
@@ -598,7 +598,13 @@ export class RunSupervisor {
     const path = join(run.workspace, "spec.md");
     if (!existsSync(path)) return undefined;
     try {
-      return parseSpecChecklist(readFileSync(path, "utf8"));
+      const text = readFileSync(path, "utf8");
+      // A spec stamped with ANOTHER run's id must never feed this run's briefs: a worktree cut
+      // from a base that carries a committed spec.md would otherwise hand a review stage the
+      // previous run's acceptance criteria (which is exactly what happened on 2026-08-12).
+      const owner = specRunId(text);
+      if (owner !== undefined && owner !== run.id) return undefined;
+      return parseSpecChecklist(text);
     } catch {
       return undefined;
     }
@@ -633,17 +639,31 @@ export class RunSupervisor {
     }
 
     // 3. The spec scaffold — written BEFORE the worker exists, so its very first read of
-    //    spec.md finds the goal and the placeholder the Stop hook will hold it to.
+    //    spec.md finds the goal and the placeholder the Stop hook will hold it to. "Already
+    //    exists" is NOT enough to skip the write: past runs committed their spec.md, so a fresh
+    //    worktree can be born holding the PREVIOUS run's spec — the bare existsSync guard here
+    //    is how two 2026-08-12 review stages got another run's acceptance criteria. Replace any
+    //    spec stamped with a different run id; leave a file stamped with THIS run (or unstamped —
+    //    possibly worker-authored, not provably foreign) alone.
     const specPath = join(workspace, "spec.md");
-    if (!existsSync(specPath)) {
-      try {
+    try {
+      const existing = existsSync(specPath) ? readFileSync(specPath, "utf8") : undefined;
+      const owner = existing === undefined ? undefined : specRunId(existing);
+      const foreign = existing === undefined || (owner !== undefined && owner !== run.id);
+      if (foreign) {
+        if (owner !== undefined) {
+          this.logger.warn("worktree spec.md belonged to another run — rescaffolding", {
+            run: run.id,
+            foundRun: owner,
+          });
+        }
         writeFileSync(specPath, renderSpecScaffold(run), "utf8");
-      } catch (err) {
-        this.logger.warn("spec.md scaffold write failed (worker still starts)", {
-          run: run.id,
-          error: (err as Error).message,
-        });
       }
+    } catch (err) {
+      this.logger.warn("spec.md scaffold write failed (worker still starts)", {
+        run: run.id,
+        error: (err as Error).message,
+      });
     }
 
     // 4. The review diff base: HEAD-before-any-new-work, captured once per run.
@@ -1232,6 +1252,20 @@ export class RunSupervisor {
       } catch (err) {
         this.logger.warn("worker reap failed during cancel", { run: runId, error: String(err) });
       }
+    }
+    // Re-read RIGHT before the terminal write: the entry check above ran on a stale snapshot, and
+    // the awaits in between are wide enough for an in-flight publish to finish. A run that reached
+    // its own real terminal while we were reaping keeps that outcome — a late cancel must never
+    // rewrite a shipped run to "cancelled" (the runs.json half of #228: the spatial-3d run
+    // deployed, passed review 14/14, and was still recorded cancelled).
+    const fresh = this.store.get(runId);
+    if (fresh && (fresh.state === "done" || fresh.state === "failed")) {
+      this.logger.warn("cancel arrived after the run reached its own terminal — keeping it", {
+        run: runId,
+        state: fresh.state,
+      });
+      this.pump();
+      return "already-terminal";
     }
     await this.patchRun(runId, { state: "cancelled", error: reason });
     this.pump();

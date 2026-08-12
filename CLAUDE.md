@@ -1,6 +1,9 @@
 # beckett
 
-Bun + TypeScript daemon. Repo test command: `bun test`. Typecheck: `bun x tsc --noEmit`.
+Bun + TypeScript daemon. Repo test command: `bun run test` (fast lane, ~25s — skips the three
+browser e2e files). Typecheck: `bun x tsc --noEmit`. When you touch `src/browser/**`, also run
+`bun run test:browser` (real Chromium, ~2min). `bun run test:all` is the full suite; note that a
+bare `bun test` bypasses the script and always runs everything.
 
 ## Model selection for spawned agents
 

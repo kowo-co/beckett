@@ -245,13 +245,18 @@ test("preflight refusals fire BEFORE any side effect, from every organ's invoke"
   expect(mailR.ok).toBeFalse();
   expect(mailR.error).toContain("AGENTMAIL_API_KEY");
 
-  // repo-star is FREE (no origin gate), so it reaches the PAT preflight in buildGh. Provide an
-  // account so identity resolution gets PAST the account check and lands on the PAT preflight.
+  // repo-star is FREE (no origin gate), so it reaches the credential preflight in buildGh. Provide
+  // an account so identity resolution gets PAST the account check and lands on the preflight. Strip
+  // the WHOLE credential chain, not just the PAT: on a box where the GitHub App is configured
+  // (every prod worker), leaving GITHUB_APP_* in place mints a real installation token and turns
+  // this into a live star call against the fake repo — a 404 instead of the refusal.
   const savedAccount = process.env.GITHUB_ACCOUNT;
   process.env.GITHUB_ACCOUNT = "beckett";
   try {
-    const ghR = await withoutEnv(["GITHUB_PAT"], () =>
-      registry.invoke({ capabilityId: "github.repo-star", args: { repo: "a/b", starred: true } }, deps),
+    const ghR = await withoutEnv(
+      ["GITHUB_PAT", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY_PEM"],
+      () =>
+        registry.invoke({ capabilityId: "github.repo-star", args: { repo: "a/b", starred: true } }, deps),
     );
     expect(ghR.ok).toBeFalse();
     expect(ghR.error).toContain("GITHUB_PAT");

@@ -472,6 +472,32 @@ export async function runFinish(argv: string[]): Promise<void> {
     committed = true;
   }
 
+  // ── already landed? ──────────────────────────────────────────────────────────────────────
+  // Re-running finish on a branch whose commits are all on the target used to die inside the
+  // landing engine ("this work is already merged, or nothing was committed") — a hard failure
+  // for a state that is actually success, and exactly what the concierge kept hitting when its
+  // belief about ship-state lagged reality (2026-08-12, twice). Answer the question cheaply
+  // HERE: when origin/<base> already has every commit on this branch, exit clean without
+  // landing, deploying, or touching GitHub. (A commit made just above makes the branch ahead
+  // again, so freshly committed work never takes this exit.)
+  const fetched = await git(["fetch", "origin", opts.base], repoRoot);
+  if (fetched.code === 0) {
+    const ahead = await git(["log", `origin/${opts.base}..HEAD`, "--oneline"], repoRoot);
+    if (ahead.code === 0 && !ahead.stdout.trim()) {
+      step(`nothing to land — origin/${opts.base} already has every commit on ${branch}`);
+      out({
+        ok: true,
+        repo,
+        branch,
+        base: opts.base,
+        committed,
+        alreadyLanded: true,
+        deploy: { ran: false, reason: "nothing to land — the branch is already on the target" },
+        audit,
+      });
+    }
+  }
+
   // Only Beckett's own repo ships a guarded deploy. Resolving that here (not after the merge) is
   // what lets the preflights below run ONLY when a deploy is actually going to happen — and lets
   // them fail while nothing has been pushed or merged yet.

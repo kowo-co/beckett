@@ -48,3 +48,6 @@ screenshots/
 
 # task-141 verification scratch (never a deliverable)
 .scratch/
+
+# per-run worker state — a committed spec.md poisons the NEXT run cut from this base
+/spec.md

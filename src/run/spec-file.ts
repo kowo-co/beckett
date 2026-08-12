@@ -61,6 +61,18 @@ export function renderSpecScaffold(run: Pick<Run, "id" | "title" | "branch" | "c
   );
 }
 
+/** Matches the scaffold's `> run: <id> · …` stamp line. */
+const RUN_STAMP_RE = /^>\s*run:\s*(\S+)/m;
+
+/**
+ * Which run a spec.md belongs to, from the scaffold's `> run: <id>` stamp. `undefined` when the
+ * file carries no stamp (hand-written spec, or a worker that rewrote the header) — callers must
+ * treat unstamped as "not provably foreign", never as a match.
+ */
+export function specRunId(text: string): string | undefined {
+  return RUN_STAMP_RE.exec(text)?.[1];
+}
+
 /** Matches `- [ ] text` / `* [x] text` (any leading indent — nested bullets count too). */
 const CHECKLIST_ITEM_RE = /^\s*[-*]\s+\[([ xX])\]\s*(.*)$/;
 const CHECKLIST_HEADING_RE = /^##\s+checklist\s*$/i;
@@ -73,10 +85,17 @@ const SECTION_HEADING_RE = /^##\s+/;
  * worker's own scratch) is not a checklist item. Case-insensitive `x`; indentation/nesting under
  * the heading is tolerated and every nested box is counted. No `## Checklist` heading at all
  * yields an empty, non-placeholder result (`total: 0, done: 0, hasPlaceholder: false`).
+ *
+ * When the file holds SEVERAL `## Checklist` headings, the LAST one wins: a worker that appends
+ * its own checklist below an inherited/stale one must have its own parsed, not the leftover —
+ * the stale-first read is how a previous run's criteria once reached a review brief.
  */
 export function parseSpecChecklist(text: string): ParsedSpecChecklist {
   const lines = text.split(/\r?\n/);
-  const headingIndex = lines.findIndex((line) => CHECKLIST_HEADING_RE.test(line.trim()));
+  let headingIndex = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (CHECKLIST_HEADING_RE.test((lines[i] ?? "").trim())) headingIndex = i;
+  }
   const items: SpecChecklistItem[] = [];
 
   if (headingIndex !== -1) {

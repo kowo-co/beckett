@@ -41,6 +41,14 @@ describe("validateCasting (strict — a human-typed cast is refused, not degrade
 
   test("ultracode is claude-only", () => {
     expect(validateCasting({ implement: { harness: "pi", effort: "ultracode" } })).not.toEqual([]);
+  });
+
+  test("a model absent from the rate table is refused (typos / unpriced ids never reach a worker)", () => {
+    const errors = validateCasting({ implement: { harness: "claude", model: "claude-opsu-5" } });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('unknown model "claude-opsu-5"');
+    // Priced models — including deliberately-cast older tiers — stay castable.
+    expect(validateCasting({ implement: { harness: "claude", model: "claude-opus-4-8" } })).toEqual([]);
     expect(validateCasting({ implement: { harness: "claude", effort: "ultracode" } })).toEqual([]);
   });
 
