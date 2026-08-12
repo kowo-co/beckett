@@ -77,3 +77,62 @@ export function renderMentions(body: string, userIds: string[]): string {
   if (line.length === 0) return body;
   return `${line.join(" ")}\n${body}`;
 }
+
+/**
+ * Match every form a single mention id can take on its way through a lossy text rewrite — the
+ * valid `<@id>` / `<@!id>`, and the mangled shapes the chilltext LLM has actually produced:
+ * a bare `@id` (angle brackets stripped — inert plain text that notifies nobody), a spaced
+ * `< @id >`, and a backticked `` `<@id>` ``. The id is an exact digit run, so `(?![0-9])` keeps
+ * a ping for `123` from matching inside `1234`. Used only to DELETE these before a clean copy is
+ * re-inserted; never to notify off of what the model returned.
+ */
+function mentionStripRe(id: string): RegExp {
+  return new RegExp("`?[ \\t]*<?[ \\t]*@[ \\t]*!?[ \\t]*" + id + "(?![0-9])[ \\t]*>?[ \\t]*`?", "g");
+}
+
+/**
+ * Structurally guarantee that every id in `pingUserIds` survives the chilltext gate as a real,
+ * notifying `<@id>` — regardless of what the rewrite model returned. This is enforcement, not
+ * persuasion: the model's output is never trusted to have kept the mention intact.
+ *
+ * For each ping id we strip EVERY form of it (valid or mangled — see {@link mentionStripRe}) out
+ * of every bubble, then prepend one clean, deduped, order-preserving `<@id>` line to the first
+ * surviving bubble. That makes three things true at once, which is exactly what `--ping` promises:
+ *   - a bare `@id` / `< @id >` / backticked / dropped mention is repaired back to `<@id>`;
+ *   - the mention lands in exactly ONE posted bubble, never duplicated across bubbles;
+ *   - it lands in the FIRST bubble — the only one the gateway allow-lists for `allowed_mentions`,
+ *     so it actually pings instead of merely rendering.
+ *
+ * Bubbles with no ping ids are returned untouched: this only ever moves mention tokens, never the
+ * surrounding prose the voice gate produced.
+ */
+export function enforceMentions(bubbles: string[], pingUserIds: string[]): string[] {
+  const ids = [...new Set(pingUserIds.map((s) => s.trim()).filter((s) => SNOWFLAKE.test(s)))];
+  if (ids.length === 0) return bubbles;
+
+  const stripped = bubbles.map((bubble) => {
+    let out = bubble;
+    let changed = false;
+    for (const id of ids) {
+      out = out.replace(mentionStripRe(id), () => {
+        changed = true;
+        return "";
+      });
+    }
+    if (!changed) return bubble;
+    // Tidy only the seams a removed mention left behind — collapse the doubled space left where
+    // an inline mention was, drop trailing spaces and the blank line a removed mention line
+    // leaves, and trim. Ordinary prose in bubbles we did not touch is returned verbatim above.
+    return out
+      .replace(/[ \t]{2,}/g, " ")
+      .replace(/ *\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  });
+
+  const kept = stripped.filter((bubble) => bubble.length > 0);
+  const line = ids.map((id) => `<@${id}>`).join(" ");
+  if (kept.length === 0) return [line];
+  kept[0] = `${line}\n${kept[0]}`;
+  return kept;
+}

@@ -16,6 +16,7 @@
 
 import type { Config, DiscordGateway, Logger, ReplyOptions } from "../types.ts";
 import { chillTransform, shouldBypassChill, type ChillTransformResult } from "../chilltext.ts";
+import { enforceMentions } from "../discord/mentions.ts";
 
 export interface DeliverChilledOptions {
   /** The user's triggering message, forwarded to chilltext as `input` (recommended, not required). */
