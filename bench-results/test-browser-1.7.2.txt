@@ -1,0 +1,3 @@
+=== run 1 ===
+$ bun test ./src/browser/runtime.test.ts ./src/browser/isolated.test.ts ./src/browser/agent.test.ts
+bun test v1.3.14 (0d9b296a)
