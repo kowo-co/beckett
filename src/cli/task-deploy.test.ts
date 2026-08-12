@@ -178,6 +178,36 @@ test("parseTaskDeployArgs: an invalid effort in --cast is rejected, not silently
   ).toThrow(TaskDeployUsageError);
 });
 
+// Sonnet-first (issue #249): `resolveCast` is the ONE call that mints a run's `cast`
+// (`task-deploy.ts`'s module doc comment), so a human-typed `--cast` naming opus IS "the
+// requester states otherwise" (issue #249 bullet a) — it must not silently downgrade at
+// `cast.ts#applySonnetFirst` for lack of a `reason` field nothing in the codebase has ever had a
+// way to type. Reviewed evidence: PR #252 finding 1.
+test("parseTaskDeployArgs: an explicit --cast naming opus with no reason gets one auto-stamped", () => {
+  const input = parseTaskDeployArgs([
+    "--prompt", "x",
+    "--cast", JSON.stringify({ implement: { harness: "claude", model: "claude-opus-5" } }),
+  ]);
+  expect(input.cast?.implement?.model).toBe("claude-opus-5");
+  expect(input.cast?.implement?.reason?.trim()).toBeTruthy();
+});
+
+test("parseTaskDeployArgs: an explicit --cast naming opus WITH a reason keeps it verbatim", () => {
+  const input = parseTaskDeployArgs([
+    "--prompt", "x",
+    "--cast", JSON.stringify({ implement: { harness: "claude", model: "claude-opus-5", reason: "gnarly debugging" } }),
+  ]);
+  expect(input.cast?.implement?.reason).toBe("gnarly debugging");
+});
+
+test("parseTaskDeployArgs: a non-opus --cast is untouched (no reason stamped)", () => {
+  const input = parseTaskDeployArgs([
+    "--prompt", "x",
+    "--cast", JSON.stringify({ implement: { harness: "claude", model: "claude-sonnet-5" } }),
+  ]);
+  expect(input.cast?.implement?.reason).toBeUndefined();
+});
+
 // ── dry run ────────────────────────────────────────────────────────────────────────────────
 
 test("deployRun: --dry prints the full Run JSON but writes nothing and pings no bus", async () => {

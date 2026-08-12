@@ -45,8 +45,20 @@ export const SEED_PRESETS: PresetMap = {
   },
   // Mechanical grind — cheapest seat, one pass (design doc §4.1).
   "cheap-lane": { implement: { harness: "pi", model: "gpt-5.6-luna", effort: "low" } },
-  // Frontend / visual / taste — Opus implements, forced one-pass (design doc §4.4).
-  "taste-lane": { implement: { harness: "claude", model: "claude-opus-5", effort: "high", reviewTier: "self" } },
+  // Frontend / visual / taste — Opus implements, forced one-pass (design doc §4.4). Carries a
+  // `reason` (issue #249, sonnet-first) so this shipped opus cast clears `applySonnetFirst`'s
+  // bar on its own — a preset naming opus with no reason would otherwise silently implement on
+  // sonnet the moment it's deployed with no accompanying `--cast` to trigger the deploy-time
+  // auto-stamp (`../cli/task-deploy.ts#resolveCast`).
+  "taste-lane": {
+    implement: {
+      harness: "claude",
+      model: "claude-opus-5",
+      effort: "high",
+      reviewTier: "self",
+      reason: "frontend/visual/taste work — design doc §4.4, opus implements one-pass",
+    },
+  },
   // Critical but cost-aware — terra implements cheap, Fable adjudicates (design doc §4.7). ⚠ confirm Fable first.
   "fable-review+terra-work": {
     implement: { harness: "pi", effort: "high" },

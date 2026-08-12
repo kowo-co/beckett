@@ -20,7 +20,7 @@
  */
 import { readFileSync } from "node:fs";
 import type { Casting } from "../run/cast.ts";
-import { validateCasting } from "../run/cast.ts";
+import { isOpusModel, validateCasting } from "../run/cast.ts";
 import type { CreateRunInput } from "../run/store.ts";
 import type { Run, RunStage } from "../run/types.ts";
 import { fail, out, parse } from "./io.ts";
@@ -108,7 +108,17 @@ function defaultTitle(prompt: string): string {
  * crashes a read), `--cast` is a fresh, human-typed invocation: bad JSON, a typo'd harness, or an
  * invalid effort must be REJECTED, not silently degraded to `{}` and deployed on defaults. So this
  * parses the raw string itself and runs `validateCasting` directly on the parsed value — it already
- * returns per-path zod shape errors — instead of routing through the tolerant reader first. */
+ * returns per-path zod shape errors — instead of routing through the tolerant reader first.
+ *
+ * Sonnet-first (issue #249): this is the ONE call that mints a run's `cast` (see the module
+ * doc comment), so a `--cast` that reaches here — whether typed directly at `run deploy`/`task
+ * deploy`, or forwarded by `task start` after it already resolved `--preset`/`--cast` together
+ * (`../cli/core.ts#castingFromFlags`) — IS "the requester states otherwise" (issue #249 bullet
+ * a): a deliberate, named choice by whoever deployed THIS run, not an install's silent default.
+ * An implement stage naming opus with no `reason` gets one auto-stamped here, so `cast.ts`'s
+ * `applySonnetFirst` (which still downgrades a reason-less opus cast — the doctrine's actual
+ * enforcement point, run at spawn time) keeps it instead of silently downgrading a directive
+ * nothing in the codebase has ever had a way to type a `reason` onto. */
 function resolveCast(raw: string | boolean | undefined): Casting | null {
   if (raw === undefined) return null;
   let parsed: unknown;
@@ -130,6 +140,13 @@ function resolveCast(raw: string | boolean | undefined): Casting | null {
     usage(`refusing to deploy a broken cast:\n  - ${errors.join("\n  - ")}`);
   }
   const casting = parsed as Casting;
+  const implement = casting.implement;
+  if (implement && isOpusModel(implement.model) && !implement.reason?.trim()) {
+    casting.implement = {
+      ...implement,
+      reason: "explicit --cast/--preset directive at deploy time (issue #249 bullet a)",
+    };
+  }
   return Object.keys(casting).length > 0 ? casting : null;
 }
 
