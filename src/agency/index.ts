@@ -930,6 +930,27 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
       description: p.description,
     });
     await this.gitPush(p.sourceDir, created.nameWithOwner, "HEAD", "main");
+    // Leave a plain (credential-free) origin behind: gitPush authenticates via an ad-hoc URL, so
+    // without this the freshly created project has NO origin remote at all — and `beckett finish`
+    // resolves its repo from `git remote get-url origin`, failing with "could not work out which
+    // GitHub repo …" on the very repos Beckett itself created (beckett-metrics, 2026-08-12).
+    try {
+      const setUrl = await this.runner(
+        ["git", "remote", "set-url", "origin", `${this.gitHost()}/${created.nameWithOwner}.git`],
+        { cwd: p.sourceDir },
+      );
+      if (setUrl.code !== 0) {
+        await this.runner(
+          ["git", "remote", "add", "origin", `${this.gitHost()}/${created.nameWithOwner}.git`],
+          { cwd: p.sourceDir },
+        );
+      }
+    } catch (err) {
+      this.opts.logger.warn("could not record origin remote on the new project (publish succeeded)", {
+        repo: created.nameWithOwner,
+        error: String(err),
+      });
+    }
     return { ...created, kind: "pushed" };
   }
 

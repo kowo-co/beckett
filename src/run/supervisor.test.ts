@@ -355,6 +355,35 @@ describe("admission", () => {
     expect(spawnCalls[0]!.extraHooks?.[0]!.command).toContain(`--root ${JSON.stringify(workspace)}`);
   });
 
+  test("a spec.md inherited from a previous run's commit is replaced by this run's scaffold", async () => {
+    // A worktree cut from a base that carries a committed spec.md is born holding the PREVIOUS
+    // run's spec; the scaffold must replace anything stamped with a different run id, or review
+    // briefs inherit a stranger's acceptance criteria (which happened twice on 2026-08-12).
+    const orig = gitFakes.createWorktree!;
+    gitFakes.createWorktree = async (opts) => {
+      const made = await orig(opts);
+      writeFileSync(
+        join(opts.workspace, "spec.md"),
+        "# Some earlier run\n> run: run-previous · branch: beckett/old · created: yesterday\n\n" +
+          "## Goal\nSomething else entirely.\n\n## Checklist\n- [x] stale criterion\n",
+        "utf8",
+      );
+      return made;
+    };
+    try {
+      const { supervisor, store } = newSupervisor();
+      const run = seedRun(store, makeRun());
+      await supervisor.admit(run.id);
+      await tick();
+      const spec = readFileSync(join(store.get(run.id)!.workspace!, "spec.md"), "utf8");
+      expect(spec).toContain(`> run: ${run.id}`);
+      expect(spec).not.toContain("stale criterion");
+      expect(spec).toContain("Add OAuth middleware to the API gateway.");
+    } finally {
+      gitFakes.createWorktree = orig;
+    }
+  });
+
   test("every worker gets its run's session name and accepts cross-session messages", async () => {
     const { supervisor, store } = newSupervisor();
     const run = seedRun(store, makeRun());

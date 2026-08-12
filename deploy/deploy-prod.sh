@@ -36,18 +36,17 @@ if [ -z "${BECKETT_DEPLOY_SCOPED:-}" ] && grep -qs 'beckett-v4\.service' /proc/s
 fi
 
 # ── the one credential every push in this script rides (issue #5) ───────────────────────────
-# NOTHING here uses a bare `git push`. Two reasons, both proven by v6.24.0's blocked deploy:
-#   1. No ambient credential. The self-deploy guard above re-execs into a `systemd --user --scope`,
-#      which inherits no git credential helper — a bare push dies with
-#      `fatal: could not read Username for 'https://github.com'` even when it has nothing to push.
-#   2. `main` is branch-protected. Even WITH a credential, pushing the release-bump commit straight
-#      at main is refused: `GH006: Protected branch update failed … Changes must be made through a
-#      pull request. Required status check "check" is expected.`
-# So both writes go through the GitHub App installation token (`x-access-token:<token>`, minted by
-# src/github/app.ts): the bump lands via `beckett gh land` (push branch → PR → CI → merge), and the
-# release tag via `beckett gh push --tag`. Reads (`git fetch`, `git ls-remote`) work anonymously
-# and are left alone. Preflight the credential HERE, before anything is written, so a missing app
-# key is a named FATAL rather than git's "could not read Username" ten minutes in.
+# NOTHING here uses a bare `git push`: the self-deploy guard above re-execs into a
+# `systemd --user --scope`, which inherits no git credential helper — a bare push dies with
+# `fatal: could not read Username for 'https://github.com'` even when it has nothing to push.
+# Both writes go through the GitHub App installation token (`x-access-token:<token>`, minted by
+# src/github/app.ts): the bump via `beckett gh push --branch main`, the release tag via
+# `beckett gh push --tag`. `main`'s ruleset requires a PR + CI for humans but lists the 0x-beck
+# App as a bypass actor (2026-08-12), so the App token pushes the bump commit straight at main —
+# no release PR, no CI wait; the phase-1 gate below is what stands between the push and the
+# restart. Reads (`git fetch`, `git ls-remote`) work anonymously and are left alone. Preflight
+# the credential HERE, before anything is written, so a missing app key is a named FATAL rather
+# than git's "could not read Username" ten minutes in.
 REPO="${BECKETT_DEPLOY_REPO:-$(git remote get-url origin | sed -E 's#\.git$##; s#/+$##; s#^[^@/]+@[^:]+:##; s#^[a-z+]+://[^/]+/##')}"
 echo "== preflighting the GitHub App credential for ${REPO} =="
 if ! CRED_PREFLIGHT="$(bun run beckett gh preflight --repo "${REPO}" --dir "$PWD" 2>&1)"; then
@@ -72,7 +71,7 @@ fi
 #   BECKETT_BUMP=minor|patch|major|yes|set:X.Y.Z ./deploy/deploy-prod.sh
 # ("yes" accepts the auto suggestion; "set:X.Y.Z" pins an exact version — pre-releases like
 # set:7.0.0-rc.1 included). The bump commit must reach origin/main before prod pulls,
-# so we sync main, bump, and land it through a PR here.
+# so we sync main, bump, and push it (App-token, ruleset bypass) here.
 echo "== computing version bump since last deploy =="
 git fetch origin --tags --prune
 git checkout main
@@ -96,8 +95,8 @@ fi
 
 # Is there anything to land? Compared by TREE, not by sha, so both no-op shapes are one branch:
 # `beckett version bump` reporting `"level": "none"` (nothing merged since the last release, so no
-# commit was made at all), and a re-run whose bump already landed on origin/main under a different
-# sha (the squash merge below rewrites it). Either way there is nothing to push, we do not touch
+# commit was made at all), and a re-run whose bump already landed on origin/main (possibly under a
+# different sha from the PR-landing era). Either way there is nothing to push, we do not touch
 # GitHub, and the deploy proceeds straight to the gates — the re-run wedge issue #5 describes was
 # exactly this step failing on a push it did not even need to make.
 if git diff --quiet "${BASE_SHA}" HEAD; then
@@ -105,35 +104,24 @@ if git diff --quiet "${BASE_SHA}" HEAD; then
   echo "== no version bump to land — main already matches origin/main =="
 else
   VERSION_TO_LAND="v$(python3 -c 'import json;print(json.load(open("package.json"))["version"])')"
-  BUMP_BRANCH="release-bump-${VERSION_TO_LAND}"
-  # Move the bump commit onto its own branch and put local main back on origin/main: protection
-  # will not take it directly, and leaving it on main would make the ff-pull below a no-op that
-  # hides whether the PR actually merged.
-  git branch -f "${BUMP_BRANCH}" HEAD
-  git reset --hard -q "${BASE_SHA}"
-  echo "== landing ${VERSION_TO_LAND} on protected main through a PR (${BUMP_BRANCH}) =="
-  # --force: this branch is machine-owned and single-purpose. A re-run after a blocked landing
-  # rebuilds the same content as a NEW commit, which a fast-forward push would reject — and that
-  # rejection would wedge every retry. The PR itself is reused (`ensurePR`), so this updates the
-  # open PR rather than opening a second one.
-  if ! bun run beckett gh land \
-      --repo "${REPO}" --dir "$PWD" \
-      --head "${BUMP_BRANCH}" --base main --strategy squash --force \
-      --ci-timeout "${BECKETT_BUMP_CI_TIMEOUT:-1800}" \
-      --rerun-with "./deploy/deploy-prod.sh" \
-      --title "beckett: release ${VERSION_TO_LAND}" \
-      --body "Release ${VERSION_TO_LAND} — version bump + CHANGELOG cut, opened by deploy/deploy-prod.sh."; then
-    echo "FATAL: the release bump for ${VERSION_TO_LAND} did not land on main (cause above)." >&2
-    echo "Nothing was tagged, restarted, or deployed. The bump commit is safe on the local branch" >&2
-    echo "${BUMP_BRANCH}; clear the blocker and re-run ./deploy/deploy-prod.sh — it reuses the PR." >&2
+  # Push the bump commit straight at main with the App token: the main ruleset requires a PR +
+  # CI for humans but lists the 0x-beck App as a bypass actor (2026-08-12), so releases no longer
+  # generate a PR or block ~4 minutes on its CI run. The phase-1 gate below (typecheck + fast
+  # test lane on the prod host) is what stands between this push and the restart; CI still runs
+  # on the main push asynchronously as a second opinion.
+  echo "== pushing ${VERSION_TO_LAND} straight to main (App-token push; humans still PR) =="
+  if ! bun run beckett gh push --repo "${REPO}" --branch main --dir "$PWD"; then
+    echo "FATAL: could not push the release bump ${VERSION_TO_LAND} to main (cause above)." >&2
+    echo "Nothing was tagged, restarted, or deployed. Resetting local main to origin/main;" >&2
+    echo "re-run ./deploy/deploy-prod.sh once the blocker is cleared — the bump is recomputed." >&2
+    git reset --hard -q "${BASE_SHA}"
     exit 1
   fi
   git fetch origin --tags --prune
-  git pull --ff-only origin main
-  git branch -D "${BUMP_BRANCH}" >/dev/null 2>&1 || true   # no stale release-bump-* graveyard
-  LANDED_VERSION="v$(python3 -c 'import json;print(json.load(open("package.json"))["version"])')"
-  [ "${LANDED_VERSION}" = "${VERSION_TO_LAND}" ] || {
-    echo "FATAL: the bump PR merged but origin/main is at ${LANDED_VERSION}, not ${VERSION_TO_LAND}" >&2
+  REMOTE_MAIN="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+  [ "${REMOTE_MAIN}" = "$(git rev-parse HEAD)" ] || {
+    echo "FATAL: pushed ${VERSION_TO_LAND} but origin/main is at ${REMOTE_MAIN}, not $(git rev-parse HEAD)" >&2
+    echo "(a concurrent push?) — inspect, then re-run ./deploy/deploy-prod.sh" >&2
     exit 1
   }
   echo "== ${VERSION_TO_LAND} is on origin/main =="
@@ -204,6 +192,10 @@ bwrap --unshare-all --share-net --die-with-parent --ro-bind / / /bin/true || {
 }
 bun run browser:smoke
 bun x tsc --noEmit                      # never restart onto broken code
+# The fast test lane (~35s; browser e2e files excluded — browser health is covered by the smoke
+# above). Now that releases push straight to main instead of waiting on a PR's CI, this is the
+# only test run standing between the push and the restart, so it is a hard gate.
+bun run test
 # prune the dead per-worker branches the retired flow left behind (and any new strays).
 # Two patterns because for-each-ref globs are pathname-aware: `*` stops at `/`, so nested
 # branches like beckett/wk_0012f678/OPS-11 need the `/**` form.

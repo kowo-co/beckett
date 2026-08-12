@@ -18,6 +18,7 @@
  */
 
 import { z } from "zod";
+import modelRates from "../../config/model-rates.json";
 import { availableHarnesses, isRegisteredHarness } from "../drivers/index.ts";
 
 // =======================================================================================
@@ -108,6 +109,17 @@ export function parseCastJson(raw: string): Casting {
 export const BLOCKED_MODELS: ReadonlySet<string> = new Set(["sol", "gpt-5.6"]);
 
 /**
+ * The castable-model roster: exactly the models the rate table prices. A cast naming a model
+ * outside it (a typo, a stale id like `claude-opus-4-8`) used to be accepted silently and only
+ * surfaced as a mystery in telemetry. If it isn't priced in `config/model-rates.json`, it isn't
+ * castable — and a genuinely new model earns castability by getting a rate row, which costing
+ * needs anyway. Matched case-insensitively.
+ */
+const KNOWN_MODELS: ReadonlySet<string> = new Set(
+  Object.keys(modelRates.models).map((name) => name.toLowerCase()),
+);
+
+/**
  * Validate a {@link Casting} against the roster rules, returning a list of human-readable errors
  * (`[]` ⇒ valid, deployable). The SINGLE SOURCE OF TRUTH for "is this cast fileable": it reuses the
  * same {@link CastingSchema} the tolerant reader trusts for SHAPE (harness ∈ the driver registry,
@@ -131,6 +143,12 @@ export function validateCasting(casting: unknown): string[] {
       errors.push(
         `${stage}: model "${spec.model}" is hard-blocked on our tier (not supported with a ` +
           `ChatGPT account) — cast gpt-5.6-terra or gpt-5.6-luna instead`,
+      );
+    } else if (model && !KNOWN_MODELS.has(model)) {
+      errors.push(
+        `${stage}: unknown model "${spec.model}" — not priced in config/model-rates.json ` +
+          `(known: ${[...KNOWN_MODELS].sort().join(", ")}). A new model becomes castable by ` +
+          `getting a rate row there first.`,
       );
     }
   }

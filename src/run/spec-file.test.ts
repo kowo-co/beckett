@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { SPEC_CHECKLIST_PLACEHOLDER, parseSpecChecklist, renderSpecScaffold, specProgressLine } from "./spec-file.ts";
+import { SPEC_CHECKLIST_PLACEHOLDER, parseSpecChecklist, renderSpecScaffold, specProgressLine, specRunId } from "./spec-file.ts";
 import type { Run } from "./types.ts";
 
 const RUN: Pick<Run, "id" | "title" | "branch" | "createdAt" | "prompt"> = {
@@ -33,6 +33,22 @@ describe("renderSpecScaffold", () => {
     expect(parsed.hasPlaceholder).toBe(true);
     expect(parsed.total).toBe(1);
     expect(parsed.done).toBe(0);
+  });
+
+  test("specRunId reads the scaffold's run stamp, and unstamped text yields undefined", () => {
+    expect(specRunId(renderSpecScaffold(RUN))).toBe(RUN.id);
+    expect(specRunId("# Title\n\n## Checklist\n- [ ] a\n")).toBeUndefined();
+  });
+
+  test("with several ## Checklist sections the LAST wins — an appended own list beats an inherited stale one", () => {
+    const parsed = parseSpecChecklist(
+      "# Old run's spec\n" +
+        "## Checklist\n- [x] stale inherited item\n\n" +
+        "## Checklist\n- [ ] own item\n- [x] own done item\n",
+    );
+    expect(parsed.items.map((item) => item.text)).toEqual(["own item", "own done item"]);
+    expect(parsed.total).toBe(2);
+    expect(parsed.done).toBe(1);
   });
 });
 

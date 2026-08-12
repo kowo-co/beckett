@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+### Trust gate: the verify/ship loop stops lying to itself
+
+Four fixes from the v7 day-one transcript review, each closing a way Beckett's own
+verify/ship loop could mislead it (or us):
+
+- **spec.md can no longer time-travel between runs.** A worktree cut from a base that carried a
+  committed `spec.md` was born holding the *previous* run's spec, and the supervisor's bare
+  `existsSync` guard never replaced it — which is how two 2026-08-12 review stages were handed
+  another run's acceptance criteria. The scaffold now replaces any spec stamped with a different
+  run id, `readSpec` refuses to feed a foreign-stamped spec into briefs, the checklist parser
+  takes the *last* `## Checklist` section (an appended own list beats an inherited stale one),
+  and `/spec.md` is untracked + gitignored so the chain cannot re-form.
+- **A late cancel keeps a shipped run's outcome.** `cancel()` checked terminal state on a stale
+  read and then unconditionally wrote `cancelled` several awaits later — the runs.json half of
+  #228, which is how the spatial-3d run (deployed, review 14/14) was recorded `cancelled`. It now
+  re-reads right before the terminal write and yields to a real `done`/`failed`.
+- **Casts are validated against the rate table.** `validateCasting` refuses a model id that
+  `config/model-rates.json` doesn't price — a typo'd or unpriced id used to deploy silently and
+  only surface as a telemetry mystery. A new model becomes castable by getting a rate row first.
+- **`beckett finish` is honest about already-landed work.** Re-running it on a branch whose
+  commits are all on the target exits clean ("nothing to land") instead of dying inside the
+  landing engine, and brand-new project repos keep a plain `origin` remote after publish so
+  `finish` can resolve them without `--repo`.
+
+Also: the `extensions.test.ts` GitHub preflight test strips the *whole* credential chain
+(App creds included), so it no longer makes a live star API call — and no longer fails — on
+hosts where the GitHub App is configured.
+
+### Faster validation, PR-less releases
+
+- **Fast test lane.** `bun run test` skips the three browser e2e files (`runtime`, `isolated`,
+  `agent` — real-Chromium suites that were 98s of the 132s total) and lands ~35s;
+  `bun run test:browser` runs just them, `bun run test:all` runs everything. CI provisions
+  playwright/betterwright and runs the browser lane only when browser-adjacent paths change.
+- **Releases push straight to main.** `main`'s protection is now a repository ruleset — PR + CI
+  required for humans, the 0x-beck App a bypass actor — so `deploy-prod.sh` lands the version
+  bump with a direct App-token push instead of a release PR plus a ~4-minute CI wait. The
+  prod-host gate now runs the fast test lane before the restart (previously the release PR's CI
+  was the only test run in the deploy path).
+
 ## v7.0.0-rc.1
 
 ### Tickets are gone; work is a run
