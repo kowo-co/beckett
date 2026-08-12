@@ -6,7 +6,14 @@ import { validateConfig } from "../config.ts";
 import type { Logger } from "../types.ts";
 import { buildBrowserEvaluatorLaunch } from "./evaluator-runner.ts";
 import { assertTrustedBrowserAttachment } from "./attachments.ts";
-import { assertTrustedArtifactPng, buildBrowserHostLaunch, chromiumForkLaunch, createIsolatedBrowserRuntime, obscuraLaunch } from "./isolated.ts";
+import {
+  assertTrustedArtifactPng,
+  buildBrowserHostLaunch,
+  chromiumForkLaunch,
+  chromiumForkPlatformLayout,
+  createIsolatedBrowserRuntime,
+  obscuraLaunch,
+} from "./isolated.ts";
 import { browserHostSettings, type BrowserHostSettings } from "./runtime.ts";
 import { laneStorageQuotaMib, MIN_LANE_STORAGE_BYTES, resolveLaneStorageBytes } from "./storage-quota.ts";
 
@@ -110,8 +117,51 @@ describe("chromium fork launch gating", () => {
       chromiumRoot: root,
       platform: "linux",
       arch: "x64",
+      betterwrightVersion: "1.8.2",
       exists: (path) => path === join(root, "linux-x64", "betterchromium"),
     })).toEqual({ env: { BETTERWRIGHT_CHROMIUM_ROOT: root }, mountRoot: root });
+  });
+
+  // 1.8.0 renamed the fork binary. An explicit root is strict upstream, so probing the
+  // wrong name is not a soft miss: 1.7.2 pointed at a 1.8.x artifact throws on every
+  // launch, and 1.8.x probing the 1.7.x name silently drops to CloakBrowser instead.
+  test("the probed binary name follows the pinned betterwright's own layout", () => {
+    const root = "/host/.betterwright/chromium";
+    const probe = (betterwrightVersion: string): string[] => {
+      const probed: string[] = [];
+      chromiumForkLaunch({
+        chromiumRoot: root,
+        platform: "linux",
+        arch: "x64",
+        betterwrightVersion,
+        exists: (path) => {
+          probed.push(path);
+          return false;
+        },
+      });
+      return probed;
+    };
+    for (const legacy of ["1.7.2", "1.7.2-beta.0", "1.6.3"]) {
+      expect(probe(legacy)).toEqual([join(root, "linux-x64", "chrome")]);
+    }
+    for (const fork of ["1.8.0", "1.8.2", "1.9.0", "2.0.0"]) {
+      expect(probe(fork)).toEqual([join(root, "linux-x64", "betterchromium")]);
+    }
+    // An unreadable version falls forward to the current layout rather than guessing back.
+    expect(probe("not-a-version")).toEqual([join(root, "linux-x64", "betterchromium")]);
+  });
+
+  test("mac and windows layouts track the same rename", () => {
+    expect(chromiumForkPlatformLayout("1.7.2")).toEqual({
+      "darwin-arm64": join("mac-arm64", "Chromium.app", "Contents", "MacOS", "Chromium"),
+      "linux-x64": join("linux-x64", "chrome"),
+      "win32-x64": join("win-x64", "chrome.exe"),
+    });
+    expect(chromiumForkPlatformLayout("1.8.2")).toEqual({
+      "darwin-arm64": join("mac-arm64", "BetterChromium.app", "Contents", "MacOS", "BetterChromium"),
+      "linux-x64": join("linux-x64", "betterchromium"),
+      "win32-x64": join("win-x64", "betterchromium.exe"),
+    });
   });
 
   test("a missing binary yields nothing, so betterwright falls back to managed CloakBrowser", () => {
@@ -150,6 +200,7 @@ describe("chromium fork launch gating", () => {
       chromiumRoot: "C:\\chromium",
       platform: "win32",
       arch: "x64",
+      betterwrightVersion: "1.8.2",
       exists: (path) => {
         probed.push(path);
         return false;
@@ -327,6 +378,7 @@ describe("browser host sandbox policy", () => {
         hostPath: fixture.host,
         chromiumExecutable: fixture.browser,
         chromiumForkRoot,
+        betterwrightVersion: "1.8.2",
         repoRoot: resolve(import.meta.dir, "../.."),
         bwrapPath: "/usr/bin/bwrap",
         prlimitPath: fixture.prlimit,

@@ -26,6 +26,7 @@ import {
   writeSync,
 } from "node:fs";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -154,6 +155,8 @@ interface BuildBrowserHostLaunchOptions {
   parentEnv?: NodeJS.ProcessEnv;
   budgetOverrides?: BrowserBudgetOverrides;
   backend?: "playwright" | "betterwright";
+  /** Overrides the resolved betterwright version that picks the fork's artifact layout. */
+  betterwrightVersion?: string;
 }
 
 /**
@@ -307,7 +310,11 @@ export function buildBrowserHostLaunch(options: BuildBrowserHostLaunchOptions): 
     ? obscuraLaunch({ obscuraRoot: options.obscuraRoot, platform: options.platform })
     : { env: {}, mountRoot: null };
   const chromiumFork = options.backend === "betterwright" && options.chromiumForkRoot
-    ? chromiumForkLaunch({ chromiumRoot: options.chromiumForkRoot, platform: options.platform })
+    ? chromiumForkLaunch({
+      chromiumRoot: options.chromiumForkRoot,
+      platform: options.platform,
+      ...(options.betterwrightVersion ? { betterwrightVersion: options.betterwrightVersion } : {}),
+    })
     : { env: {}, mountRoot: null };
   // The shim reads the budget from the environment and appends CloakBrowser's
   // --fingerprint-storage-quota, the only switch that moves what
