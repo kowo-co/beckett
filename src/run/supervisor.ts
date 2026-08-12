@@ -713,7 +713,15 @@ export class RunSupervisor {
     if (hint && hint.stage === stage) {
       this.resumables.delete(run.id);
       resumeSessionId = hint.sessionId;
-      if (hint.harness !== spec.harness) spec = { harness: hint.harness, effort: spec.effort };
+      if (hint.harness !== spec.harness) {
+        // A model-less substitution would fall through to the harness config default (opus on
+        // some installs), reopening the exact hole applySonnetFirst closed — stamp the default.
+        spec = {
+          harness: hint.harness,
+          effort: spec.effort,
+          ...(stage === "implement" ? { model: DEFAULT_IMPLEMENT_MODEL } : {}),
+        };
+      }
     }
     const interrupted = this.restartInterrupted.get(run.id);
     if (interrupted === stage && !resumeSessionId) {

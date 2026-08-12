@@ -1136,6 +1136,44 @@ describe("sonnet-first implement casting", () => {
     expect(spawnCalls[0]!.harness).toMatchObject({ harness: "claude", model: "claude-sonnet-5", effort: "medium" });
   });
 
+  // Re-review residual: the crash-recovery resume-hint substitution is the third path that used
+  // to mint a model-less claude spec (after sonnet-first and the preflight fallback ran).
+  test("a resume-hint harness substitution stamps the sonnet-first default model too", async () => {
+    const dir = scratch();
+    const statePath = join(dir, "run-state.json");
+    const storePath = join(dir, "runs.json");
+    const seed = new RunStore(storePath);
+    const run = seedRun(seed, makeRun({ state: "implementing", cast: { implement: { harness: "codex", effort: "high" } } }));
+    const workspace = join(dir, "wt");
+    mkdirSync(workspace, { recursive: true });
+    await seed.update(run.id, { workspace });
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        version: 1,
+        liveLedger: {
+          [run.id]: {
+            stage: "implement",
+            workerId: "wk_old",
+            sessionId: "sess-old",
+            pid: 0,
+            workspace,
+            harness: "claude",
+            spawnedAt: 1,
+          },
+        },
+        pendingSteers: {},
+      }),
+    );
+    const { supervisor } = newSupervisor({ runtimeStatePath: statePath, store: new RunStore(storePath) });
+    await supervisor.start();
+    await tick();
+    supervisor.stop();
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]!.resumeSessionId).toBe("sess-old");
+    expect(spawnCalls[0]!.harness).toMatchObject({ harness: "claude", model: "claude-sonnet-5", effort: "high" });
+  });
+
   test("an opus cast WITH a stated reason is kept, and the reason rides along on the record", async () => {
     const { supervisor, store, events } = newSupervisor();
     const run = seedRun(
