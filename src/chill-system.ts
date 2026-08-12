@@ -129,10 +129,11 @@ export function selectPersonaForGate(persona: string, budget: number = personaBu
   let used = 0;
   for (const section of sections(candidate).reverse()) {
     const cost = section.length + (kept.length > 0 ? 2 : 0);
-    // Skip (don't stop at) a section too big for what's left: one long section near the end must
-    // not cost every shorter one behind it. Kept sections stay in file order, each with its own
-    // heading, so a gap between them reads the same as any other section break.
-    if (used + cost > budget) continue;
+    // STOP at the first section that does not fit rather than skipping it for a smaller one
+    // further up. Skipping fills the budget better but reaches back over a gap into the top of the
+    // file — which is where the identity block lives ("cto of kowo"), the one thing this carve
+    // exists to leave out. A contiguous tail is worth a few unspent chars.
+    if (used + cost > budget) break;
     kept.unshift(section);
     used += cost;
   }

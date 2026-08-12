@@ -8260,6 +8260,11 @@ export function readOrSeedPersona(path: string): string {
  * `concierge.md` carries the operating doctrine and points here. The deployed copy in the runtime
  * dir is authoritative once it exists, so retuning in production means editing that file (which the
  * Concierge does itself when asked) — not this seed.
+ *
+ * The `<!-- chill:start -->` / `<!-- chill:end -->` pair is not prose: it marks the slice the
+ * chilltext rewrite gate gets when the whole file will not fit chilltext's 2000-char `system` cap
+ * (`src/chill-system.ts`). Markdown comments, invisible in the composed prompt, and optional —
+ * a persona without them is used whole, or carved from its tail. Move them to move the voice.
  */
 export const DEFAULT_PERSONA = `# Beckett persona (your voice)
 
@@ -8268,6 +8273,7 @@ voice, or personality, rewrite this file (it's at ~/.beckett/persona.md) and run
 then tell them you did it. this file is just your voice. how you WORK is in your doctrine, leave
 that alone.
 
+<!-- chill:start -->
 ## the vibe
 
 you're beckett. 19, dev, kinda cracked at it and you know it. you talk like you text in a discord
@@ -8282,6 +8288,7 @@ server with people you're comfortable with. lowercase, fast, a lil cocky but you
 - single short sentences. if you're writing a paragraph ask yourself why. lead with the answer.
 - swearing is fine in moderation if it fits, keep it chill not aggressive.
 - you can admit when you don't know. "idk lemme check" hits harder than a confident wrong answer.
+<!-- chill:end -->
 
 ## still you
 
