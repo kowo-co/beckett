@@ -1720,7 +1720,8 @@ exports[`cli: preset: ls seeds and lists the presets file 1`] = `
         "harness": "claude",
         "model": "claude-opus-5",
         "effort": "high",
-        "reviewTier": "self"
+        "reviewTier": "self",
+        "reason": "frontend/visual/taste work — design doc §4.4, opus implements one-pass"
       }
     },
     "fable-review+terra-work": {

@@ -98,6 +98,25 @@ describe("applySonnetFirst (issue #249 — the enforced default implement cast)"
     expect(result.spec).toEqual(explicit);
     expect(result.downgradeNote).toBeUndefined();
   });
+
+  // PR #252 review finding 3: a model-less explicit claude cast (`{"implement":{"harness":
+  // "claude"}}` — valid per `validateCasting`) must not fall through to an install's
+  // `harness.claude.default_model`, which reproduces the un-reasoned, un-logged opus deploy on a
+  // betterwright-shaped install where that default is opus.
+  test("an explicit claude cast naming NO model is defaulted to sonnet, not passed through", () => {
+    expect(applySonnetFirst({ harness: "claude" })).toEqual({
+      spec: { harness: "claude", model: "claude-sonnet-5" },
+    });
+    // effort/reviewTier on a model-less cast survive the default.
+    expect(applySonnetFirst({ harness: "claude", effort: "high" })).toEqual({
+      spec: { harness: "claude", effort: "high", model: "claude-sonnet-5" },
+    });
+  });
+
+  test("a model-less NON-claude cast is untouched (only claude falls through to an install default)", () => {
+    const explicit = { harness: "pi" as const, effort: "medium" as const };
+    expect(applySonnetFirst(explicit)).toEqual({ spec: explicit });
+  });
 });
 
 describe("project slug safety", () => {

@@ -187,18 +187,33 @@ export interface SonnetFirstResult {
 
 /**
  * The sonnet-first policy for the IMPLEMENT stage (issue #249; review is untouched — it stays on
- * the strongest tier by design). Three cases:
+ * the strongest tier by design). Four cases:
  *   - no explicit cast at all → the enforced default, `claude-sonnet-5` (previously this fell
  *     through to whichever `harness.claude.default_model` an install's config named, which is
  *     exactly how the betterwright run defaulted onto opus with no directive behind it).
- *   - an explicit cast naming anything OTHER than an opus model → a requester/framer directive,
- *     honored verbatim (the "cast sonnet"/"cast opus" pass-through this must not break).
+ *   - an explicit `claude` cast naming NO model → the SAME dangerous fallthrough as "no cast at
+ *     all" (`{"implement":{"harness":"claude"}}` is valid per {@link validateCasting} and, left
+ *     alone, falls through to `config.harness.claude.default_model` at the driver — on a
+ *     betterwright-shaped install where that default is opus, this reproduces the exact
+ *     un-reasoned, un-logged opus deploy the doctrine exists to prevent). Forced to the enforced
+ *     default model rather than passed through model-less.
+ *   - an explicit cast naming a NON-opus model (or a non-claude harness) → a requester/framer
+ *     directive, honored verbatim (the "cast sonnet"/"cast codex" pass-through this must not
+ *     break).
  *   - an explicit opus cast → kept ONLY when it carries a `reason` (the framer's stated case that
  *     this task clears sonnet's bar); with no reason it's downgraded to sonnet and the caller gets
- *     a human-readable note to log on the run record.
+ *     a human-readable note to log on the run record. Note: the CLI boundary that actually mints a
+ *     run's cast (`../cli/task-deploy.ts#resolveCast`) auto-stamps a reason on a human-typed
+ *     `--cast` naming opus — see that function's doc comment — so this gate in practice only ever
+ *     fires for a reason-less opus cast that reached deploy some OTHER way (a raw API/library
+ *     caller, a future automated framer that skips the CLI). That is exactly the case doctrine
+ *     wants caught.
  */
 export function applySonnetFirst(explicit: HarnessSpec | undefined): SonnetFirstResult {
   if (!explicit) return { spec: { harness: "claude", model: DEFAULT_IMPLEMENT_MODEL } };
+  if (explicit.harness === "claude" && !explicit.model) {
+    return { spec: { ...explicit, model: DEFAULT_IMPLEMENT_MODEL } };
+  }
   if (isOpusModel(explicit.model) && !explicit.reason?.trim()) {
     return {
       spec: { ...explicit, model: DEFAULT_IMPLEMENT_MODEL },

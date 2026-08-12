@@ -40,7 +40,7 @@ import { dirname, join } from "node:path";
 
 import type { Config, Harness, Logger, WorkerEvent } from "../types.ts";
 import type { HarnessSpec } from "./cast.ts";
-import { applySonnetFirst } from "./cast.ts";
+import { applySonnetFirst, DEFAULT_IMPLEMENT_MODEL } from "./cast.ts";
 import type { WorkItem } from "./work-item.ts";
 import type { ProgressSink } from "../progress/journal.ts";
 import { formatEvent } from "../progress/journal.ts";
@@ -574,7 +574,7 @@ export class RunSupervisor {
   // ── the spawn path ────────────────────────────────────────────────────────────────────
 
   /** Resolve the cast for a stage, applying the ultracode override and (implement) sonnet-first. */
-  private castFor(run: Run, stage: RunStage): HarnessSpec {
+  private async castFor(run: Run, stage: RunStage): Promise<HarnessSpec> {
     let explicit = run.cast?.[stage];
     // Ultracode is an IMPLEMENT-stage override and never overrides an explicit cast — a human
     // who named a harness for this stage meant it.
@@ -587,7 +587,13 @@ export class RunSupervisor {
     // keeps its own default-cast path below, unmodified) — the doctrine only gates the builder.
     if (stage === "implement") {
       const { spec, downgradeNote } = applySonnetFirst(explicit);
-      if (downgradeNote) this.trace(run, "implement:cast", "info", downgradeNote);
+      if (downgradeNote) {
+        this.trace(run, "implement:cast", "info", downgradeNote);
+        // The run record is the audit surface (issue #249): a downgrade that leaves `run.cast`
+        // reading the original opus request would make the ledger lie about what actually ran.
+        // Patch it to the resolved (downgraded) spec so `runs.json` and the trace agree.
+        await this.patchRun(run.id, { cast: { ...run.cast, implement: spec } });
+      }
       explicit = spec;
     }
     return this.stages.resolveCast(stage, explicit, runAsWorkItem(run), this.config);
@@ -697,7 +703,7 @@ export class RunSupervisor {
       })) ?? { ...run, workspace, baseSha };
 
     // 5. Cast + preflight. A dead harness produces ONE clear substitution, never a wedged run.
-    let spec = this.castFor(current, stage);
+    let spec = await this.castFor(current, stage);
     spec = await this.pickHealthyHarness(current, stage, spec);
 
     // Crash recovery: a restart-interrupted same-stage worker left a persisted session — resume
@@ -867,7 +873,15 @@ export class RunSupervisor {
         problems: verdict.problems,
       });
       this.trace(run, `${stage}:cast`, "info", `${spec.harness} failed preflight — substituting claude`);
-      return { harness: "claude", ...(spec.effort ? { effort: spec.effort } : {}) };
+      // Sonnet-first (issue #249): this substitution runs AFTER `castFor`'s sonnet-first pass, so
+      // a model-less claude fallback here would re-open the exact fallthrough that pass exists to
+      // close — `config.harness.claude.default_model` at the driver, un-reasoned and un-logged.
+      // Stamp the same enforced default on the implement stage; review keeps its own default path.
+      return {
+        harness: "claude",
+        ...(stage === "implement" ? { model: DEFAULT_IMPLEMENT_MODEL } : {}),
+        ...(spec.effort ? { effort: spec.effort } : {}),
+      };
     } catch {
       return spec; // a probe fault must never block dispatch
     }

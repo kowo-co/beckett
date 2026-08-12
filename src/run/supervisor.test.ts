@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Config } from "../types.ts";
 import type { HarnessSpec } from "./cast.ts";
+import type { Harness as HarnessName } from "../types.ts";
 import { appendSpendRecord, type SpendRecord } from "../spend.ts";
 import type { DispatchEvent } from "../dispatch/events.ts";
 import type { RunGitOps } from "./supervisor.ts";
@@ -242,6 +243,7 @@ function newSupervisor(
     /** The activity-blurb POLISH seam — a fake here is what keeps this suite off the network. */
     summarizeActivity?: (lines: string[], opts: { provider?: string }) => Promise<string | null>;
     now?: () => number;
+    preflight?: (harness: HarnessName) => Promise<{ ok: boolean; problems: string[] }>;
   } = {},
 ): Harness {
   const dir = scratch();
@@ -282,6 +284,7 @@ function newSupervisor(
     ...(opts.runtimeStatePath ? { runtimeStatePath: opts.runtimeStatePath } : {}),
     ...(opts.spendLedgerPath ? { spendLedgerPath: opts.spendLedgerPath } : {}),
     ...(opts.publishOutboxPath ? { publishOutboxPath: opts.publishOutboxPath } : {}),
+    ...(opts.preflight ? { preflight: opts.preflight } : {}),
   });
   return { supervisor, store, repos, publishCalls, events };
 }
@@ -1102,6 +1105,35 @@ describe("sonnet-first implement casting", () => {
     expect(note!.outcome).toBe("info");
     expect(note!.message).toContain("claude-opus-5");
     expect(note!.message).toContain("downgraded");
+    // PR #252 review finding 4: the run record is the audit surface — a downgrade that leaves
+    // `run.cast` still reading opus would make `runs.json` lie about what actually implemented.
+    expect(store.get(run.id)!.cast?.implement?.model).toBe("claude-sonnet-5");
+  });
+
+  // PR #252 review finding 3: a model-less explicit claude cast must not fall through to the
+  // driver's `config.harness.claude.default_model` — forced onto the enforced sonnet default
+  // exactly like an un-cast run.
+  test("an explicit claude cast naming no model is forced to sonnet, not the install's harness default", async () => {
+    const { supervisor, store } = newSupervisor({
+      config: cfg({ harness: { claude: { enabled: true, default_model: "claude-opus-5", default_effort: "high" }, codex: { enabled: true }, pi: { enabled: true } } }),
+    });
+    const run = seedRun(store, makeRun({ cast: { implement: { harness: "claude" } } }));
+    await supervisor.admit(run.id);
+    await tick();
+    expect(spawnCalls[0]!.harness).toMatchObject({ harness: "claude", model: "claude-sonnet-5" });
+  });
+
+  // PR #252 review finding 3: `pickHealthyHarness`'s preflight-fallback substitution runs AFTER
+  // sonnet-first and used to drop the model entirely, re-opening the same install-default
+  // fallthrough for any non-claude cast whose harness fails preflight.
+  test("a preflight-failed non-claude cast substitutes claude WITH the sonnet-first default model", async () => {
+    const { supervisor, store } = newSupervisor({
+      preflight: async (harness) => (harness === "codex" ? { ok: false, problems: ["not installed"] } : { ok: true, problems: [] }),
+    });
+    const run = seedRun(store, makeRun({ cast: { implement: { harness: "codex", effort: "medium" } } }));
+    await supervisor.admit(run.id);
+    await tick();
+    expect(spawnCalls[0]!.harness).toMatchObject({ harness: "claude", model: "claude-sonnet-5", effort: "medium" });
   });
 
   test("an opus cast WITH a stated reason is kept, and the reason rides along on the record", async () => {
