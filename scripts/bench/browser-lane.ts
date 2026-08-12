@@ -148,9 +148,20 @@ const spawn = ((options: Parameters<typeof Bun.spawn>[0]) => {
   return child;
 }) as typeof Bun.spawn;
 
+// Unset by default, so a plain `bun run browser:bench` is byte-identical to the harness
+// that produced the historical numbers. betterwright 1.8.1 reserves
+// --disable-software-rasterizer, which Beckett's default browser_chromium_args contains, so
+// comparing 1.8.1 against 1.7.2 needs both versions run on one explicit arg list.
+const chromiumArgsOverride = process.env.BROWSER_BENCH_CHROMIUM_ARGS;
 const config = validateConfig({
   paths: { beckett_dir: dir },
-  quick: { browser_profile_dir: "browser/profile", browser_eval_timeout_ms: 30_000 },
+  quick: {
+    browser_profile_dir: "browser/profile",
+    browser_eval_timeout_ms: 30_000,
+    ...(chromiumArgsOverride === undefined
+      ? {}
+      : { browser_chromium_args: chromiumArgsOverride.split(",").map((arg) => arg.trim()).filter(Boolean) }),
+  },
 });
 const runtime = createIsolatedBrowserRuntime({
   settings: browserHostSettings(config),
@@ -205,6 +216,7 @@ try {
     backend: "betterwright/CloakBrowser (isolated host)",
     headless: config.quick.browser_headless,
     warmIterations: WARM_ITERATIONS,
+    chromiumArgs: config.quick.browser_chromium_args,
     coldAcquireMs: Number(coldAcquireMs.toFixed(1)),
     warmEvalMs: {
       min: Number(Math.min(...warmSamples).toFixed(1)),

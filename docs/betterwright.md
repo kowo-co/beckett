@@ -254,6 +254,14 @@ before it's safe to revisit.
 `quick.browser_chromium_args` (default `["--disable-gpu", "--disable-software-rasterizer"]`)
 plus `parkBackgroundPages: true` through the constructor.
 
+**Update (1.8.1) — this default is incompatible with 1.8.1 and later.** 1.8.1 moved
+`--disable-software-rasterizer` into a reserved-switch map and throws a `TypeError` on it
+("reserved by BetterWright … the managed browser must retain its WebGL software fallback"),
+so the stock config fails 5/5 on any 1.8.1+ pin. The default is deliberately left as-is while
+the pin stays at 1.7.2 — note that 1.7.2's own API docs recommend exactly this value. Anyone
+bumping the pin must drop the switch first. See
+[betterwright-1.8.0-vs-1.7.2.md](betterwright-1.8.0-vs-1.7.2.md#finding-a--181-newly-reserves-a-switch-its-own-docs-recommend).
+
 ### `--disable-gpu` shim — negative result (#95)
 
 Follow-on test of a lever that *does* exist locally (`CLOAKBROWSER_BINARY_PATH`, a shim `exec`ing real Chrome

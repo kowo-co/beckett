@@ -1,0 +1,32 @@
+{
+  "ok": true,
+  "result": {
+    "trustText": null,
+    "liesText": null,
+    "headlessText": "FP ID: Computing... Fuzzy: 0000000000000000000000000000000000000000000000000000000000000000 0 ms WebRTC host connection: foundation/ip: sdp capabilities: stun connection: devices (0): Timezone Intl Headless chromium: 0% like headless: 0% headless: 0% stealth: platform hints: Resistance privacy: secu",
+    "percentages": [
+      "0% like headless:",
+      "0% headless:",
+      "0% stealth:",
+      "0% of engine",
+      "0% of version",
+      "0% engine"
+    ]
+  },
+  "warnings": [
+    "Another BetterWright process owns the persistent browser profile (pid 2728100 on desktop); using an isolated temporary profile without saved logins. If that process is a leftover from an earlier session, close it and relaunch to reclaim the saved profile; a lock left by a crashed process expires on its own within about a minute."
+  ],
+  "profileMode": "ephemeral",
+  "pages": [
+    {
+      "type": "Page",
+      "pageId": "page-1",
+      "url": "https://abrahamjuliot.github.io/creepjs/",
+      "title": "CreepJS",
+      "closed": false,
+      "active": true
+    }
+  ],
+  "durationMs": 23652.1,
+  "session": "default"
+}

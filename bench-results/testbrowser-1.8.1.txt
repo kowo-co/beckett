@@ -1,0 +1,40 @@
+===== run 1  betterwright 1.8.1 =====
+bun test v1.3.14 (0d9b296a)
+
+ 101 pass
+ 0 fail
+ 375 expect() calls
+Ran 101 tests across 3 files. [102.47s]
+----- run 1 exit=0 elapsed=103s -----
+===== run 2  betterwright 1.8.1 =====
+bun test v1.3.14 (0d9b296a)
+
+ 101 pass
+ 0 fail
+ 375 expect() calls
+Ran 101 tests across 3 files. [103.97s]
+----- run 2 exit=0 elapsed=104s -----
+===== run 3  betterwright 1.8.1 =====
+bun test v1.3.14 (0d9b296a)
+
+ 101 pass
+ 0 fail
+ 375 expect() calls
+Ran 101 tests across 3 files. [113.87s]
+----- run 3 exit=0 elapsed=114s -----
+===== run 4  betterwright 1.8.1 =====
+bun test v1.3.14 (0d9b296a)
+
+ 101 pass
+ 0 fail
+ 375 expect() calls
+Ran 101 tests across 3 files. [100.53s]
+----- run 4 exit=0 elapsed=101s -----
+===== run 5  betterwright 1.8.1 =====
+bun test v1.3.14 (0d9b296a)
+
+ 101 pass
+ 0 fail
+ 375 expect() calls
+Ran 101 tests across 3 files. [110.33s]
+----- run 5 exit=0 elapsed=110s -----
