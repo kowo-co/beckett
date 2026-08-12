@@ -44,7 +44,13 @@ interface Guts {
   stderrRing: { record(text: string): void };
   sendNudge(msg: string): Promise<{ accepted: string }>;
   takeBufferedPrompt(): string;
-  onProcessExit(code: number, gen: number, pid: number, groupKill: boolean): Promise<void>;
+  onProcessExit(
+    code: number,
+    gen: number,
+    pid: number,
+    groupKill: boolean,
+    signal?: NodeJS.Signals | null,
+  ): Promise<void>;
   timeOut(capS: number, totalS: number): Promise<void>;
   tickStall(): void;
   emit(e: WorkerEvent): void;
@@ -96,6 +102,27 @@ test("a crash exit synthesizes a classified error finish carrying the stderr tai
   expect(error.message).toContain("not logged in");
   expect(d.workerState as WorkerState).toBe("failed");
   expect(d.finished).toBe(true);
+});
+
+// Issue #247: the daemon's own restart kills a worker with a SIGNAL and no exit code, and the
+// crash-path `error` event is the only place the cause is ever stated. "code null" is not a cause
+// anyone can diagnose a parked run from — the signal has to be named.
+test("a signalled exit names the signal instead of a null exit code", async () => {
+  const d = makeDriver();
+  const events: WorkerEvent[] = [];
+  d.onEvent((e) => events.push(e));
+  d.workerState = "running";
+
+  await d.onProcessExit(null as unknown as number, d.childGen, 12345, /*groupKill*/ false, "SIGTERM");
+
+  const error = events.find((e) => e.kind === "error");
+  if (error?.kind !== "error") throw new Error("no error event");
+  expect(error.message).toContain("signal SIGTERM");
+  expect(error.message).not.toContain("code null");
+  const finished = events.find((e) => e.kind === "finished");
+  if (finished?.kind !== "finished") throw new Error("no finished event");
+  expect(finished.status).toBe("error");
+  expect(finished.subtype).toBe("error_process_exit");
 });
 
 test("a superseded child's exit is ignored (childGen guard — auto-resume relaunch)", async () => {

@@ -193,10 +193,29 @@ interface LedgeredRunWorker {
   lastCheckpointSha?: string;
 }
 
+/**
+ * A stage this daemon OWES a run: its worker died of a lifecycle cause (a daemon shutdown, a
+ * harness crash) rather than finishing, so the run parked holding work nobody is driving.
+ *
+ * Durable on purpose — the publish outbox survives a restart and workers had no equivalent, which
+ * is issue #244: after the 2026-08-12 restart the betterwright run stayed `parked`, its review
+ * never re-ran, and its branch was never pushed. Written at the instant of the park (the one
+ * moment both the stage AND the cause are in hand) and consumed once, on the next boot.
+ */
+interface OwedResume {
+  stage: RunStage;
+  /** The lifecycle cause, verbatim — what the boot log and the run's timeline say. */
+  cause: string;
+  /** Epoch ms of the death, so a boot can report how long the run sat owed. */
+  at: number;
+}
+
 interface RunRuntimeState {
   version: 1;
   liveLedger: Record<string, LedgeredRunWorker>;
   pendingSteers: Record<string, string[]>;
+  /** Stages owed a re-dispatch after a lifecycle death (#244). Absent on pre-#244 state files. */
+  owedResumes?: Record<string, OwedResume>;
 }
 
 interface SpendStageMeta {
@@ -289,6 +308,8 @@ export class RunSupervisor {
   private readonly pending: PendingRunSpawn[] = [];
   private readonly liveLedger = new Map<string, LedgeredRunWorker>();
   private readonly pendingSteers = new Map<string, string[]>();
+  /** Stages owed a boot re-dispatch because their worker died mid-flight (#244). Persisted. */
+  private readonly owedResumes = new Map<string, OwedResume>();
   private readonly resumables = new Map<string, { stage: RunStage; sessionId: string; harness: string }>();
   private readonly restartInterrupted = new Map<string, RunStage>();
   private readonly finishing = new Set<string>();
@@ -320,6 +341,13 @@ export class RunSupervisor {
   private checkpointTimer?: ReturnType<typeof setInterval>;
   private checkpointInFlight = false;
   private started = false;
+  /**
+   * THE SHUTDOWN FLAG (#247). Raised by {@link stop}, which `shell/main.ts` calls early in its
+   * drain — ahead of every teardown that can take a worker with it — so a worker that dies after
+   * this point died BECAUSE the daemon is going down, and its park says so instead of quoting
+   * whatever the model happened to be saying.
+   */
+  private shuttingDown = false;
 
   constructor(deps: RunSupervisorDeps) {
     this.store = deps.store;
@@ -393,6 +421,9 @@ export class RunSupervisor {
       if (runId) await this.cancel(runId, reason);
     });
     await this.recoverFromCrash();
+    // BEFORE the boot scan below, so a run whose stage this daemon owes is back in a staffable
+    // state by the time `admitRun` walks the ledger (#244).
+    await this.requeueOwedStages();
     await this.replayPublishes();
     await this.resumeInterruptedPublishes();
     for (const run of this.store.live()) this.admitRun(run);
@@ -402,8 +433,14 @@ export class RunSupervisor {
     this.logger.info("run supervisor started", { live: this.store.live().length });
   }
 
-  /** Tear down the timers (daemon shutdown). Idempotent; live workers are left to their drain. */
+  /**
+   * Tear down the timers (daemon shutdown). Idempotent; live workers are left to their drain.
+   *
+   * Also raises {@link shuttingDown}: from here on a worker death is the RESTART's doing, and both
+   * the recorded cause (#247) and the owed-resume ledger (#244) key on knowing that.
+   */
   stop(): void {
+    this.shuttingDown = true;
     if (this.checkpointTimer) clearInterval(this.checkpointTimer);
     if (this.watchdogTimer) clearInterval(this.watchdogTimer);
     if (this.publishDrainTimer) clearInterval(this.publishDrainTimer);
@@ -438,9 +475,27 @@ export class RunSupervisor {
     return this.lastTickAt;
   }
 
-  /** Live status rows for `beckett status` (the run board's source). */
-  live(): Array<{ runId: string; state: string; stage: string | null; workerId: string | null }> {
-    const rows: Array<{ runId: string; state: string; stage: string | null; workerId: string | null }> = [];
+  /**
+   * Live status rows for `beckett status` (the run board's source).
+   *
+   * `startedAt` is the live worker's spawn time (null when nothing is running for this run) — the
+   * one field the deploy drain guard needs to say "reviewer, age 4m" instead of naming a bare id
+   * (`src/deploy/run-drain.ts`, #243). Additive: every existing consumer reads the other four.
+   */
+  live(): Array<{
+    runId: string;
+    state: string;
+    stage: string | null;
+    workerId: string | null;
+    startedAt: number | null;
+  }> {
+    const rows: Array<{
+      runId: string;
+      state: string;
+      stage: string | null;
+      workerId: string | null;
+      startedAt: number | null;
+    }> = [];
     for (const run of this.store.live()) {
       const handle = this.workers.get(run.id);
       rows.push({
@@ -448,6 +503,7 @@ export class RunSupervisor {
         state: run.state,
         stage: handle ? (handle.stage as RunStage) : this.stageFor(run),
         workerId: handle?.id ?? null,
+        startedAt: handle ? this.liveLedger.get(run.id)?.spawnedAt ?? null : null,
       });
     }
     return rows;
@@ -918,12 +974,22 @@ export class RunSupervisor {
       this.spendMetaByWorker.delete(handle.id);
       return;
     }
+    // A worker the daemon killed on its way down did not FAIL — `interrupted` is the timeline's
+    // existing word for exactly that (`../dispatch/events.ts`), and both the digest and the
+    // progress card already know not to dress it as a failure. Nothing emitted it in v7 until now.
+    const died = status !== "success";
     this.trace(
       run,
       stage,
-      status === "success" ? "passed" : "failed",
-      status === "success" ? "worker finished" : "worker exited with error",
-      status === "success" ? undefined : summary,
+      !died ? "passed" : this.shuttingDown ? "interrupted" : "failed",
+      !died
+        ? "worker finished"
+        : this.shuttingDown
+          ? "worker exited with error (stopped by a daemon restart)"
+          : "worker exited with error",
+      // The CAUSE, never the summary: on a death `summary` is `spawn.ts`'s fallback scrape of the
+      // session's last assistant text, which is what put a reviewer's greeting on the timeline.
+      died ? this.workerDeathCause(handle) : undefined,
     );
     this.recordSpend(run, stage, handle, status, spendMeta);
     this.spendMetaByWorker.delete(handle.id);
@@ -958,7 +1024,8 @@ export class RunSupervisor {
   ): Promise<void> {
     if (status !== "success") {
       await this.commitWip(run, handle);
-      await this.park(run, `the implement worker exited with an error.\n\n${summary}`);
+      this.noteOwedResume(run, "implement", handle);
+      await this.park(run, this.workerDeathReason("implement", handle));
       return;
     }
     const signal = parseDoneSignal(handle.result?.structured);
@@ -1002,14 +1069,17 @@ export class RunSupervisor {
     status: "success" | "error",
     summary: string,
   ): Promise<void> {
-    const signal = status === "success" ? parseDoneSignal(handle.result?.structured) : null;
+    // A reviewer that DIED never delivered a verdict, and its words are not a verdict either —
+    // separate that from a reviewer that ran to completion and merely produced unparseable output
+    // (#247: those two used to share a branch, and the dead one quoted the session's text).
+    if (status !== "success") {
+      this.noteOwedResume(run, "review", handle);
+      await this.park(run, this.workerDeathReason("review", handle));
+      return;
+    }
+    const signal = parseDoneSignal(handle.result?.structured);
     if (!signal) {
-      await this.park(
-        run,
-        status === "success"
-          ? `the reviewer finished without a schema-valid structured verdict.\n\n${summary}`
-          : `the reviewer exited with an error.\n\n${summary}`,
-      );
+      await this.park(run, `the reviewer finished without a schema-valid structured verdict.\n\n${summary}`);
       return;
     }
     if (signal.status === "complete") {
@@ -1605,6 +1675,102 @@ export class RunSupervisor {
     this.logger.info("run crash recovery complete", { interrupted: entries.length, resumable: this.resumables.size });
   }
 
+  // ── worker death + owed stages (#247 / #244) ──────────────────────────────────────────
+
+  /**
+   * The LIFECYCLE cause of a worker that died instead of finishing (#247).
+   *
+   * Deliberately assembled from facts the daemon and the driver OWN — the shutdown flag, the
+   * driver's terminal `error` message (which now names `signal SIGTERM` / `code N`, see
+   * `../drivers/base.ts#processExitMessage`), the wall-clock verdict, the failure class. It never
+   * reads {@link WorkerResult.summary}: on a death that field is `spawn.ts`'s fallback scrape of
+   * the last assistant text, which is how "I'll start by inspecting the actual diff and repo
+   * state." — a reviewer's OPENING SENTENCE — became the recorded error on 2026-08-12.
+   */
+  private workerDeathCause(handle: WorkerHandle): string {
+    const result = handle.result;
+    const clauses: string[] = [];
+    // The one-line check the issue asks for: `stop()` raised this before the drain began, so a
+    // worker that died after it died BECAUSE the daemon is going down.
+    if (this.shuttingDown) clauses.push("killed during daemon shutdown");
+    else if (result?.timedOut) clauses.push("stopped by the wall-clock cap");
+    const named = result?.errorMessage?.trim();
+    if (named) clauses.push(named);
+    else if (result?.errorClass) clauses.push(`failure class \`${result.errorClass}\``);
+    if (clauses.length === 0) clauses.push(`the ${handle.harness} worker ended without naming a cause`);
+    return clauses.join(" — ");
+  }
+
+  /** The park reason for a dead worker: the cause and nothing the model happened to be saying. */
+  private workerDeathReason(stage: RunStage, handle: WorkerHandle): string {
+    return `the ${stage} worker died before it reported a verdict: ${this.workerDeathCause(handle)}`;
+  }
+
+  /**
+   * Record that this daemon OWES `run` a re-dispatch of `stage` (#244). Written at the instant of
+   * the death — the one moment both the stage and the cause are in hand — and durable, because the
+   * publish outbox survives a restart and workers had nothing equivalent.
+   */
+  private noteOwedResume(run: Run, stage: RunStage, handle: WorkerHandle): void {
+    this.owedResumes.set(run.id, { stage, cause: this.workerDeathCause(handle), at: this.now() });
+    this.persistRuntimeState();
+  }
+
+  /**
+   * Boot: re-dispatch every stage this daemon's predecessor owed (#244), following the publish
+   * outbox's pattern — a durable row, drained once at start, consumed whether or not it lands.
+   *
+   * IDEMPOTENCY is the run ledger's job, not a guess: an owed row is written ONLY on the park path,
+   * and a run that is no longer `parked` finished that stage (or a human moved it on) before the
+   * kill. Re-dispatching that would double-run a completed stage, so it is dropped with a log line
+   * instead. The entries are cleared BEFORE the loop, so a requeue that itself dies is never
+   * replayed twice.
+   */
+  async requeueOwedStages(): Promise<string[]> {
+    if (this.owedResumes.size === 0) return [];
+    const owed = [...this.owedResumes.entries()];
+    this.owedResumes.clear();
+    this.persistRuntimeState();
+    const requeued: string[] = [];
+    for (const [runId, entry] of owed) {
+      const run = this.store.get(runId);
+      if (!run) continue;
+      if (run.state !== "parked") {
+        this.logger.info("owed stage dropped — the run moved on without it", {
+          run: runId,
+          stage: entry.stage,
+          state: run.state,
+        });
+        continue;
+      }
+      const owedForS = Math.max(0, Math.round((this.now() - entry.at) / 1_000));
+      // `restart-restaff` is the digest's existing vocabulary for recovery work (`../dispatch/
+      // digest.ts`): one "the daemon restarted — resuming interrupted work" sentence, not a fresh
+      // alarm for something the daemon is already fixing.
+      this.trace(
+        run,
+        "restart-restaff",
+        "started",
+        `re-dispatching the ${entry.stage} stage owed for ${owedForS}s (${entry.cause})`,
+      );
+      const updated = await this.patchRun(runId, {
+        state: entry.stage === "implement" ? "implementing" : "reviewing",
+        // The park reason described a worker that is gone; the run is live again and the timeline
+        // above keeps the cause. Leaving it would make the next park unreadable.
+        error: null,
+      });
+      if (!updated) continue;
+      requeued.push(runId);
+      this.logger.warn("re-dispatching a stage owed by the previous daemon", {
+        run: runId,
+        stage: entry.stage,
+        cause: entry.cause,
+        owedForS,
+      });
+    }
+    return requeued;
+  }
+
   private harnessBin(harness: string): string {
     const h = this.config.harness as unknown as Record<string, { bin?: string } | undefined>;
     return h?.[harness]?.bin || harness;
@@ -1910,6 +2076,17 @@ export class RunSupervisor {
         const list = (steers as unknown[]).filter((s): s is string => typeof s === "string" && s.trim().length > 0);
         if (list.length) this.pendingSteers.set(runId, list);
       }
+      // Stages owed a boot re-dispatch (#244). Absent on a pre-#244 state file, which is exactly a
+      // daemon that owed nothing, so the missing key needs no migration.
+      for (const [runId, value] of Object.entries(raw.owedResumes ?? {})) {
+        const owed = value as Partial<OwedResume>;
+        if (owed.stage !== "implement" && owed.stage !== "review") continue;
+        this.owedResumes.set(runId, {
+          stage: owed.stage,
+          cause: typeof owed.cause === "string" ? owed.cause : "cause not recorded",
+          at: typeof owed.at === "number" ? owed.at : 0,
+        });
+      }
     } catch (err) {
       // A malformed ledger is best-effort recovery data, never a boot blocker.
       this.logger.warn("run runtime state unreadable — starting with none", { error: String(err) });
@@ -1922,6 +2099,7 @@ export class RunSupervisor {
       version: 1,
       liveLedger: Object.fromEntries(this.liveLedger),
       pendingSteers: Object.fromEntries(this.pendingSteers),
+      owedResumes: Object.fromEntries(this.owedResumes),
     };
     try {
       mkdirSync(dirname(this.runtimeStatePath), { recursive: true });
