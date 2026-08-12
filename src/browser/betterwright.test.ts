@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -309,6 +309,125 @@ test("the bridge exposes attachFile only for screenshots captured by this lease"
   } finally {
     await runtime.stop();
   }
+});
+
+/** The upload map the bridge inlines: public path -> BetterWright-readable copy. */
+function bridgedApprovals(code: string): Record<string, string> {
+  const map = /const approvedPath = (\{.*?\})\[sourcePath\];/s.exec(code);
+  return map ? JSON.parse(map[1]!) as Record<string, string> : {};
+}
+
+describe("attachFile honors the configured attachment roots", () => {
+  let images: string;
+  let outside: string;
+  let settings: BrowserHostSettings;
+
+  beforeEach(() => {
+    images = join(scratch, "images");
+    outside = join(scratch, "outside");
+    mkdirSync(images, { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    settings = { ...settingsFor(), attachmentRoots: [images] };
+  });
+
+  const mediaAt = (path: string): string => {
+    writeFileSync(path, Buffer.concat([PNG_SIGNATURE, Buffer.alloc(16)]));
+    return path;
+  };
+
+  /** One evaluation on a fresh lease; returns the code BetterWright was actually handed. */
+  async function bridgeFor(code: string): Promise<string> {
+    const fake = new FakeBetterWright();
+    const runtime = createBetterWrightRuntime(settings, quietLog, { createBrowser: () => fake });
+    try {
+      await runtime.acquire(leaseFor("upload"));
+      await runtime.evaluate("upload", code);
+      return fake.calls.at(-1)!.code;
+    } finally {
+      await runtime.stop();
+    }
+  }
+
+  // ro's live case: an image generated earlier, sitting in the images directory, uploaded as a
+  // profile picture. The path is pre-existing — this run never screenshotted it.
+  test("a pre-existing image under an approved root is staged and resolvable", async () => {
+    const avatar = mediaAt(join(images, "avatar.png"));
+    const code = await bridgeFor(`return await attachFile('input[type=file]', ${JSON.stringify(avatar)})`);
+    const approved = bridgedApprovals(code);
+    expect(approved[avatar]).toBeString();
+    expect(readFileSync(approved[avatar]!).subarray(0, 8)).toEqual(PNG_SIGNATURE);
+    expect(approved[avatar]).toContain("beckett-attach-");
+  });
+
+  // The briefing offers a Locator target and ordinary JavaScript; both must reach the host's
+  // validation, not just the one textbook `attachFile("selector", "/path")` spelling.
+  test("a Locator target and a path held in a variable resolve the same way", async () => {
+    const avatar = mediaAt(join(images, "avatar.png"));
+    const viaLocator = await bridgeFor(
+      `return await attachFile(page.locator('input[type=file]'), ${JSON.stringify(avatar)})`,
+    );
+    expect(bridgedApprovals(viaLocator)[avatar]).toBeString();
+
+    const viaVariable = await bridgeFor(
+      `const picture = ${JSON.stringify(avatar)};\nreturn await attachFile('input[type=file]', picture)`,
+    );
+    expect(bridgedApprovals(viaVariable)[avatar]).toBeString();
+  });
+
+  test("a path outside every approved root is refused, and the refusal names the roots", async () => {
+    const stray = mediaAt(join(outside, "stray.png"));
+    const code = await bridgeFor(`return await attachFile('input[type=file]', ${JSON.stringify(stray)})`);
+    expect(bridgedApprovals(code)[stray]).toBeUndefined();
+    expect(code).toContain("refuses paths outside this run's approved attachment roots");
+    expect(code).toContain("escaped the permitted roots");
+    // The agent must be able to see which roots applied, instead of asking a human to widen
+    // configuration that was never what refused it.
+    expect(code).toContain("approved roots: ");
+    expect(code).toContain(images);
+  });
+
+  test("a symlink under an approved root that points outside it is refused", async () => {
+    const stray = mediaAt(join(outside, "stray.png"));
+    const escape = join(images, "escape.png");
+    symlinkSync(stray, escape);
+    const code = await bridgeFor(`return await attachFile('input[type=file]', ${JSON.stringify(escape)})`);
+    // realpath runs before containment, so the link's own location authorizes nothing.
+    expect(bridgedApprovals(code)[escape]).toBeUndefined();
+    expect(bridgedApprovals(code)[stray]).toBeUndefined();
+    expect(code).toContain("escaped the permitted roots");
+  });
+
+  test("bytes that disagree with the extension are refused with that reason", async () => {
+    const fake = join(images, "not-a-jpeg.jpg");
+    writeFileSync(fake, Buffer.concat([PNG_SIGNATURE, Buffer.alloc(16)]));
+    const code = await bridgeFor(`return await attachFile('input[type=file]', ${JSON.stringify(fake)})`);
+    expect(bridgedApprovals(code)[fake]).toBeUndefined();
+    expect(code).toContain("do not match its extension");
+  });
+
+  test("a second spelling of an already-staged file resolves without copying it twice", async () => {
+    const avatar = mediaAt(join(images, "avatar.png"));
+    const alias = join(images, "same-avatar.png");
+    symlinkSync(avatar, alias);
+    const fake = new FakeBetterWright();
+    const runtime = createBetterWrightRuntime(settings, quietLog, { createBrowser: () => fake });
+    try {
+      await runtime.acquire(leaseFor("upload"));
+      await runtime.evaluate("upload", `return await attachFile('input[type=file]', ${JSON.stringify(avatar)})`);
+      await runtime.evaluate("upload", `return await attachFile('input[type=file]', ${JSON.stringify(alias)})`);
+      const approved = bridgedApprovals(fake.calls.at(-1)!.code);
+      // Both spellings resolve to the one copy the host already made and checked.
+      expect(approved[alias]).toBe(approved[avatar]!);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  test("a snippet that never mentions attachFile is handed its own source untouched", async () => {
+    mediaAt(join(images, "avatar.png"));
+    const code = await bridgeFor("return await page.title()");
+    expect(code).toBe("return await page.title()");
+  });
 });
 
 test("acquiring past the default cap of 3 throws a catchable error rather than hanging", async () => {

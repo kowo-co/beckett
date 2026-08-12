@@ -11,12 +11,16 @@ acting — `snapshot({interactive:true})` then full `snapshot()`, confirm with
 which go stale on re-render. Batch related actions, use `Promise.all` across pages when parallel
 work is faster, and return screenshots (images) only when vision helps, plain data otherwise.
 
-Attach a file only via `await attachFile('input[type=file]', screenshotPath)` (or a Locator)
-when a screenshot result lists `attachments` — the only upload path. It accepts the run's own
-artifacts and `~/.beckett/images` by default; operators may extend it with
-`[quick].browser_attach_roots` in `config.toml` (`/` is an explicit broad-access escape hatch).
+Upload a file only via `await attachFile('input[type=file]', path)` (or a Locator target) — the
+only upload path. Two kinds of path work: a screenshot this run took (the paths a screenshot
+result lists under `attachments`), and pre-existing media under the approved roots —
+`~/.beckett/images` by default, plus anything `[quick].browser_attach_roots` in `config.toml`
+adds (`/` is an explicit broad-access escape hatch). Spell the path out as a literal string
+somewhere in the snippet (assigning it to a variable first is fine): the host validates every
+path your code names before the snippet runs, so a path assembled at runtime is never approved.
 Uploads are realpath-contained, a bounded regular file, and extension-validated
-(PNG/JPEG/GIF/WebP/MP4) — never assume arbitrary media exists.
+(PNG/JPEG/GIF/WebP/MP4) — never assume arbitrary media exists. A refusal tells you the reason
+and the approved roots; read it rather than asking a human to widen configuration.
 
 When the task names a keychain entry, its credentials preload as a read-only `secrets` object in
 every script (task text lists the exact fields, e.g. `secrets.email`, `secrets.password`;

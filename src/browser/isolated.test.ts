@@ -496,6 +496,37 @@ test("configured attachment roots accept media, reject escaping symlinks and mis
   }
 });
 
+test("the default images root authorizes a pre-existing upload, and nothing above or beside it", () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-browser-images-root-test-"));
+  try {
+    // No [quick].browser_attach_roots at all: the documented default is the images directory,
+    // and a file an earlier run generated there must be uploadable without widening anything.
+    const settings = browserHostSettings(validateConfig({ paths: { beckett_dir: dir } }));
+    const roots = settings.attachmentRoots!;
+    const images = resolve(dir, "images");
+    expect(roots).toEqual([images]);
+    mkdirSync(images, { recursive: true });
+
+    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(16)]);
+    const generated = join(images, "avatar.png");
+    writeFileSync(generated, png);
+    expect(assertTrustedBrowserAttachment(generated, roots)).toBe(realpathSync(generated));
+
+    // A sibling of the images directory is outside every approved root.
+    const beside = join(dir, "beside.png");
+    writeFileSync(beside, png);
+    expect(() => assertTrustedBrowserAttachment(beside, roots)).toThrow("escaped the permitted roots");
+
+    // A symlink sitting inside the approved root cannot lend its location to its target:
+    // containment is decided after realpath, never from the spelling the caller supplied.
+    const escape = join(images, "escape.png");
+    symlinkSync(beside, escape);
+    expect(() => assertTrustedBrowserAttachment(escape, roots)).toThrow("escaped the permitted roots");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("evaluator never receives a screenshot path and daemon delivers a trusted PNG", async () => {
   const dir = mkdtempSync(join(tmpdir(), "beckett-browser-nofollow-test-"));
   const config = validateConfig({ paths: { beckett_dir: dir }, quick: { browser_profile_dir: "browser/profile" } });

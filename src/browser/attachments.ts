@@ -17,7 +17,8 @@ function pathIsWithin(root: string, target: string): boolean {
   return offset === "" || (!offset.startsWith("..") && !isAbsolute(offset));
 }
 
-function kindForExtension(path: string): BrowserAttachmentKind | null {
+/** Exported so callers can cheaply pre-filter candidate paths before touching the filesystem. */
+export function kindForExtension(path: string): BrowserAttachmentKind | null {
   switch (extname(path).toLowerCase()) {
     case ".png": return "png";
     case ".jpg":

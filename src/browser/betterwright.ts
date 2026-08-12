@@ -28,9 +28,9 @@
 
 import { closeSync, constants, copyFileSync, existsSync, mkdirSync, openSync, readSync, writeSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { basename, extname, join, resolve } from "node:path";
+import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import { BetterWright, NetworkPolicy, piImageArtifacts } from "betterwright";
-import { openTrustedBrowserAttachment } from "./attachments.ts";
+import { kindForExtension, openTrustedBrowserAttachment } from "./attachments.ts";
 import type { Logger } from "../types.ts";
 import { createMeasurementCache, measureDirectoryBytes, pruneChromeProfileCaches } from "./profile-cache.ts";
 import { LANE_STORAGE_BYTES } from "./storage-quota.ts";
@@ -47,6 +47,10 @@ import type {
 
 const MAX_CODE_CHARS = 100_000;
 const MAX_EVENTS = 100;
+/** Media paths one snippet may name. Bounds the filesystem work a single call can provoke. */
+const MAX_ATTACHMENT_CANDIDATES = 32;
+/** Uploads one lease may stage. Bounds the bytes copied into BetterWright's artifact dir. */
+const MAX_STAGED_ATTACHMENTS = 32;
 /** Default concurrent-lease cap. A real browser on a real machine, not a fleet. */
 const DEFAULT_MAX_LEASES = 3;
 /** Absolute upper bound on the cap regardless of configuration. */
@@ -117,6 +121,10 @@ interface ActiveLease extends BrowserLease {
   screenshots: string[];
   /** Validated public path -> BetterWright-owned readable copy. */
   attachments: Map<string, string>;
+  /** Named-but-rejected path -> host-side reason, so the snippet can report why. */
+  attachmentRefusals: Map<string, string>;
+  /** Uploads copied for this lease, held under MAX_STAGED_ATTACHMENTS. */
+  stagedAttachments: number;
   /** Serializes this lease's own calls so they stay strictly ordered. */
   queue: Promise<void>;
   /** Shared-profile size observed when this lease acquired, its growth baseline. */
@@ -357,31 +365,81 @@ export function createBetterWrightRuntime(
     return copied;
   }
 
-  /** Extract direct string paths from attachFile(selector, "/path") calls before sandbox execution. */
-  function literalAttachmentPaths(code: string): string[] {
-    const matches = code.matchAll(/\battachFile\s*\(\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,()]+)\s*,\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/g);
+  /**
+   * Collect the media paths a snippet names, so the host can validate them before it runs.
+   *
+   * Scanning every string and substitution-free template literal — not just the second argument
+   * of a textbook `attachFile("sel", "/path")` — is deliberate: the argument-position regex this
+   * replaces missed the spellings the briefing itself invites (a Locator first argument, a path
+   * held in a variable), and an unstaged path failed with a refusal that blamed the configured
+   * roots. A candidate is only a name here; containment is still decided host-side by
+   * openTrustedBrowserAttachment.
+   */
+  function candidateAttachmentPaths(code: string): string[] {
+    const literals = code.matchAll(/"((?:\\.|[^"\\\n])*)"|'((?:\\.|[^'\\\n])*)'|`([^`\\$]*)`/g);
     const paths = new Set<string>();
-    for (const match of matches) {
-      const literal = match[1]!;
-      try {
-        // Browser paths returned in tool results are JSON strings. Supporting single quotes too
-        // keeps the normal JavaScript spelling ergonomic without evaluating model-authored code.
-        const value = literal.startsWith('"')
-          ? JSON.parse(literal)
-          : literal.slice(1, -1).replace(/\\(['\\])/g, "$1");
-        if (typeof value === "string") paths.add(value);
-      } catch {
-        // The sandbox helper rejects an unprepared path with the same safe refusal.
+    for (const match of literals) {
+      const [, double, single, template] = match;
+      let value: string | undefined;
+      // Browser paths returned in tool results are JSON strings. Supporting the other two
+      // spellings keeps normal JavaScript ergonomic without evaluating model-authored code.
+      if (double !== undefined) {
+        try {
+          value = JSON.parse(`"${double}"`) as string;
+        } catch {
+          continue;
+        }
+      } else if (single !== undefined) {
+        value = single.replace(/\\(['\\])/g, "$1");
+      } else {
+        value = template;
       }
+      // Only absolute paths that already claim an attachable media type reach the filesystem,
+      // so an ordinary program's strings never turn into stat/open traffic.
+      if (!value || !isAbsolute(value) || !kindForExtension(value)) continue;
+      paths.add(value);
+      if (paths.size >= MAX_ATTACHMENT_CANDIDATES) break;
     }
     return [...paths];
   }
 
+  /** Every root this lease may upload from: its own artifacts plus the configured roots. */
+  function permittedAttachmentRoots(lease: ActiveLease): string[] {
+    return [...new Set([resolve(lease.artifactsDir), ...(settings.attachmentRoots ?? []).map((root) => resolve(root))])];
+  }
+
+  /**
+   * Validate one named path host-side and, when it passes, register it for the bridge.
+   *
+   * A candidate that fails keeps its reason instead of aborting the call: the scan reaches every
+   * media-looking literal, so a string that merely resembles a path must not kill the snippet.
+   * The snippet still cannot reach the file — it only ever receives the reason at its attachFile.
+   */
+  function prepareAttachment(lease: ActiveLease, source: string): void {
+    if (lease.attachments.has(source)) return;
+    try {
+      if (lease.stagedAttachments >= MAX_STAGED_ATTACHMENTS) {
+        throw new Error(`this run already staged ${MAX_STAGED_ATTACHMENTS} uploads`);
+      }
+      stageAttachment(lease, source);
+      lease.attachmentRefusals.delete(source);
+    } catch (error) {
+      const reason = (error as Error).message;
+      lease.attachmentRefusals.set(source, reason);
+      logger.warn("browser upload candidate refused", { runId: lease.runId, source, reason });
+    }
+  }
+
   /** Copy the bytes from the checked descriptor into BetterWright's artifact directory. */
   function stageAttachment(lease: ActiveLease, source: string): void {
-    const trusted = openTrustedBrowserAttachment(source, [lease.artifactsDir, ...(settings.attachmentRoots ?? [])]);
+    const trusted = openTrustedBrowserAttachment(source, permittedAttachmentRoots(lease));
     try {
-      if (lease.attachments.has(trusted.sourcePath)) return;
+      const staged = lease.attachments.get(trusted.sourcePath);
+      if (staged) {
+        // Already copied under another spelling — alias this one rather than copying twice.
+        lease.attachments.set(source, staged);
+        return;
+      }
       const sessionDir = createHash("sha256").update(lease.session).digest("hex").slice(0, 16);
       const destinationDir = join(home, "artifacts", sessionDir);
       mkdirSync(destinationDir, { recursive: true, mode: 0o700 });
@@ -407,6 +465,7 @@ export function createBetterWrightRuntime(
       // The snippet uses the spelling it supplied; retain it as a lookup alias while
       // containment is always decided from trusted.sourcePath after realpath.
       lease.attachments.set(source, destination);
+      lease.stagedAttachments++;
     } finally {
       closeSync(trusted.fd);
     }
@@ -418,19 +477,28 @@ export function createBetterWrightRuntime(
    */
   function attachmentBridge(lease: ActiveLease): string {
     const approved = JSON.stringify(Object.fromEntries(lease.attachments));
+    const refusals = JSON.stringify(Object.fromEntries(lease.attachmentRefusals));
+    // Naming the roots ends the loop this refusal used to start: an agent that saw only
+    // "outside the approved roots" asked a human to widen config that already allowed the file.
+    const roots = JSON.stringify(permittedAttachmentRoots(lease).join(", "));
     return `
-const attachFile = async (target, screenshotPath) => {
-  if (typeof screenshotPath !== "string") throw new Error("attachFile needs a screenshot path");
-  const approvedPath = ${approved}[screenshotPath];
+const attachFile = async (target, sourcePath) => {
+  if (typeof sourcePath !== "string") throw new Error("attachFile needs a file path");
+  const approvedPath = ${approved}[sourcePath];
   if (typeof approvedPath !== "string") {
-    throw new Error("attachFile refuses paths outside this run's approved attachment roots");
+    const refusal = ${refusals}[sourcePath];
+    throw new Error(
+      "attachFile refuses paths outside this run's approved attachment roots"
+      + " (" + (refusal || "the host never saw this path; write it as a literal string, not a computed value") + ")"
+      + "; approved roots: " + ${roots},
+    );
   }
   const input = typeof target === "string" ? page.locator(target) : target;
   if (!input || typeof input.setInputFiles !== "function") {
     throw new Error("attachFile target must be a file-input selector or Locator");
   }
   await input.setInputFiles(approvedPath);
-  return { attached: screenshotPath };
+  return { attached: sourcePath };
 };
 `;
   }
@@ -439,10 +507,16 @@ const attachFile = async (target, screenshotPath) => {
   async function execute(lease: ActiveLease, code: string, options?: BrowserEvalCallOptions): Promise<BrowserEvalResult> {
     if (!code.trim()) throw new Error("betterwright browser requires non-empty JavaScript");
     if (code.length > MAX_CODE_CHARS) throw new Error(`betterwright browser code exceeds ${MAX_CODE_CHARS} characters`);
-    // Stage literal paths before exposing the bridge; unprepared dynamic paths still fail closed.
-    for (const source of literalAttachmentPaths(code)) stageAttachment(lease, source);
-    // Do not alter ordinary program source until this lease actually has an attachable file.
-    const bridgedCode = lease.attachments.size > 0 ? `${attachmentBridge(lease)}\n${code}` : code;
+    // Validate every path this snippet names before exposing the bridge; anything the host did
+    // not approve still fails closed, now with the reason and the roots that actually apply.
+    const wantsAttachment = code.includes("attachFile");
+    if (wantsAttachment) {
+      for (const source of candidateAttachmentPaths(code)) prepareAttachment(lease, source);
+    }
+    // Do not alter ordinary program source until this lease attaches something or asks to.
+    const bridgedCode = lease.attachments.size > 0 || wantsAttachment
+      ? `${attachmentBridge(lease)}\n${code}`
+      : code;
     const raw = await browser.run(bridgedCode, {
       session: lease.session,
       approvedDownloads: downloadReferences.has(lease.session),
@@ -541,6 +615,8 @@ const attachFile = async (target, screenshotPath) => {
         events: [],
         screenshots: [],
         attachments: new Map(),
+        attachmentRefusals: new Map(),
+        stagedAttachments: 0,
         queue: Promise.resolve(),
         profileBytesAtAcquire: 0,
         profileBudgetError: null,
