@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### One voice: the chilltext gate's prompt is derived from persona.md
+
+Beckett's voice lived in two places — `~/.beckett/persona.md` (what the Concierge's own system
+prompt appends, what Beckett rewrites when asked to change its vibe) and a hand-written
+`[concierge.chilltext] system` string in config.toml (what the rewrite gate actually asked for).
+Tune one and the other drifts.
+
+- The gate's system prompt is now composed at call time from the persona file
+  (`src/chill-system.ts`): the WHOLE file, wrapped in a short framing preamble that states the
+  gate's job — rewrite text that is already Beckett's, preserve meaning, facts, numbers, links and
+  code exactly, leave the bubble split to the request. The persona is handed over as a labelled
+  voice reference, not as instructions, so the model restyles the message instead of trying to be
+  Beckett and answer it. Read fresh per call: edit `persona.md`, `beckett reload`, done.
+- `[concierge.chilltext] system` is retired. A config.toml that still carries it is stripped with
+  one loud deprecation line instead of blocking the boot. The replacement, `system_override`, is
+  an explicit escape hatch: empty by default, and a non-empty value replaces the persona voice for
+  every message.
+- Fail safe: a missing or unreadable persona file just omits the `system` field (chilltext falls
+  back to its own default voice) and logs once. Nobody's message is lost to a missing file.
+
 ## v7.0.3 (2026-08-12)
 
 ### Trust gate: the verify/ship loop stops lying to itself

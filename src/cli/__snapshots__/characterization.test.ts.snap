@@ -1937,7 +1937,7 @@ url = "https://chilltext.ssh.codes"
 timeout_ms = 8000
 max_bubbles = 3
 bubble_delay_ms = 2500
-system = ""
+system_override = ""
 skip_code_blocks = true
 
 [quick]
