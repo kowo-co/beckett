@@ -110,7 +110,7 @@ describe("chromium fork launch gating", () => {
       chromiumRoot: root,
       platform: "linux",
       arch: "x64",
-      exists: (path) => path === join(root, "linux-x64", "chrome"),
+      exists: (path) => path === join(root, "linux-x64", "betterchromium"),
     })).toEqual({ env: { BETTERWRIGHT_CHROMIUM_ROOT: root }, mountRoot: root });
   });
 
@@ -144,7 +144,7 @@ describe("chromium fork launch gating", () => {
     expect(probed).toEqual([]);
   });
 
-  test("win32 probes the win-x64 chrome.exe layout", () => {
+  test("win32 probes the win-x64 betterchromium.exe layout", () => {
     const probed: string[] = [];
     chromiumForkLaunch({
       chromiumRoot: "C:\\chromium",
@@ -155,7 +155,7 @@ describe("chromium fork launch gating", () => {
         return false;
       },
     });
-    expect(probed).toEqual([join("C:\\chromium", "win-x64", "chrome.exe")]);
+    expect(probed).toEqual([join("C:\\chromium", "win-x64", "betterchromium.exe")]);
   });
 });
 
@@ -316,7 +316,7 @@ describe("browser host sandbox policy", () => {
     const fixture = fixturePaths();
     const chromiumForkRoot = join(fixture.dir, "chromium-fork-root");
     mkdirSync(join(chromiumForkRoot, `linux-${process.arch}`), { recursive: true });
-    writeFileSync(join(chromiumForkRoot, `linux-${process.arch}`, "chrome"), "fixture");
+    writeFileSync(join(chromiumForkRoot, `linux-${process.arch}`, "betterchromium"), "fixture");
     try {
       const launch = buildBrowserHostLaunch({
         settings: fixture.settings,

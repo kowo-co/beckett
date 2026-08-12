@@ -193,9 +193,9 @@ export function obscuraLaunch(options: {
  * shipped platforms (macOS arm64, Linux x64, Windows x64) have an artifact at all.
  */
 const CHROMIUM_FORK_PLATFORM_LAYOUT: Record<string, string> = {
-  "darwin-arm64": join("mac-arm64", "Chromium.app", "Contents", "MacOS", "Chromium"),
-  "linux-x64": join("linux-x64", "chrome"),
-  "win32-x64": join("win-x64", "chrome.exe"),
+  "darwin-arm64": join("mac-arm64", "BetterChromium.app", "Contents", "MacOS", "BetterChromium"),
+  "linux-x64": join("linux-x64", "betterchromium"),
+  "win32-x64": join("win-x64", "betterchromium.exe"),
 };
 
 /**
