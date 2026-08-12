@@ -258,11 +258,20 @@ echo "== tagged and pushed ${VERSION} BEFORE restart =="
 # queries the STILL-OLD daemon, prints run ids and ages while it waits, then fails closed after a
 # capped deadline rather than losing a routine run. Set BECKETT_BROWSER_DRAIN_WAIT_SECS=0 to refuse
 # immediately (maximum: ten minutes).
-echo "== draining browser work and restarting ${HOST} =="
+#
+# The RUN-worker guard (#243) is the same gate for the run supervisor's live implement/review
+# workers, which this deploy used to kill silently: on 2026-08-12 the restart took out a reviewer
+# four minutes into its session and the run parked holding work nobody was driving. It runs FIRST
+# because its wait is the long one (default ten minutes, BECKETT_RUN_DRAIN_WAIT_SECS on the deploy
+# host, maximum forty-five); the browser guard keeps its place immediately before the restart so a
+# browser run started during that wait is still caught. Only a run with a LIVE WORKER blocks —
+# queued/parked runs and the durable publish outbox all survive a restart on their own.
+echo "== draining run + browser work and restarting ${HOST} =="
 ssh "${HOST}" 'bash -s' <<'REMOTE'
 set -euo pipefail
 export PATH="$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin"
 cd ~/beckett
+bun deploy/run-drain-guard.ts
 bun deploy/browser-drain-guard.ts
 systemctl --user restart beckett-v4.service
 sleep 5

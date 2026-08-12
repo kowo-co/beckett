@@ -13,6 +13,7 @@ import type { Config } from "../types.ts";
 import type { HarnessSpec } from "./cast.ts";
 import { appendSpendRecord, type SpendRecord } from "../spend.ts";
 import type { DispatchEvent } from "../dispatch/events.ts";
+import { restartBlockingRunWorkers } from "../deploy/run-drain.ts";
 import type { RunGitOps } from "./supervisor.ts";
 import { RunStore } from "./store.ts";
 import type { Run } from "./types.ts";
@@ -74,8 +75,15 @@ function makeHandle(args: any) {
     stallFingerprint: () => null,
     async reap() {},
     // test trigger: complete the worker with a status + optional structured done-signal.
-    finish(status: "success" | "error", summary: string, structured: unknown = null) {
-      result = { status, summary, structured, timedOut: false, unappliedNudges: [] };
+    // `extra` carries the rest of the real `WorkerResult` — `errorMessage` (the driver's own
+    // lifecycle diagnostic, #247) and `timedOut` are the two a death path reads.
+    finish(
+      status: "success" | "error",
+      summary: string,
+      structured: unknown = null,
+      extra: Record<string, unknown> = {},
+    ) {
+      result = { status, summary, structured, timedOut: false, unappliedNudges: [], ...extra };
       for (const cb of doneCbs) cb(status, summary);
     },
   };
@@ -944,6 +952,141 @@ describe("crash resume", () => {
     await supervisor.admit(run.id);
     await tick();
     expect(spawnCalls[0]!.steering).toEqual(["use PKCE"]);
+  });
+});
+
+/**
+ * The 2026-08-12 casualty, end to end (#243 / #244 / #247): the deploy's `clean_shutdown` at
+ * 20:51:44.345Z killed a live reviewer (.371Z) and the run parked (.404Z) carrying the WORKER'S
+ * GREETING as its error, with nothing to pick the stage back up.
+ */
+describe("a worker killed by the daemon's own shutdown", () => {
+  /** Verbatim from the parked run: the model's OPENING SENTENCE, which is not an error. */
+  const GREETING = "the reviewer exited with an error.\n\nI'll start by inspecting the actual diff and repo state.";
+  /** What the driver actually says now that it reads `signalCode` (`../drivers/base.ts`). */
+  const SIGTERM = "claude process exited (signal SIGTERM)";
+
+  /** Drive a run to a live review worker, then kill it the way a daemon restart does. */
+  async function killedMidReview(opts: { statePath: string; store: RunStore }) {
+    const h = newSupervisor({ runtimeStatePath: opts.statePath, store: opts.store });
+    const run = seedRun(opts.store, makeRun({ state: "reviewing" }));
+    await h.supervisor.admit(run.id);
+    await tick();
+    expect(spawnCalls[0]!.stage).toBe("review");
+    // `shell/main.ts` calls stop() FIRST in its drain, then the workers take the signal.
+    h.supervisor.stop();
+    created[0]!.finish("error", GREETING, null, { errorMessage: SIGTERM });
+    await settle();
+    return { ...h, run };
+  }
+
+  test("run.error names the signal and the shutdown, never the session's leading assistant text", async () => {
+    const dir = scratch();
+    const { store, events, run } = await killedMidReview({
+      statePath: join(dir, "run-state.json"),
+      store: new RunStore(join(dir, "runs.json")),
+    });
+
+    const parked = store.get(run.id)!;
+    expect(parked.state).toBe("parked");
+    expect(parked.error).toContain("killed during daemon shutdown");
+    expect(parked.error).toContain("SIGTERM");
+    // The regression itself: not one word of what the model happened to be saying.
+    expect(parked.error).not.toContain("I'll start by inspecting");
+    expect(parked.error).not.toContain("the reviewer exited with an error.");
+
+    // A restart is not a failure — the timeline says `interrupted`, and carries the cause only.
+    const death = events.find((e) => e.stage === "review" && e.outcome !== "started");
+    expect(death?.outcome).toBe("interrupted");
+    expect(death?.error).toContain("SIGTERM");
+    expect(death?.error).not.toContain("I'll start by inspecting");
+  });
+
+  test("a worker that dies while the daemon is UP records the driver's cause, not a shutdown", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(store, makeRun({ state: "reviewing" }));
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("error", GREETING, null, { errorMessage: "claude process exited (code 1)" });
+    await settle();
+    const parked = store.get(run.id)!;
+    expect(parked.error).toContain("code 1");
+    expect(parked.error).not.toContain("daemon shutdown");
+    expect(parked.error).not.toContain("I'll start by inspecting");
+  });
+
+  test("on the next boot the owed review stage is re-dispatched instead of parking forever", async () => {
+    const dir = scratch();
+    const statePath = join(dir, "run-state.json");
+    const storePath = join(dir, "runs.json");
+    const { run } = await killedMidReview({ statePath, store: new RunStore(storePath) });
+    expect(spawnCalls).toHaveLength(1);
+
+    // The daemon comes back on the new release. Nothing else changed: same state file, same ledger.
+    const next = newSupervisor({ runtimeStatePath: statePath, store: new RunStore(storePath) });
+    await next.supervisor.start();
+    await settle();
+    next.supervisor.stop();
+
+    expect(next.store.get(run.id)!.state).toBe("reviewing");
+    // The park reason belonged to a worker that no longer exists.
+    expect(next.store.get(run.id)!.error).toBeNull();
+    expect(spawnCalls).toHaveLength(2);
+    expect(spawnCalls[1]!.stage).toBe("review");
+    expect(next.events.find((e) => e.stage === "restart-restaff")?.message).toContain("SIGTERM");
+
+    // Consumed ONCE: a third boot must not re-run a stage that is already staffed again.
+    const state = JSON.parse(readFileSync(statePath, "utf8")) as { owedResumes?: Record<string, unknown> };
+    expect(state.owedResumes ?? {}).toEqual({});
+  });
+
+  test("a stage that completed before the kill is never re-run", async () => {
+    const dir = scratch();
+    const statePath = join(dir, "run-state.json");
+    const storePath = join(dir, "runs.json");
+    const store = new RunStore(storePath);
+    // The owed row survived, but the ledger says the run moved on — the stage landed before the
+    // daemon went down, so re-dispatching it would double-run finished work.
+    const run = seedRun(store, makeRun({ state: "done" }));
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        version: 1,
+        liveLedger: {},
+        pendingSteers: {},
+        owedResumes: { [run.id]: { stage: "review", cause: "killed during daemon shutdown", at: 1 } },
+      }),
+    );
+    const { supervisor, store: reloaded } = newSupervisor({
+      runtimeStatePath: statePath,
+      store: new RunStore(storePath),
+    });
+    await supervisor.start();
+    await settle();
+    supervisor.stop();
+    expect(spawnCalls).toHaveLength(0);
+    expect(reloaded.get(run.id)!.state).toBe("done");
+  });
+
+  test("the deploy drain guard sees the live worker the restart would kill (#243)", async () => {
+    const { supervisor, store } = newSupervisor({ now: () => 5_000 });
+    const run = seedRun(store, makeRun({ state: "reviewing" }));
+    await supervisor.admit(run.id);
+    await tick();
+
+    // This is the exact seam `deploy/run-drain-guard.ts` reads: `beckett status`'s `runs` array is
+    // `RunSupervisor.live()` verbatim, and the guard refuses over any row with a worker.
+    const blocking = restartBlockingRunWorkers({ runs: supervisor.live() });
+    expect(blocking).toHaveLength(1);
+    expect(blocking[0]!.runId).toBe(run.id);
+    expect(blocking[0]!.stage).toBe("review");
+    expect(typeof blocking[0]!.startedAt).toBe("number");
+
+    // Once the stage finishes the run keeps living (publishing) but blocks no deploy.
+    created[0]!.finish("success", "looks good", doneSignal("complete"));
+    await settle();
+    expect(restartBlockingRunWorkers({ runs: supervisor.live() })).toEqual([]);
+    supervisor.stop();
   });
 });
 

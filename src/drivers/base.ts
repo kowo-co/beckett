@@ -292,7 +292,11 @@ export abstract class BaseDriver {
       this.log.error("stdout read loop crashed", { err: String(err) });
     });
     void this.drainStderr(child);
-    void child.exited.then((code) => this.onProcessExit(code, gen, child.pid, groupKill));
+    // `signalCode` is only populated once the child has actually exited, so it is read INSIDE the
+    // continuation — a worker the daemon's restart kills reports `SIGTERM` here and nothing else.
+    void child.exited.then((code) =>
+      this.onProcessExit(code, gen, child.pid, groupKill, child.signalCode ?? null),
+    );
 
     // Arm the wall-clock watchdog once (survives resumes).
     if (!this.watchdog) {
@@ -317,6 +321,7 @@ export abstract class BaseDriver {
     gen: number,
     pid: number,
     groupKill: boolean,
+    signal: NodeJS.Signals | null = null,
   ): Promise<void> {
     if (gen !== this.childGen) {
       killGroup(pid, groupKill, this.log);
@@ -340,7 +345,7 @@ export abstract class BaseDriver {
     // Exited without a terminal finish → synthesize an error finish (crash path).
     if (!this.finished && !this.isTerminal()) {
       const ts = Date.now();
-      const message = this.processExitMessage(code);
+      const message = this.processExitMessage(code, signal);
       this.emit({ kind: "error", message, ts });
       this.emit({
         kind: "finished",
@@ -483,12 +488,19 @@ export abstract class BaseDriver {
     }
   }
 
-  /** "<harness> process exited (code N)" + the stderr tail — self-diagnosing (issue #17). */
-  protected processExitMessage(code: number): string {
+  /**
+   * "<harness> process exited (code N)" + the stderr tail — self-diagnosing (issue #17).
+   *
+   * The SIGNAL is named when the OS supplied one (issue #247): a worker killed by the daemon's
+   * own restart dies on SIGTERM with no exit code at all, and "code null" is not a cause anyone
+   * can diagnose a park from.
+   */
+  protected processExitMessage(code: number, signal: NodeJS.Signals | null = null): string {
+    const how = signal ? `signal ${signal}` : `code ${code}`;
     const tail = this.stderrRing.tail();
     return tail
-      ? `${this.harnessName()} process exited (code ${code}). stderr tail:\n${tail}`
-      : `${this.harnessName()} process exited (code ${code})`;
+      ? `${this.harnessName()} process exited (${how}). stderr tail:\n${tail}`
+      : `${this.harnessName()} process exited (${how})`;
   }
 
   // ===========================================================================

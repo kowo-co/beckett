@@ -74,6 +74,17 @@ export interface WorkerResult {
   /** Failure taxonomy off the driver's finished event (issue #17); undefined on success. */
   errorClass?: ErrorClass;
   /**
+   * The driver's own LIFECYCLE diagnostic for a dead worker — "claude process exited (code 143,
+   * signal SIGTERM)", a spawn failure, a wall-clock kill — captured from the terminal `error`
+   * event the driver emits immediately before an `error_process_exit` finish.
+   *
+   * Load-bearing because {@link summary} is NOT a cause on this path: a worker that is killed
+   * never writes a done-signal, so `summaryFrom` falls back to scraping the last assistant text,
+   * and a reviewer four minutes into a session yields its own opening sentence. Issue #247 is
+   * exactly that string being recorded as `run.error`. Undefined when the driver named no cause.
+   */
+  errorMessage?: string;
+  /**
    * Steering the driver buffered but never delivered to the model (issue #22) — drained at
    * finish so the dispatcher can carry the user's words into the next stage instead of
    * silently dropping them. Empty when everything was applied.
@@ -469,6 +480,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerHandle> 
   let sessionId = ""; // captured from the driver's SpawnResult (crash-recovery ledger, issue #20)
   let pid = 0;
   let lastAssistantText = "";
+  /** The driver's most recent `error` message — the crash path's only statement of CAUSE (#247). */
+  let lastErrorMessage = "";
   // This is deliberately derived from the normalized WorkerEvents, which are also handed to the
   // private journal immediately below. It is a small in-memory index of existing evidence, not a
   // second telemetry stream or a journal read on the stall hot path.
@@ -513,6 +526,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerHandle> 
       case "assistant_text":
         if (!e.partial && e.text.trim()) lastAssistantText = e.text;
         break;
+      case "error":
+        if (e.message.trim()) lastErrorMessage = e.message;
+        break;
       case "stalled": {
         stallStrikes += 1;
         for (const cb of stallCbs) {
@@ -532,6 +548,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerHandle> 
           structured: e.structuredOutput,
           timedOut: e.subtype === "error_wall_clock_cap",
           errorClass: e.errorClass,
+          ...(e.status === "error" && lastErrorMessage ? { errorMessage: lastErrorMessage } : {}),
           // Steering the driver buffered but never applied (issue #22) — the dispatcher carries
           // it into the next stage rather than letting it die with this process.
           unappliedNudges: driver.drainUnappliedNudges?.() ?? [],
