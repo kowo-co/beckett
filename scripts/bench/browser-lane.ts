@@ -51,6 +51,24 @@ interface ProcStat {
   rssPages: number;
 }
 
+/**
+ * Which browser binary actually ran. BetterWright picks its backend at launch
+ * (native BetterChromium fork vs managed CloakBrowser) and, on Linux, that
+ * choice depends on a /dev/dri probe the sandbox's minimal --dev can defeat.
+ * A benchmark number is only comparable once you know which one produced it,
+ * so the sampler records argv[0] of every process in the host's tree and the
+ * report names the browser executables it saw. This reads /proc only; it
+ * changes no launch behaviour.
+ */
+function classifyBrowserBinary(exe: string): string | null {
+  const lower = exe.toLowerCase();
+  if (lower.includes("betterchromium") || /\/(?:chromium\/|betterwright\/chromium)/.test(lower)) return exe;
+  if (lower.includes("cloakbrowser") || lower.includes(".cloakbrowser")) return exe;
+  if (lower.includes("obscura")) return exe;
+  if (/\/(?:chrome|chromium|headless_shell)$/.test(lower)) return exe;
+  return null;
+}
+
 function readProcStat(pid: number): ProcStat | null {
   try {
     const raw = readFileSync(`/proc/${pid}/stat`, "utf8");
@@ -71,7 +89,18 @@ function readProcStat(pid: number): ProcStat | null {
 /** Sample the host child + all its descendants: peak tree RSS and per-PID CPU. */
 function createTreeSampler(rootPid: number) {
   const cpuByPid = new Map<number, number>();
+  const browserBinaries = new Set<string>();
   let peakRssBytes = 0;
+
+  function recordBinary(pid: number): void {
+    try {
+      const argv0 = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0")[0] ?? "";
+      const classified = argv0 ? classifyBrowserBinary(argv0) : null;
+      if (classified) browserBinaries.add(classified);
+    } catch {
+      // A process that exits between readdir and read is expected; skip it.
+    }
+  }
 
   function sample(): void {
     const stats = new Map<number, ProcStat>();
@@ -98,6 +127,7 @@ function createTreeSampler(rootPid: number) {
       if (!stat) continue;
       rssBytes += stat.rssPages * PAGE_SIZE;
       cpuByPid.set(pid, stat.cpuTicks); // monotonic; survives a PID that later exits.
+      recordBinary(pid);
     }
     if (rssBytes > peakRssBytes) peakRssBytes = rssBytes;
   }
@@ -111,6 +141,7 @@ function createTreeSampler(rootPid: number) {
     },
     peakRssBytes: () => peakRssBytes,
     cpuSeconds: () => [...cpuByPid.values()].reduce((sum, ticks) => sum + ticks, 0) / CLK_TCK,
+    browserBinaries: () => [...browserBinaries].sort(),
   };
 }
 
@@ -148,9 +179,27 @@ const spawn = ((options: Parameters<typeof Bun.spawn>[0]) => {
   return child;
 }) as typeof Bun.spawn;
 
+// Default: Beckett's stock browser_chromium_args (whatever config.ts ships).
+// BROWSER_BENCH_CHROMIUM_ARGS (a JSON array) swaps in an explicit list so the
+// same lane can be measured on a shared arg list both BetterWright versions
+// accept without a compatibility drop. It never edits the shipped default.
+const chromiumArgsOverride = (() => {
+  const raw = process.env.BROWSER_BENCH_CHROMIUM_ARGS?.trim();
+  if (!raw) return undefined;
+  const parsed = JSON.parse(raw);
+  if (!Array.isArray(parsed) || parsed.some((arg) => typeof arg !== "string")) {
+    throw new Error("BROWSER_BENCH_CHROMIUM_ARGS must be a JSON array of strings");
+  }
+  return parsed as string[];
+})();
+
 const config = validateConfig({
   paths: { beckett_dir: dir },
-  quick: { browser_profile_dir: "browser/profile", browser_eval_timeout_ms: 30_000 },
+  quick: {
+    browser_profile_dir: "browser/profile",
+    browser_eval_timeout_ms: 30_000,
+    ...(chromiumArgsOverride ? { browser_chromium_args: chromiumArgsOverride } : {}),
+  },
 });
 const runtime = createIsolatedBrowserRuntime({
   settings: browserHostSettings(config),
@@ -189,20 +238,56 @@ try {
   const coldAcquireMs = performance.now() - coldStarted;
 
   const warmSamples: number[] = [];
+  const warnings = new Set<string>();
   for (let i = 0; i < WARM_ITERATIONS; i++) {
     const started = performance.now();
     const result = await runtime.evaluate(runId, scriptedInteraction, token);
     warmSamples.push(performance.now() - started);
+    for (const warning of result.warnings ?? []) warnings.add(warning);
     if (typeof result.value !== "number" || result.value <= 0) {
       throw new Error(`unexpected scripted-interaction result: ${JSON.stringify(result.value)}`);
     }
   }
 
   sampler?.sample();
+  // Snapshot the cost figures before the identity probe so the probe's own work
+  // is not counted against the warm loop it follows.
+  const peakRssMb = Number((sampler!.peakRssBytes() / (1024 * 1024)).toFixed(1));
+  const cpuSeconds = Number(sampler!.cpuSeconds().toFixed(2));
+  const browserBinaries = sampler!.browserBinaries();
+
+  // Second empirical backend witness, independent of argv: a native BetterChromium
+  // fork and managed CloakBrowser report different Chrome majors and platforms.
+  const identity = await runtime
+    .evaluate(
+      runId,
+      `return JSON.stringify({
+         ua: navigator.userAgent,
+         platform: navigator.platform,
+         webdriver: navigator.webdriver,
+         cores: navigator.hardwareConcurrency,
+       });`,
+      token,
+    )
+    .then((result) => {
+      for (const warning of result.warnings ?? []) warnings.add(warning);
+      return typeof result.value === "string" ? JSON.parse(result.value) : result.value;
+    })
+    .catch((error) => ({ error: String(error) }));
+
   const stats = runtime.stats();
   const report = {
     fixture: baseUrl,
     backend: "betterwright/CloakBrowser (isolated host)",
+    betterwrightVersion: (await import("betterwright/package.json", { with: { type: "json" } }).then(
+      (mod) => (mod.default as { version?: string }).version,
+      () => undefined,
+    )) ?? "unknown",
+    betterwrightBackendEnv: process.env.BETTERWRIGHT_BACKEND ?? "(unset → auto)",
+    chromiumArgs: config.quick.browser_chromium_args,
+    browserBinaries,
+    identity,
+    warnings: [...warnings],
     headless: config.quick.browser_headless,
     warmIterations: WARM_ITERATIONS,
     coldAcquireMs: Number(coldAcquireMs.toFixed(1)),
@@ -212,8 +297,8 @@ try {
       p95: Number(percentile(warmSamples, 0.95).toFixed(1)),
       max: Number(Math.max(...warmSamples).toFixed(1)),
     },
-    peakRssMb: Number((sampler!.peakRssBytes() / (1024 * 1024)).toFixed(1)),
-    cpuSeconds: Number(sampler!.cpuSeconds().toFixed(2)),
+    peakRssMb,
+    cpuSeconds,
     hostLaunches: stats.launches,
     evaluations: stats.evaluations,
   };
