@@ -5559,23 +5559,34 @@ export class Concierge {
               // Coalesce a retry by the canonical delivery payload; attachments are included so a later,
               // genuinely different payload is never suppressed.
               return this.dedupeDiscordReply(JSON.stringify([channelId, text, files]), async () => {
+                // If this reply is issued BY the @mention turn it's answering, claim that turn: post it as a
+                // native reply to the originating message and mark the turn handled so onMessage won't also
+                // auto-post the turn text (the duplicate-message bug). Correlated by the request's issuer
+                // token to the turn EXECUTING on the issuing session (§9.3), so a live turn in ANOTHER
+                // channel (or a queued second mention, or a notify() update turn) can never steal the
+                // claim — a cross-channel reply posts plainly and leaves the target turn's own reply alone.
+                const active = this.issuerMention(req.token, channelId);
+                const claimsActiveTurn = !!active && active.channelId === channelId;
+                if (claimsActiveTurn && active!.declined) {
+                  // OPS-101 hold-and-cancel backstop (OPS-99 §5.3): decline is TERMINAL. If the concierge
+                  // already ran `beckett discord decline` this turn, it aborted before any user-facing output —
+                  // a later `discord reply` must NOT sneak a message out (that would be the "abort leaks a
+                  // partial message" bug). runAmbientTurn returns a synthetic PASS regardless, so the only way
+                  // to keep that a true no-post is to refuse the reply here.
+                  return { ok: false, error: "you declined this turn — it posts nothing; a reply is not allowed" };
+                }
+                // Claim the turn BEFORE the send starts, synchronously, not after `deliverChilled` resolves.
+                // The terminal auto-post (onMessage/runDirectedTurn) reads this same flag the instant the
+                // model's turn output resolves — and the model's turn cannot resolve until THIS Bash tool
+                // call returns, so setting the flag here (before any `await`) is guaranteed to land before
+                // that read. Setting it only after the post completed left a real window open: a chilled or
+                // multi-chunk delivery takes several actual seconds, and the CLI's own bus round trip can
+                // time out client-side (`discordReplyAckTimeoutMs`) and hand control back to the model while
+                // the daemon is still sending — so the model's turn could finish, and the auto-post fire a
+                // real second time, before this line ever ran. Rolled back on failure so a genuinely failed
+                // CLI reply still falls through to the auto-post as a fallback.
+                if (claimsActiveTurn && active) active.repliedViaCli = true;
                 try {
-                  // If this reply is issued BY the @mention turn it's answering, claim that turn: post it as a
-                  // native reply to the originating message and mark the turn handled so onMessage won't also
-                  // auto-post the turn text (the duplicate-message bug). Correlated by the request's issuer
-                  // token to the turn EXECUTING on the issuing session (§9.3), so a live turn in ANOTHER
-                  // channel (or a queued second mention, or a notify() update turn) can never steal the
-                  // claim — a cross-channel reply posts plainly and leaves the target turn's own reply alone.
-                  const active = this.issuerMention(req.token, channelId);
-                  const claimsActiveTurn = !!active && active.channelId === channelId;
-                  if (claimsActiveTurn && active!.declined) {
-                    // OPS-101 hold-and-cancel backstop (OPS-99 §5.3): decline is TERMINAL. If the concierge
-                    // already ran `beckett discord decline` this turn, it aborted before any user-facing output —
-                    // a later `discord reply` must NOT sneak a message out (that would be the "abort leaks a
-                    // partial message" bug). runAmbientTurn returns a synthetic PASS regardless, so the only way
-                    // to keep that a true no-post is to refuse the reply here.
-                    return { ok: false, error: "you declined this turn — it posts nothing; a reply is not allowed" };
-                  }
                   const opts = {
                     // A native reply is right for an @mention (answering THAT message), but an ambient turn
                     // posts plainly — replying-to an un-addressed message reads as surveillance (§4.4).
@@ -5604,13 +5615,15 @@ export class Concierge {
                   // as one logical entry even when the native chunker sends several messages.
                   this.recordBeckettPost(channelId, text, messageId);
                   if (claimsActiveTurn && active) {
-                    active.repliedViaCli = true;
                     // The FIRST CLI reply IS the turn's ack. A later reply in the same turn (a wrap-up
                     // after filing) must NOT replace it — dedupe and correlation key on the first.
                     active.ackMessageId ??= messageId;
                   }
                   return { ok: true, data: { messageId } };
                 } catch (err) {
+                  // The claim above was optimistic; a send that never actually landed must not suppress
+                  // the auto-post, or the person gets no answer at all instead of a duplicate one.
+                  if (claimsActiveTurn && active) active.repliedViaCli = false;
                   return { ok: false, error: (err as Error).message };
                 }
               });
