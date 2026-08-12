@@ -193,10 +193,45 @@ export function obscuraLaunch(options: {
  * shipped platforms (macOS arm64, Linux x64, Windows x64) have an artifact at all.
  */
 const CHROMIUM_FORK_PLATFORM_LAYOUT: Record<string, string> = {
+  "darwin-arm64": join("mac-arm64", "Chromium.app", "Contents", "MacOS", "Chromium"),
+  "linux-x64": join("linux-x64", "chrome"),
+  "win32-x64": join("win-x64", "chrome.exe"),
+};
+
+/**
+ * 1.8.0 renamed the fork from "Chromium" to "BetterChromium" and renamed its binary with
+ * it, so the layout depends on which betterwright is pinned. Getting this wrong is not a
+ * soft miss: an explicit BETTERWRIGHT_CHROMIUM_ROOT is STRICT upstream, so pointing 1.7.2
+ * at a root holding a 1.8.x artifact makes every launch throw
+ * "BetterWright Chromium binary not found", while pointing 1.8.x at the 1.7.x name finds
+ * nothing and silently drops to CloakBrowser. Both tables are mirrored here because the
+ * resolver has no deep export from the package.
+ */
+const CHROMIUM_FORK_PLATFORM_LAYOUT_1_8: Record<string, string> = {
   "darwin-arm64": join("mac-arm64", "BetterChromium.app", "Contents", "MacOS", "BetterChromium"),
   "linux-x64": join("linux-x64", "betterchromium"),
   "win32-x64": join("win-x64", "betterchromium.exe"),
 };
+
+/** The pinned betterwright's own artifact layout, chosen by its major.minor. */
+export function chromiumForkPlatformLayout(betterwrightVersion: string | undefined): Record<string, string> {
+  const [major, minor] = (betterwrightVersion ?? "").split(".").map((part) => Number.parseInt(part, 10));
+  if (!Number.isFinite(major) || !Number.isFinite(minor)) return CHROMIUM_FORK_PLATFORM_LAYOUT_1_8;
+  return major > 1 || (major === 1 && minor >= 8)
+    ? CHROMIUM_FORK_PLATFORM_LAYOUT_1_8
+    : CHROMIUM_FORK_PLATFORM_LAYOUT;
+}
+
+/** Version of the betterwright this checkout resolves, or undefined when it is absent. */
+function installedBetterwrightVersion(): string | undefined {
+  try {
+    const manifest = createRequire(import.meta.url).resolve("betterwright/package.json");
+    const parsed = JSON.parse(readFileSync(manifest, "utf8")) as { version?: string };
+    return typeof parsed.version === "string" ? parsed.version : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * BetterWright Chromium fork enablement for the sandboxed betterwright host, mirroring
@@ -217,13 +252,16 @@ export function chromiumForkLaunch(options: {
   platform?: NodeJS.Platform;
   arch?: string;
   exists?: (path: string) => boolean;
+  betterwrightVersion?: string;
 }): { env: Record<string, string>; mountRoot: string | null } {
   const platform = options.platform ?? process.platform;
   const arch = options.arch ?? process.arch;
   const exists = options.exists ?? existsSync;
   const root = options.chromiumRoot.trim();
   if (root.toLowerCase() === "off") return { env: { BETTERWRIGHT_CHROMIUM_PATH: "off" }, mountRoot: null };
-  const layout = CHROMIUM_FORK_PLATFORM_LAYOUT[`${platform}-${arch}`];
+  const layout = chromiumForkPlatformLayout(options.betterwrightVersion ?? installedBetterwrightVersion())[
+    `${platform}-${arch}`
+  ];
   if (!layout) return { env: {}, mountRoot: null };
   const binary = join(root, layout);
   if (!exists(binary)) return { env: {}, mountRoot: null };
