@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v7.0.3 (2026-08-12)
+
 ### Trust gate: the verify/ship loop stops lying to itself
 
 Four fixes from the v7 day-one transcript review, each closing a way Beckett's own
