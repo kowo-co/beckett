@@ -40,6 +40,7 @@ import { dirname, join } from "node:path";
 
 import type { Config, Harness, Logger, WorkerEvent } from "../types.ts";
 import type { HarnessSpec } from "./cast.ts";
+import { applySonnetFirst } from "./cast.ts";
 import type { WorkItem } from "./work-item.ts";
 import type { ProgressSink } from "../progress/journal.ts";
 import { formatEvent } from "../progress/journal.ts";
@@ -572,13 +573,22 @@ export class RunSupervisor {
 
   // ── the spawn path ────────────────────────────────────────────────────────────────────
 
-  /** Resolve the cast for a stage, applying the ultracode override. */
+  /** Resolve the cast for a stage, applying the ultracode override and (implement) sonnet-first. */
   private castFor(run: Run, stage: RunStage): HarnessSpec {
-    const explicit = run.cast?.[stage];
+    let explicit = run.cast?.[stage];
     // Ultracode is an IMPLEMENT-stage override and never overrides an explicit cast — a human
     // who named a harness for this stage meant it.
     if (stage === "implement" && run.ultracode && !explicit) {
       return { harness: "claude", model: "claude-opus-5", effort: "ultracode" };
+    }
+    // Sonnet-first (issue #249): the IMPLEMENT stage's default is the enforced `claude-sonnet-5`,
+    // not whichever `harness.claude.default_model` an install names — and an opus cast with no
+    // stated reason downgrades to sonnet rather than deploying silently. Review is untouched (it
+    // keeps its own default-cast path below, unmodified) — the doctrine only gates the builder.
+    if (stage === "implement") {
+      const { spec, downgradeNote } = applySonnetFirst(explicit);
+      if (downgradeNote) this.trace(run, "implement:cast", "info", downgradeNote);
+      explicit = spec;
     }
     return this.stages.resolveCast(stage, explicit, runAsWorkItem(run), this.config);
   }

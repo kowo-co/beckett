@@ -49,6 +49,11 @@ const HarnessSpecSchema = z.object({
   model: z.string().optional(),
   effort: z.enum(["low", "medium", "high", "xhigh", "ultracode"]).optional(),
   reviewTier: z.enum(["self", "fresh"]).optional(),
+  // Sonnet-first (issue #249): the framer's stated reason an IMPLEMENT-stage opus cast clears
+  // sonnet's bar. Without this field the persisted round-trip (`patchRun`/`put`, both through
+  // this schema) silently strips it — the reason would vanish from the run record on the very
+  // next mutate() even though `cast.ts#applySonnetFirst` kept the cast because of it.
+  reason: z.string().optional(),
 });
 
 // `Casting` is an open index signature (`[stage: string]: HarnessSpec | undefined`) keyed by

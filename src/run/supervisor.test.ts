@@ -1071,6 +1071,86 @@ describe("ultracode", () => {
   });
 });
 
+// Sonnet-first (issue #249): CLAUDE.md's "sonnet is the default builder" doctrine, enforced
+// structurally instead of resting on the harness's own `default_model` config (which is exactly
+// how the betterwright run cast opus with no directive behind it — see `cast.ts#applySonnetFirst`).
+describe("sonnet-first implement casting", () => {
+  test("an un-cast run defaults the implement stage to sonnet", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    expect(spawnCalls[0]!.harness).toMatchObject({ harness: "claude", model: "claude-sonnet-5" });
+  });
+
+  test("an explicit non-opus directive is honored verbatim ('cast sonnet'/'cast codex' pass-through)", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(store, makeRun({ cast: { implement: { harness: "codex", effort: "medium" } } }));
+    await supervisor.admit(run.id);
+    await tick();
+    expect(spawnCalls[0]!.harness).toMatchObject({ harness: "codex", effort: "medium" });
+  });
+
+  test("an opus cast with no stated reason is downgraded to sonnet and logged on the run record", async () => {
+    const { supervisor, store, events } = newSupervisor();
+    const run = seedRun(store, makeRun({ cast: { implement: { harness: "claude", model: "claude-opus-5" } } }));
+    await supervisor.admit(run.id);
+    await tick();
+    expect(spawnCalls[0]!.harness).toMatchObject({ harness: "claude", model: "claude-sonnet-5" });
+    const note = events.find((e) => e.stage === "implement:cast");
+    expect(note).toBeDefined();
+    expect(note!.outcome).toBe("info");
+    expect(note!.message).toContain("claude-opus-5");
+    expect(note!.message).toContain("downgraded");
+  });
+
+  test("an opus cast WITH a stated reason is kept, and the reason rides along on the record", async () => {
+    const { supervisor, store, events } = newSupervisor();
+    const run = seedRun(
+      store,
+      makeRun({
+        cast: {
+          implement: {
+            harness: "claude",
+            model: "claude-opus-5",
+            reason: "cross-cutting integration across the gateway and the auth service",
+          },
+        },
+      }),
+    );
+    await supervisor.admit(run.id);
+    await tick();
+    expect(spawnCalls[0]!.harness).toMatchObject({
+      harness: "claude",
+      model: "claude-opus-5",
+      reason: "cross-cutting integration across the gateway and the auth service",
+    });
+    // No downgrade note — the reason on `run.cast.implement` (persisted to runs.json) IS the
+    // record of why opus was kept, so nothing extra needs logging.
+    expect(events.find((e) => e.stage === "implement:cast")).toBeUndefined();
+    expect(store.get(run.id)!.cast?.implement?.reason).toBe(
+      "cross-cutting integration across the gateway and the auth service",
+    );
+  });
+
+  test("the ultracode override still bypasses sonnet-first (its own documented deep-tier directive)", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(store, makeRun({ ultracode: true }));
+    await supervisor.admit(run.id);
+    await tick();
+    expect(spawnCalls[0]!.harness).toEqual({ harness: "claude", model: "claude-opus-5", effort: "ultracode" });
+  });
+
+  test("review stays on the strongest tier and is unaffected by sonnet-first", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(store, makeRun({ state: "reviewing" }));
+    await supervisor.admit(run.id);
+    await tick();
+    expect(spawnCalls[0]!.stage).toBe("review");
+    expect(spawnCalls[0]!.harness.model).toBe("claude-opus-5"); // config.models.reviewer (cfg() test default)
+  });
+});
+
 // The review GATE (`cast.ts#HarnessSpec.reviewTier`), ported from the dispatcher. `self` is what
 // `--preset taste-lane` and the cheap lanes are FOR: one pass, no second adversarial seat.
 describe("review tier", () => {

@@ -46,6 +46,15 @@ export interface HarnessSpec {
    * adversarial reviewer runs. Unset ⇒ derived from `effort` (low/medium → self; otherwise fresh).
    */
   reviewTier?: "self" | "fresh";
+  /**
+   * Why an IMPLEMENT-stage opus cast clears sonnet's bar (architecture, gnarly debugging,
+   * cross-cutting integration — see {@link applySonnetFirst}). Sonnet-first (issue #249): an
+   * opus implement cast with no `reason` is downgraded to sonnet at cast-resolution time; one
+   * WITH a reason is kept, and the reason rides along on the persisted `run.cast` — the run
+   * record — as the "why" a human or the run framer can read back later. Meaningless outside
+   * the implement stage (review stays on the strongest tier by design) but harmless there.
+   */
+  reason?: string;
 }
 
 /**
@@ -75,6 +84,7 @@ const HarnessSpecSchema: z.ZodType<HarnessSpec> = z.object({
   model: z.string().min(1).optional(),
   effort: z.enum(["low", "medium", "high", "xhigh", "ultracode"]).optional(),
   reviewTier: z.enum(["self", "fresh"]).optional(),
+  reason: z.string().min(1).optional(),
 }).refine((spec) => spec.effort !== "ultracode" || spec.harness === "claude", {
   // "ultracode" is claude-only — codex/pi don't implement it; without this the fail-fast a plain
   // effort enum used to give at parse time is lost, and an "ultracode" cast on another harness only
@@ -153,6 +163,51 @@ export function validateCasting(casting: unknown): string[] {
     }
   }
   return errors;
+}
+
+// =======================================================================================
+// Sonnet-first (issue #249): the enforced default IMPLEMENT cast
+// =======================================================================================
+
+/** The enforced default implement model — CLAUDE.md doctrine, made structural instead of aspirational. */
+export const DEFAULT_IMPLEMENT_MODEL = "claude-sonnet-5";
+
+/** True for any opus-tier model id (`claude-opus-5`, the older `claude-opus-4-8`, future SKUs). */
+export function isOpusModel(model: string | undefined): boolean {
+  return typeof model === "string" && /opus/i.test(model);
+}
+
+/** What {@link applySonnetFirst} did, for the caller to log on the run record. */
+export interface SonnetFirstResult {
+  /** The resolved implement cast — always harness-complete, never `undefined`. */
+  spec: HarnessSpec;
+  /** Set only when an opus-without-reason cast was downgraded — the note to log on the run. */
+  downgradeNote?: string;
+}
+
+/**
+ * The sonnet-first policy for the IMPLEMENT stage (issue #249; review is untouched — it stays on
+ * the strongest tier by design). Three cases:
+ *   - no explicit cast at all → the enforced default, `claude-sonnet-5` (previously this fell
+ *     through to whichever `harness.claude.default_model` an install's config named, which is
+ *     exactly how the betterwright run defaulted onto opus with no directive behind it).
+ *   - an explicit cast naming anything OTHER than an opus model → a requester/framer directive,
+ *     honored verbatim (the "cast sonnet"/"cast opus" pass-through this must not break).
+ *   - an explicit opus cast → kept ONLY when it carries a `reason` (the framer's stated case that
+ *     this task clears sonnet's bar); with no reason it's downgraded to sonnet and the caller gets
+ *     a human-readable note to log on the run record.
+ */
+export function applySonnetFirst(explicit: HarnessSpec | undefined): SonnetFirstResult {
+  if (!explicit) return { spec: { harness: "claude", model: DEFAULT_IMPLEMENT_MODEL } };
+  if (isOpusModel(explicit.model) && !explicit.reason?.trim()) {
+    return {
+      spec: { ...explicit, model: DEFAULT_IMPLEMENT_MODEL },
+      downgradeNote:
+        `implement cast "${explicit.model}" had no stated reason — downgraded to ` +
+        `${DEFAULT_IMPLEMENT_MODEL} per sonnet-first doctrine (name a reason to keep opus)`,
+    };
+  }
+  return { spec: explicit };
 }
 
 // =======================================================================================

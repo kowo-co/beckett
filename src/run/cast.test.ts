@@ -4,7 +4,7 @@
  * fenced-block codec died with the tracker, the roster rules did not.
  */
 import { describe, expect, test } from "bun:test";
-import { parseCastJson, projectSlug, validateCasting } from "./cast.ts";
+import { applySonnetFirst, isOpusModel, parseCastJson, projectSlug, validateCasting } from "./cast.ts";
 
 describe("parseCastJson (tolerant reader — never throws)", () => {
   test("valid cast parses through", () => {
@@ -58,6 +58,45 @@ describe("validateCasting (strict — a human-typed cast is refused, not degrade
     expect(errors[0]).toContain("hard-blocked on our tier");
     expect(validateCasting({ implement: { harness: "pi", model: "gpt-5.6" } })).toHaveLength(1);
     expect(validateCasting({ implement: { harness: "pi", model: "gpt-5.6-terra" } })).toEqual([]);
+  });
+});
+
+describe("isOpusModel", () => {
+  test("matches any opus SKU case-insensitively", () => {
+    expect(isOpusModel("claude-opus-5")).toBe(true);
+    expect(isOpusModel("claude-opus-4-8")).toBe(true);
+    expect(isOpusModel("CLAUDE-OPUS-5")).toBe(true);
+    expect(isOpusModel("claude-sonnet-5")).toBe(false);
+    expect(isOpusModel(undefined)).toBe(false);
+  });
+});
+
+describe("applySonnetFirst (issue #249 — the enforced default implement cast)", () => {
+  test("an un-cast run defaults to sonnet", () => {
+    expect(applySonnetFirst(undefined)).toEqual({ spec: { harness: "claude", model: "claude-sonnet-5" } });
+  });
+
+  test("an explicit non-opus directive is honored verbatim", () => {
+    const explicit = { harness: "codex" as const, effort: "medium" as const };
+    expect(applySonnetFirst(explicit)).toEqual({ spec: explicit });
+    const sonnetDirective = { harness: "claude" as const, model: "claude-sonnet-5" };
+    expect(applySonnetFirst(sonnetDirective)).toEqual({ spec: sonnetDirective });
+  });
+
+  test("an opus cast with no reason is downgraded to sonnet, with a note for the caller to log", () => {
+    const result = applySonnetFirst({ harness: "claude", model: "claude-opus-5" });
+    expect(result.spec).toEqual({ harness: "claude", model: "claude-sonnet-5" });
+    expect(result.downgradeNote).toContain("claude-opus-5");
+    expect(result.downgradeNote).toContain("downgraded");
+    // A blank/whitespace-only "reason" doesn't count as stating one.
+    expect(applySonnetFirst({ harness: "claude", model: "claude-opus-5", reason: "   " }).downgradeNote).toBeDefined();
+  });
+
+  test("an opus cast WITH a stated reason is kept, reason intact on the spec", () => {
+    const explicit = { harness: "claude" as const, model: "claude-opus-5", reason: "gnarly cross-service debugging" };
+    const result = applySonnetFirst(explicit);
+    expect(result.spec).toEqual(explicit);
+    expect(result.downgradeNote).toBeUndefined();
   });
 });
 
