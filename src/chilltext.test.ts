@@ -3,8 +3,31 @@
  * client-side bypass rules. No network: every test injects a fake `fetchFn`.
  */
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { chillTransform, shouldBypassChill, type ChilltextConfig } from "./chilltext.ts";
+import { CHILL_GATE_PREAMBLE } from "./chill-system.ts";
+
+const dirs: string[] = [];
+function tmp(): string {
+  const d = mkdtempSync(join(tmpdir(), "beckett-chilltext-"));
+  dirs.push(d);
+  return d;
+}
+afterEach(() => {
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
+/**
+ * Every test here pins `personaPath` at a scratch file (usually a missing one): the default is the
+ * REAL `~/.beckett/persona.md`, so a test that left it alone would assert against whatever voice
+ * the box it runs on happens to have.
+ */
+function noPersona(): string {
+  return join(tmp(), "absent-persona.md");
+}
 
 function cfg(overrides: Partial<ChilltextConfig> = {}): ChilltextConfig {
   return {
@@ -13,7 +36,7 @@ function cfg(overrides: Partial<ChilltextConfig> = {}): ChilltextConfig {
     timeout_ms: 8_000,
     max_bubbles: 3,
     bubble_delay_ms: 2_500,
-    system: "",
+    system_override: "",
     skip_code_blocks: true,
     ...overrides,
   };
@@ -34,7 +57,11 @@ describe("chillTransform — the contract POST", () => {
       return new Response(JSON.stringify({ messages: [" hey ", "cool"], n_bubbles: 2, ms: 12 }), { status: 200 });
     }) as unknown as typeof fetch;
 
-    const result = await chillTransform(cfg(), { input: "what's up", agentOutput: "Hello there!" }, fetchFn);
+    const result = await chillTransform(
+      cfg(),
+      { input: "what's up", agentOutput: "Hello there!", personaPath: noPersona() },
+      fetchFn,
+    );
 
     expect(result).toEqual({ messages: ["hey", "cool"] });
     expect(capturedUrl).toBe("https://chilltext.example/chill");

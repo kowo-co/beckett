@@ -10,9 +10,14 @@
  * The one law this module exists to enforce: **fail open**. Any error, timeout, malformed
  * response, or out-of-contract bubble degrades to `null` — every caller's contract is "null
  * means send the original text untouched." This module never throws.
+ *
+ * The voice it asks for is NOT defined here: the `system` field is derived from the persona file
+ * (`src/chill-system.ts`), the same `~/.beckett/persona.md` the Concierge's own prompt appends,
+ * so there is exactly one place where Beckett's voice is written down.
  */
 
 import type { Config } from "./types.ts";
+import { chillSystemPrompt } from "./chill-system.ts";
 
 /** The `[concierge.chilltext]` config slice — the single source of truth is types.ts. */
 export type ChilltextConfig = Config["concierge"]["chilltext"];
@@ -32,8 +37,16 @@ export interface ChillTransformInput {
   input?: string;
   /** The normal assistant reply to rewrite. Required — this is what gets chilled. */
   agentOutput: string;
-  /** Per-call personality override. Omitted ⇒ `cfg.system || undefined` (the configured voice). */
+  /**
+   * Per-call system prompt for a caller whose rewrite is not "Beckett talking in a channel" (the
+   * social lane's X-post pass). Omitted ⇒ {@link resolveSystemPrompt}'s persona-derived default.
+   */
   system?: string;
+  /**
+   * Persona file the default voice is read from. Omitted ⇒ `<beckettDir>/persona.md`. Callers that
+   * hold a Config pass its resolved `paths.personaFile`; tests point it at a scratch file.
+   */
+  personaPath?: string;
   /** Force one bubble instead of `cfg.max_bubbles` (the early-ack seam wants exactly one message). */
   single?: boolean;
 }
@@ -41,6 +54,24 @@ export interface ChillTransformInput {
 export interface ChillTransformResult {
   /** 1–4 pre-sized bubbles, meant to be posted one after another — never rejoined. */
   messages: string[];
+}
+
+/**
+ * The `system` field for one call, in precedence order:
+ *
+ *   1. `input.system` — a per-call prompt for a caller doing a different job (the social lane).
+ *   2. `cfg.system_override` — the operator escape hatch. Empty by default and meant to stay that
+ *      way; a non-empty value REPLACES the persona voice for every message, which is exactly the
+ *      second-source-of-truth this module stopped having.
+ *   3. the persona file — the normal path, and the only one that defines Beckett's voice.
+ *
+ * `undefined` (no persona file, or an explicit empty per-call prompt) means the field is omitted
+ * and chilltext rewrites with its own default voice — degraded, never dropped.
+ */
+function resolveSystemPrompt(cfg: ChilltextConfig, input: ChillTransformInput): string | undefined {
+  if (input.system !== undefined) return input.system || undefined;
+  if (cfg.system_override) return cfg.system_override;
+  return chillSystemPrompt(input.personaPath);
 }
 
 /**
@@ -60,7 +91,7 @@ export async function chillTransform(
       max_bubbles: cfg.max_bubbles,
     };
     if (input.input !== undefined) body.input = input.input.slice(0, MAX_FIELD_CHARS);
-    const system = input.system ?? (cfg.system || undefined);
+    const system = resolveSystemPrompt(cfg, input);
     if (system) body.system = system;
     if (input.single) body.single = true;
 

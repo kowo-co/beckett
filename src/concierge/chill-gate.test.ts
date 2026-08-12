@@ -18,7 +18,7 @@ function cfg(overrides: Partial<ChilltextConfig> = {}): ChilltextConfig {
     timeout_ms: 8_000,
     max_bubbles: 3,
     bubble_delay_ms: 2_500,
-    system: "",
+    system_override: "",
     skip_code_blocks: true,
     ...overrides,
   };

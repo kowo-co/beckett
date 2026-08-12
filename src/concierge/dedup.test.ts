@@ -299,7 +299,7 @@ function chillConfig(overrides: Partial<{ enabled: boolean; bubble_delay_ms: num
         timeout_ms: 8_000,
         max_bubbles: 3,
         bubble_delay_ms: 0,
-        system: "",
+        system_override: "",
         skip_code_blocks: true,
         ...overrides,
       },

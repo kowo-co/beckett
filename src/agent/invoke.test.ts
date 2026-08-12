@@ -284,7 +284,7 @@ function chillCfg(url: string): ChilltextConfig {
     timeout_ms: 2000,
     max_bubbles: 1,
     bubble_delay_ms: 0,
-    system: "",
+    system_override: "",
     skip_code_blocks: true,
   };
 }

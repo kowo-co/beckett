@@ -25,6 +25,12 @@ export interface DeliverChilledOptions {
   gateway: DiscordGateway;
   /** `config.concierge.chilltext`. May be `undefined` on a hand-built test config — treated as off. */
   cfg: Config["concierge"]["chilltext"] | undefined;
+  /**
+   * The persona file the chilltext voice is derived from (`paths.personaFile`). Omitted ⇒ the
+   * default `<beckettDir>/persona.md`; a missing file just means chilltext's own default voice,
+   * never a dropped message.
+   */
+  personaPath?: string;
   logger?: Logger;
   /** Force one bubble (the early-ack seam: a progress line must stay one atomic message). */
   single?: boolean;
@@ -68,7 +74,7 @@ export async function deliverChilled(
 
   let result: ChillTransformResult | null = null;
   try {
-    result = await transform(cfg!, { input, agentOutput: text, single });
+    result = await transform(cfg!, { input, agentOutput: text, single, personaPath: opts.personaPath });
   } catch (err) {
     // chillTransform is documented to never throw, but a test double or a future caller might —
     // this is the fail-open backstop that keeps a delivery gate from ever losing a reply to it.

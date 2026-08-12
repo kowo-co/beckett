@@ -1063,8 +1063,13 @@ export interface Config {
       max_bubbles: number;
       /** Delay between posting successive bubbles of one chilled reply (human texting cadence). */
       bubble_delay_ms: number;
-      /** English personality request forwarded as-is; empty = the service's own default voice. */
-      system: string;
+      /**
+       * ESCAPE HATCH — empty by default and meant to stay empty. The gate's system prompt is
+       * derived from `~/.beckett/persona.md` (`src/chill-system.ts`), the one place the voice is
+       * written down. A non-empty value here REPLACES that persona-derived prompt for every
+       * message; use it to debug a rewrite, not to define how Beckett sounds.
+       */
+      system_override: string;
       /** Reserved for a future per-message override; the client-side ``` bypass is unconditional. */
       skip_code_blocks: boolean;
     };

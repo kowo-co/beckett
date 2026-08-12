@@ -5611,6 +5611,7 @@ export class Concierge {
                     postOpts: opts,
                     gateway: this.gateway,
                     cfg: this.config.concierge.chilltext,
+                    personaPath: personaFilePath(this.config),
                     logger: this.log,
                     // OPS-80: a CLI reply is Beckett speaking in a channel — `deliverChilled` records
                     // every message it actually posts (one entry per bubble, or one plain entry on
@@ -5711,6 +5712,7 @@ export class Concierge {
                     postOpts: opts,
                     gateway: this.gateway,
                     cfg: this.config.concierge.chilltext,
+                    personaPath: personaFilePath(this.config),
                     logger: this.log,
                     single: true,
                   });
@@ -6450,6 +6452,7 @@ export class Concierge {
               postOpts: { replyToMessageId: m.messageId, replyToUserId: m.userId },
               gateway: this.gateway,
               cfg: this.config.concierge.chilltext,
+              personaPath: personaFilePath(this.config),
               logger: this.log,
               recordPost: (chId, bubbleText, bubbleId) => this.recordBeckettPost(chId, bubbleText, bubbleId),
             });
@@ -6584,6 +6587,7 @@ export class Concierge {
         },
         gateway: this.gateway,
         cfg: this.config.concierge.chilltext,
+        personaPath: personaFilePath(this.config),
         logger: this.log,
         recordPost: (chId, bubbleText, bubbleId) => this.recordBeckettPost(chId, bubbleText, bubbleId),
       });
@@ -7072,6 +7076,7 @@ export class Concierge {
           input: turn.transcript.at(-1)?.content || undefined,
           gateway: this.gateway,
           cfg: this.config.concierge.chilltext,
+          personaPath: personaFilePath(this.config),
           logger: this.log,
           recordPost: (chId, bubbleText, bubbleId) => this.recordBeckettPost(chId, bubbleText, bubbleId),
         });

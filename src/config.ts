@@ -176,6 +176,35 @@ export function dropRetiredSections(raw: unknown, warn: (message: string) => voi
   return root;
 }
 
+/**
+ * Drop the retired `[concierge.chilltext] system` key. It used to be a hand-written second
+ * definition of Beckett's voice, sitting next to `~/.beckett/persona.md`; the gate's prompt is now
+ * derived from the persona file alone (`src/chill-system.ts`) and the replacement key is the
+ * explicit, empty-by-default `system_override`.
+ *
+ * Same one-release shim shape as {@link dropRetiredSections} and it retires the same way: the
+ * chilltext slice is `.strict()`, so a live config.toml still carrying `system = "..."` would make
+ * the daemon refuse to start on "unrecognized key" — a deploy-time outage on a box whose config
+ * file the deploy never touches. Stripping it (loudly, once) turns that into a deprecation the
+ * operator cleans up on their own schedule, and means the old voice string stops applying the
+ * moment this ships rather than silently outranking the persona forever.
+ */
+export function dropRetiredChilltextSystem(raw: unknown, warn: (message: string) => void): unknown {
+  if (!isRecord(raw)) return raw;
+  const concierge = raw.concierge;
+  if (!isRecord(concierge) || !isRecord(concierge.chilltext)) return raw;
+  if (!Object.prototype.hasOwnProperty.call(concierge.chilltext, "system")) return raw;
+  const chilltext = cloneRecord(concierge.chilltext);
+  delete chilltext.system;
+  warn(
+    "beckett: config key [concierge.chilltext] system was retired and is being IGNORED — the " +
+      "chilltext voice is now derived from ~/.beckett/persona.md. Delete the key from your " +
+      "config.toml (edit persona.md to change how Beckett sounds, or set system_override to " +
+      "force a one-off prompt).",
+  );
+  return { ...cloneRecord(raw), concierge: { ...cloneRecord(concierge), chilltext } };
+}
+
 export interface LoadConfigOptions {
   /** Override env source (for tests). Defaults to process.env. */
   env?: PathEnv;
@@ -217,6 +246,10 @@ export function loadConfig(opts: LoadConfigOptions = {}): Config {
   // 3b. retired v6 sections ([tracker], [progress], [plane]) → stripped with a deprecation line,
   //     so a prod config.toml written before the run engine still boots this daemon.
   raw = dropRetiredSections(raw, (message) => console.warn(message));
+
+  // 3c. the retired `[concierge.chilltext] system` voice string → stripped the same way, so prod's
+  //     config.toml (which still carries one) boots and the persona file is the only voice left.
+  raw = dropRetiredChilltextSystem(raw, (message) => console.warn(message));
 
   // 4. validate + apply defaults (loud refuse-to-start on invalid).
   const result = ConfigSchema.safeParse(raw);

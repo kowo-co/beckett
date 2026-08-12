@@ -526,7 +526,11 @@ export const configFragments = {
           timeout_ms: posInt.default(8_000),
           max_bubbles: z.number().int().min(1).max(4).default(3),
           bubble_delay_ms: nonNegInt.default(2_500),
-          system: z.string().default(""),
+          // ESCAPE HATCH, empty by default and meant to stay empty. The voice comes from
+          // ~/.beckett/persona.md (src/chill-system.ts); a non-empty value here REPLACES it for
+          // every message, which is the second voice definition this key used to be. The old
+          // `system` key is stripped at load with a deprecation line (src/config.ts).
+          system_override: z.string().default(""),
           skip_code_blocks: z.boolean().default(true),
         })
         .strict()
