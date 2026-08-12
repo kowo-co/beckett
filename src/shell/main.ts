@@ -182,8 +182,23 @@ async function boot(): Promise<BootedSystem> {
   const paths = buildPaths(config);
   const beckettDir = paths.beckettDir;
   // Lifecycle history starts now; a previous unmatched boot becomes an explicit unclean restart.
+  // `recordBoot`'s own boot event `at` is captured here and threaded into the status provider
+  // below as the ONE canonical boot instant (issue #248 review finding 1): before this, the
+  // ledger line and the status provider's `bootedAt` were two independent `Date.now()` reads
+  // taken milliseconds apart, so `beckett status deploy-state`'s exact-match corroboration check
+  // could never pass in production. Single source now — they're identical by construction, not
+  // by coincidence.
   const lifecycleLedgerPath = uptimeLedgerPath(beckettDir);
-  recordBoot(lifecycleLedgerPath);
+  const bootEvents = recordBoot(lifecycleLedgerPath);
+  const bootedAtIso = bootEvents[bootEvents.length - 1]!.at;
+  const bootedAtMs = Date.parse(bootedAtIso);
+  // Same fix, same shape, for the OTHER daemon-truth field (finding 2): read the running code's
+  // commit ONCE, right here at boot, instead of re-running `git rev-parse` inside the status
+  // provider on every call. A fresh `git rev-parse` mid-deploy-window (new commit checked out on
+  // disk, old daemon process still answering) would report the NEW commit next to the OLD boot
+  // time — the mirror image of the incident issue #248 exists to close. This daemon serves the
+  // commit it was actually built and started from, for its whole lifetime.
+  const commitAtBoot = (await currentGitCommit(join(import.meta.dir, "..", ".."))).short;
   const tasks = new TaskStore(join(beckettDir, "tasks.json"));
   // The Concierge and dashboard deliberately share this one gateway connection.
   const gateway = createDiscordGateway({ config, logger: logger.child("discord") });
@@ -521,12 +536,19 @@ async function boot(): Promise<BootedSystem> {
   // Ops visibility (issue #30): the `beckett status` bus command answers from this assembler —
   // the daemon-wide halves the Concierge can't see itself. The Concierge merges in its own
   // (Discord gateway, session) when serving the command.
-  const bootedAt = Date.now();
   concierge.setStatusProvider(async () => ({
     version: BECKETT_VERSION,
-    commit: (await currentGitCommit(join(import.meta.dir, "..", ".."))).short,
+    // Boot-captured (see above), never a fresh `git rev-parse` per call — process truth, not
+    // disk truth, for the whole life of this daemon.
+    commit: commitAtBoot,
     pid: process.pid,
-    uptimeSecs: Math.round((Date.now() - bootedAt) / 1000),
+    // Absolute boot time (issue #248), not just elapsed seconds: "up since T" is what lets a
+    // reader compare THIS daemon's boot against a deploy's timestamp without doing clock math
+    // against whenever the status call happened to run. `beckett status deploy-state` is the
+    // consumer that turns this into daemon-truth for "is the new version actually live". Same
+    // value `recordBoot` wrote to uptime.jsonl (see above) — not a second, later `Date.now()`.
+    bootedAt: bootedAtIso,
+    uptimeSecs: Math.round((Date.now() - bootedAtMs) / 1000),
     runs: runSupervisor.live(),
     quick: quick.stats(),
     browser: browser.stats(),

@@ -64,7 +64,16 @@ function ext(build: (deps: CapabilityDeps) => Promise<ExtLike>, name: string): (
 }
 
 export const SPINE: SpineEntry[] = [
-  { id: "status", cliHelp: "status [--pretty]", verbs: [{ name: "status", load: core((m) => m.runStatus) }] },
+  {
+    id: "status",
+    cliHelp: "status [--pretty] | status deploy-state [--pretty]",
+    verbs: [
+      // Two-word verb registered alongside its one-word parent (mirrors "routine deps-update"
+      // above `routine`): longest-match-first in `resolveVerb` picks this over the bare "status".
+      { name: "status deploy-state", load: core((m) => m.runDeployState) },
+      { name: "status", load: core((m) => m.runStatus) },
+    ],
+  },
   { id: "version", cliHelp: "version [bump]", verbs: [{ name: "version", load: core((m) => m.runVersion) }] },
   { id: "doctor", cliHelp: "doctor [--json]", verbs: [{ name: "doctor", load: core((m) => m.runDoctor) }] },
   {

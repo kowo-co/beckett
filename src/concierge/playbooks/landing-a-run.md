@@ -68,3 +68,33 @@ reuses the same PR and skips whatever already landed.
 
 Only after `finish` reports the deploy ran is the work live. Then say so in channel, in voice, with
 the artifact link — that message is the delivery ([[deliver]]).
+
+### After a restart, the shell is not a witness — the daemon is
+
+`deploy/deploy-prod.sh` detaches itself on purpose, specifically so the restart it triggers can't
+kill the very process running it. That means once the deploy has SIGTERMed the old daemon, YOUR
+shell — the one `finish` is running in, or any ssh session watching the deploy — has nothing left
+to tell you: the command going quiet, the connection dropping, or a timeout are all exactly what a
+*successful* detached restart looks like from outside. None of that is evidence the deploy failed.
+This has already produced two false "it's dead" calls in one day, both while the new version was
+already live.
+
+**Before claiming a deploy/restart succeeded, failed, or that a version is or isn't live, run:**
+
+```
+beckett status deploy-state [--pretty]
+```
+
+This is the ONLY accepted evidence. It asks the daemon itself over `control.sock` for its version
+and the absolute time it booted, corroborated (not overridden) by the durable
+`~/.beckett/uptime.jsonl` boot ledger, and it comes back in one of exactly two shapes:
+
+- **Reachable** — `{ ok: true, reachable: true, version, bootedAt, … }`. Compare `bootedAt` against
+  when the deploy started: booted *after* you kicked it off means it's live, full stop, regardless
+  of what your shell did or didn't print.
+- **Not reachable** — the daemon hasn't come back up yet (or is still restarting). This alone is
+  the only thing that reads as "not up" — and even then, a daemon mid-restart is expected to be
+  briefly unreachable, so retry a few seconds before saying anything is down.
+
+Never infer deploy state from a lost shell, a dropped ssh session, "the command stopped printing",
+or how long ago you ran `finish` — check `beckett status deploy-state` and say only what it says.
