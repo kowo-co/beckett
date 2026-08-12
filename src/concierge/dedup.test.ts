@@ -69,6 +69,14 @@ function harness(opts: {
   failDeletes?: boolean;
   postDelayMs?: number;
   browserOnAsk?: boolean;
+  /**
+   * When `false`, the simulated turn fires the CLI reply and does NOT wait for it to land before
+   * returning its turn text — exactly like a model whose Bash tool call already got its result
+   * (e.g. its own bus ack timed out) while the daemon is still sending. Defaults to `true` (the
+   * ordinary, well-behaved shape every other test in this file exercises). The in-flight promise
+   * is captured on the returned handle so a test can await it before asserting.
+   */
+  replyViaCliAwait?: boolean;
 }) {
   const dir = opts.dir ?? mkdtempSync(join(tmpdir(), "beckett-dedup-"));
   if (!tmpDirs.includes(dir)) tmpDirs.push(dir);
@@ -120,6 +128,7 @@ function harness(opts: {
 
   // Late-bound so the fake session can call back into the Concierge's bus handler mid-turn.
   let concierge!: Concierge;
+  let pendingCliReply: Promise<unknown> | undefined;
   const session = {
     async start() {},
     async stop() {},
@@ -133,17 +142,30 @@ function harness(opts: {
         });
       }
       if (opts.replyViaCli) {
-        await concierge.onBusRequest({
+        const cliReply = concierge.onBusRequest({
           cmd: "discord.reply",
           args: { channelId: CHAN, text: opts.cliText ?? "via cli" },
         });
+        if (opts.replyViaCliAwait === false) {
+          pendingCliReply = cliReply;
+        } else {
+          await cliReply;
+        }
       }
       return opts.turnText;
     },
   } as unknown as ConciergeSession;
 
   concierge = new Concierge({ config: opts.config ?? config, session, gateway });
-  return { concierge, posts, asks, deletedMessages, dir, postAttempts: () => postAttempts };
+  return {
+    concierge,
+    posts,
+    asks,
+    deletedMessages,
+    dir,
+    postAttempts: () => postAttempts,
+    pendingCliReply: () => pendingCliReply,
+  };
 }
 
 function mention(): IncomingMessage {
@@ -188,6 +210,35 @@ test("answers normally (no CLI) → the turn text is auto-posted once as a nativ
   await concierge.onMessage(mention());
   expect(posts).toHaveLength(1);
   expect(posts[0]).toEqual({ channelId: CHAN, text: "just the turn text", replyTo: MSG, files: undefined });
+});
+
+/**
+ * The double-posting bug (ro's report, aug 11-12): a "mega" message re-concatenating text already
+ * sent seconds/milliseconds earlier as separate standalone messages. Root cause — `discord.reply`
+ * only stamped `repliedViaCli` AFTER its own send finished (index.ts, the old code right after the
+ * `deliverChilled` call). A real CLI reply's delivery can still be in flight when the turn's own
+ * structured output resolves (its bus round trip can hand control back to the model before the
+ * daemon finishes sending — a slow/chilled multi-chunk delivery routinely takes several real
+ * seconds, well within `discordReplyAckTimeoutMs`'s failure modes), and the terminal auto-post
+ * read the flag in that exact window and fired a second, real send for the same turn — the model's
+ * own answer, sent twice, landing as two Discord messages with distinct ids seconds or even
+ * milliseconds apart. The fix stamps the claim synchronously, before the send starts, so the
+ * auto-post can never observe a live CLI reply as unclaimed.
+ */
+test("a CLI reply still in flight is claimed immediately — the auto-post can't race it into a second send", async () => {
+  const { concierge, posts, pendingCliReply } = harness({
+    replyViaCli: true,
+    replyViaCliAwait: false, // the model's Bash tool call returns before the send below finishes
+    cliText: "steer work mid-flight",
+    turnText: "steer work mid-flight",
+    postDelayMs: 20, // gives the in-flight CLI send real async work left to do when the turn ends
+  });
+  await concierge.onMessage(mention());
+  // The CLI reply is still in flight (postDelayMs) when onMessage's own turn finishes — let it land.
+  await pendingCliReply();
+  // Without the fix this is 2: the CLI reply's post PLUS the terminal auto-post of the same text.
+  expect(posts).toHaveLength(1);
+  expect(posts[0]).toMatchObject({ channelId: CHAN, text: "steer work mid-flight" });
 });
 
 /** A `config.concierge.chilltext` slice, `enabled` set per test. */
