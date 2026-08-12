@@ -241,6 +241,52 @@ test("a CLI reply still in flight is claimed immediately — the auto-post can't
   expect(posts[0]).toMatchObject({ channelId: CHAN, text: "steer work mid-flight" });
 });
 
+test("a second, wrap-up CLI reply that fails does not un-claim a turn the first reply already answered", async () => {
+  // Guards the rollback added alongside the early claim above: only the reply that ACTUALLY
+  // claimed the turn may un-claim it on failure. Without that guard, a failing SECOND reply in
+  // the same turn (e.g. a wrap-up after filing) would reset `repliedViaCli` to false even though
+  // the FIRST reply already posted the real answer — reopening the exact race the fix closes and
+  // letting the terminal auto-post fire a duplicate on top of an already-answered turn.
+  const dir = mkdtempSync(join(tmpdir(), "beckett-dedup-"));
+  tmpDirs.push(dir);
+  process.env.BECKETT_DIR = dir;
+  process.env.DISCORD_OWNER_ID = USER;
+  const posts: Post[] = [];
+  let attempt = 0;
+  const gateway = {
+    onMessage() {},
+    async start() {},
+    async stop() {},
+    sendTyping() {},
+    async post(channelId: string, text: string, o?: { replyToMessageId?: string }) {
+      attempt++;
+      if (attempt === 2) throw new Error("discord offline"); // the wrap-up reply fails
+      posts.push({ channelId, text, replyTo: o?.replyToMessageId });
+      return `mid-${posts.length}`;
+    },
+    async deleteMessage() {},
+  } as unknown as DiscordGateway;
+
+  let concierge!: Concierge;
+  const session = {
+    async start() {},
+    async stop() {},
+    ask: async () => {
+      await concierge.onBusRequest({ cmd: "discord.reply", args: { channelId: CHAN, text: "the real answer" } });
+      const wrapUp = await concierge.onBusRequest({ cmd: "discord.reply", args: { channelId: CHAN, text: "one more thing" } });
+      expect(wrapUp.ok).toBe(false);
+      return "must not auto-post";
+    },
+  } as unknown as ConciergeSession;
+
+  concierge = new Concierge({ config, session, gateway });
+  await concierge.onMessage(mention());
+  // Exactly the first reply lands; the failed wrap-up does not, and — the point of this test — the
+  // auto-post does not fire a duplicate of "the real answer" because the first reply's claim held.
+  expect(posts).toHaveLength(1);
+  expect(posts[0]).toEqual({ channelId: CHAN, text: "the real answer", replyTo: MSG });
+});
+
 /** A `config.concierge.chilltext` slice, `enabled` set per test. */
 function chillConfig(overrides: Partial<{ enabled: boolean; bubble_delay_ms: number }> = {}): Config {
   return {

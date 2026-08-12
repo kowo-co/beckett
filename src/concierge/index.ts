@@ -5584,7 +5584,10 @@ export class Concierge {
                 // time out client-side (`discordReplyAckTimeoutMs`) and hand control back to the model while
                 // the daemon is still sending — so the model's turn could finish, and the auto-post fire a
                 // real second time, before this line ever ran. Rolled back on failure so a genuinely failed
-                // CLI reply still falls through to the auto-post as a fallback.
+                // CLI reply still falls through to the auto-post as a fallback — but only when THIS call is
+                // what claimed it: a second, wrap-up reply that itself fails must not un-claim a turn a
+                // FIRST, already-succeeded reply legitimately claimed.
+                const alreadyClaimed = claimsActiveTurn && !!active!.repliedViaCli;
                 if (claimsActiveTurn && active) active.repliedViaCli = true;
                 try {
                   const opts = {
@@ -5623,7 +5626,7 @@ export class Concierge {
                 } catch (err) {
                   // The claim above was optimistic; a send that never actually landed must not suppress
                   // the auto-post, or the person gets no answer at all instead of a duplicate one.
-                  if (claimsActiveTurn && active) active.repliedViaCli = false;
+                  if (claimsActiveTurn && active && !alreadyClaimed) active.repliedViaCli = false;
                   return { ok: false, error: (err as Error).message };
                 }
               });
