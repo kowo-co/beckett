@@ -526,6 +526,11 @@ async function boot(): Promise<BootedSystem> {
     version: BECKETT_VERSION,
     commit: (await currentGitCommit(join(import.meta.dir, "..", ".."))).short,
     pid: process.pid,
+    // Absolute boot time (issue #248), not just elapsed seconds: "up since T" is what lets a
+    // reader compare THIS daemon's boot against a deploy's timestamp without doing clock math
+    // against whenever the status call happened to run. `beckett status deploy-state` is the
+    // consumer that turns this into daemon-truth for "is the new version actually live".
+    bootedAt: new Date(bootedAt).toISOString(),
     uptimeSecs: Math.round((Date.now() - bootedAt) / 1000),
     runs: runSupervisor.live(),
     quick: quick.stats(),

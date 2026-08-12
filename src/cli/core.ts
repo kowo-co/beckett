@@ -36,6 +36,7 @@ import type { Casting } from "../run/cast.ts";
 import { projectSlug } from "../run/cast.ts";
 import { parseSince, readSpendLedger, summarizeSpend } from "../spend.ts";
 import { TaskStore, displayTaskName, normalizeBranchRef, normalizeTaskNumber, type TaskBranch } from "../task/store.ts";
+import { readUptime, uptimeLedgerPath } from "../uptime.ts";
 import { createMemory } from "../memory/index.ts";
 import { linkLoopTask } from "../memory/loops.ts";
 import { AgentStore } from "../agent/store.ts";
@@ -1235,6 +1236,61 @@ export async function runStatus(argv: string[]): Promise<void> {
     );
   }
   out(lines.join("\n"));
+}
+
+// ── status deploy-state (daemon truth for "is the new version live"; issue #248) ──────────
+// `deploy/deploy-prod.sh` detaches on purpose — so the restart it triggers can't kill the very
+// process running it — which means a shell that loses the deploy command, times out over ssh, or
+// just goes quiet tells you NOTHING about whether the daemon actually came back up. Twice in one
+// day that was misread as "deploy failed" while the daemon had already rebooted onto the new
+// version. The fix is a cheap, always-available question with only ONE accepted answer source:
+// the daemon's own control-bus reply (version + absolute boot time), corroborated — never
+// overridden — by the durable `~/.beckett/uptime.jsonl` boot ledger. Distinguishes two shapes on
+// purpose: "daemon up on version X since T" (reachable) vs. "daemon not reachable" (it is not),
+// and the unreachable branch says in-line that this is not itself evidence of a failed deploy.
+export async function runDeployState(argv: string[]): Promise<void> {
+  const { flags } = parse(argv);
+  let res;
+  try {
+    res = await callBus(SOCK, "status", {}, 5_000);
+  } catch (err) {
+    fail(
+      `daemon not reachable on control.sock (${(err as Error).message}) — is beckett-v4.service ` +
+        `running? This is NOT evidence a deploy failed: the deploy script detaches on purpose, so ` +
+        `a lost shell or a stale ssh session tells you nothing about the daemon. Retry shortly ` +
+        `before calling anything dead.`,
+    );
+  }
+  if (!res.ok) fail(res.error ?? "status failed");
+  const data = (res.data ?? {}) as Record<string, any>;
+  const ledger = readUptime(uptimeLedgerPath(paths.beckettDir));
+  const daemonBootedAt = typeof data.bootedAt === "string" ? data.bootedAt : null;
+  const ledgerCorroborates = Boolean(daemonBootedAt && ledger.bootedAt === daemonBootedAt);
+  const payload = {
+    ok: true,
+    reachable: true,
+    version: data.version,
+    commit: data.commit,
+    pid: data.pid,
+    bootedAt: daemonBootedAt,
+    uptimeSecs: data.uptimeSecs,
+    ledgerBootedAt: ledger.bootedAt,
+    ledgerCorroborates,
+  };
+  if (!flags.pretty) out(payload);
+  const ledgerLine = !ledger.bootedAt
+    ? "ledger:    no boot line recorded yet in uptime.jsonl"
+    : ledgerCorroborates
+      ? `ledger:    corroborates — uptime.jsonl's last boot line matches (${ledger.bootedAt})`
+      : `ledger:    WARNING — uptime.jsonl's last boot (${ledger.bootedAt}) does not match the ` +
+        `live daemon's reply; trust the daemon, but the mismatch itself is worth surfacing`;
+  out(
+    [
+      `beckett v${data.version} @ ${data.commit} — UP since ${daemonBootedAt ?? "unknown"} ` +
+        `(pid ${data.pid}, ${fmtSecs(data.uptimeSecs)})`,
+      ledgerLine,
+    ].join("\n"),
+  );
 }
 
 // ── doctor (in-process health probe; works with the daemon down; issue #30) ────────────────
