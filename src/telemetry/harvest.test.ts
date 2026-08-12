@@ -48,7 +48,9 @@ test("harvest normalizes Claude, pi, Codex, and review-bounce transitions", asyn
   expect(claudeRun?.model).toBe("claude-haiku-4-5-20251001");
   expect(claudeRun?.tokens.cache_read).toBe(1_000_000);
   expect(claudeRun?.tokens.cache_write).toBe(1_000_000);
-  expect(claudeRun?.cost_usd).toBe(7.35);
+  // 1M of each bucket at the haiku 4.5 tier: 1.00 in + 5.00 out + 0.10 cache read + 2.00 cache
+  // write (cache creation is 2× input — see src/telemetry/model-rates.test.ts).
+  expect(claudeRun?.cost_usd).toBe(8.1);
   expect(JSON.parse(await readFile(output, "utf8")).runs).toHaveLength(3);
   expect(notes.at(-1)).toContain("wrote 3 normalized runs");
 });

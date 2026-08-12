@@ -29,19 +29,32 @@ number is an estimate (a rate table entry, a config-driven default), it's marked
 | gpt-5.6-luna | `pi` | $0.20 | $1.20 | $0.02 | $0.25 |
 | gpt-5.6-terra | `pi` | $2.00 | $12.00 | $0.20 | $2.50 |
 | gpt-5.6-sol | `pi` (blocked on account tier) | $5.00 | $30.00 | $0.50 | $6.25 |
-| claude-sonnet-5 | `claude` | $3.00 ($2.00 intro, expires 2026-08-31) | $15.00 ($10.00 intro) | $0.30 | $3.75 |
-| claude-opus-5 | `claude` | $5.00 | $25.00 | $0.50 | $6.25 |
-| claude-fable-5 | `claude` | $10.00 | $50.00 | $1.00 | $12.50 |
+| claude-sonnet-5 | `claude` | $3.00 ($2.00 intro, expires 2026-08-31) | $15.00 ($10.00 intro) | $0.30 | $6.00 ($4.00 intro) |
+| claude-opus-5 | `claude` | $5.00 | $25.00 | $0.50 | $10.00 |
+| claude-fable-5 | `claude` | $10.00 | $50.00 | $1.00 | $20.00 |
 
-Cache reads price at 0.1× input; cache writes at 1.25× input (5-min TTL) or 2× (1-hour TTL) for
-every Claude model. `config/model-rates.json` — the table that actually drives cost computation —
-is dated 2026-07-16, predates this cut, and marks every Claude row plus the generic `gpt-5.6` SKU
-as `estimate: true`; only terra and luna have confirmed operational rates. One entry is worse than
-stale: it carries `claude-fable-5` at $1/$5 (Haiku's tier) against a real live rate of $10/$50 —
-a **10× underestimate** on the one model class that's supposed to be expensive by design. A rate
-table that silently undercounts your priciest model isn't a rounding error, it's a blind spot; v1's
-[telemetry](#the-event-ledger--single-source-of-spend-and-telemetry) has to close it before it can
-be trusted to gate anything.
+Cache reads price at 0.1× input; cache writes at **2× input** for every Claude model. That is the
+1-hour-TTL rate, and it is the one that applies: Claude Code writes 1-hour caches, so no Claude
+traffic Beckett generates bills at the 5-minute 1.25× rate. `config/model-rates.json` carried 1.25×
+until 2026-08-12 and therefore under-counted every Claude cost figure the daemon reported; a
+least-squares fit of `ccusage`'s own per-day, per-model costs against the table recovers exactly
+2.000× for every Claude model in the archive (haiku 4.5 $1→$2, opus 4.8 $5→$10, opus 5 $5→$10,
+sonnet 5 at its intro $2→$4), reconciling the archive total to **0.24%** — against **−11%** at
+1.25×. The table is now 2×, [pinned by a test](../src/telemetry/model-rates.test.ts).
+
+Only the telemetry harvest prices from this table; `beckett spend` sums the `total_cost_usd` each
+harness reports for itself, so the ledger was never wrong. The committed `data/telemetry-runs.json`
+snapshot is stamped with the rate table it was priced under (`2026-07-16`) and still carries the
+old numbers — `bun run telemetry:refresh` re-harvests and reprices it against the current table.
+Re-pricing that same archive at 2× moves its total from **$1,101 to $1,694**.
+
+`config/model-rates.json` is still dated 2026-07-16, predates this price cut, and marks every
+Claude row plus the generic `gpt-5.6` SKU as `estimate: true`; only terra and luna have confirmed
+operational rates. It also prices `claude-sonnet-5` at the $3/$15 list rate while `ccusage` (and
+the bill) still apply the $2/$10 intro rate through 2026-08-31, so sonnet lines read ~50% high
+until that intro expires. A rate table that silently miscounts isn't a rounding error, it's a blind
+spot; v1's [telemetry](#the-event-ledger--single-source-of-spend-and-telemetry) has to close it
+before it can be trusted to gate anything.
 
 ### All-in cost per ticket (implement + review + retries), by primary implement model
 

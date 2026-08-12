@@ -32,51 +32,51 @@
       "input": 5,
       "output": 25,
       "cache_read": 0.5,
-      "cache_write": 6.25,
+      "cache_write": 10,
       "cache_read_multiplier": 0.1,
-      "cache_creation_multiplier": 1.25,
+      "cache_creation_multiplier": 2,
       "estimate": true,
-      "source": "Estimate: no public price sheet for Opus 5 yet; carried forward from the Opus 4.8 $5/$25 tier. Anthropic cache read is 0.1× input and 5m cache creation is 1.25× input."
+      "source": "Estimate: no public price sheet for Opus 5 yet; carried forward from the Opus 4.8 $5/$25 tier. Anthropic cache read is 0.1× input; cache creation is 2× input — Claude Code writes 1-hour caches, and a least-squares fit of ccusage's own per-day costs recovers exactly 2× (see docs/token-efficiency.md)."
     },
     "claude-opus-4-8": {
       "input": 5,
       "output": 25,
       "cache_read": 0.5,
-      "cache_write": 6.25,
+      "cache_write": 10,
       "cache_read_multiplier": 0.1,
-      "cache_creation_multiplier": 1.25,
+      "cache_creation_multiplier": 2,
       "estimate": true,
-      "source": "Estimate: no public price sheet exists for the 4.8 label; based on the current Opus $5/$25 tier. Anthropic cache read is 0.1× input and 5m cache creation is 1.25× input."
+      "source": "Estimate: no public price sheet exists for the 4.8 label; based on the current Opus $5/$25 tier. Anthropic cache read is 0.1× input; cache creation is 2× input — Claude Code writes 1-hour caches, and a least-squares fit of ccusage's own per-day costs recovers exactly 2× (see docs/token-efficiency.md)."
     },
     "claude-sonnet-5": {
       "input": 3,
       "output": 15,
       "cache_read": 0.3,
-      "cache_write": 3.75,
+      "cache_write": 6,
       "cache_read_multiplier": 0.1,
-      "cache_creation_multiplier": 1.25,
+      "cache_creation_multiplier": 2,
       "estimate": true,
-      "source": "Estimate: no public price sheet exists for the 5 label; based on the current Sonnet $3/$15 tier. Anthropic cache read is 0.1× input and 5m cache creation is 1.25× input."
+      "source": "Estimate: no public price sheet exists for the 5 label; based on the current Sonnet $3/$15 tier (ccusage still prices this SKU at the $2/$10 intro rate, which expires 2026-08-31). Anthropic cache read is 0.1× input; cache creation is 2× input — Claude Code writes 1-hour caches, and a least-squares fit of ccusage's own per-day costs recovers exactly 2× (see docs/token-efficiency.md)."
     },
     "claude-fable-5": {
       "input": 10,
       "output": 50,
       "cache_read": 1,
-      "cache_write": 12.5,
+      "cache_write": 20,
       "cache_read_multiplier": 0.1,
-      "cache_creation_multiplier": 1.25,
+      "cache_creation_multiplier": 2,
       "estimate": true,
-      "source": "Estimate: Fable/Mythos tier at $10/$50 per docs/token-efficiency.md audit (previous Haiku-tier $1/$5 entry was a 10x underestimate). Anthropic cache read is 0.1× input and 5m cache creation is 1.25× input."
+      "source": "Estimate: Fable/Mythos tier at $10/$50 per docs/token-efficiency.md audit (previous Haiku-tier $1/$5 entry was a 10x underestimate). Anthropic cache read is 0.1× input; cache creation is 2× input — Claude Code writes 1-hour caches, and a least-squares fit of ccusage's own per-day costs recovers exactly 2× (see docs/token-efficiency.md)."
     },
     "claude-haiku-4-5": {
       "input": 1,
       "output": 5,
       "cache_read": 0.1,
-      "cache_write": 1.25,
+      "cache_write": 2,
       "cache_read_multiplier": 0.1,
-      "cache_creation_multiplier": 1.25,
+      "cache_creation_multiplier": 2,
       "estimate": true,
-      "source": "Estimate: the 4.5 label has no published price sheet; based on the current Haiku $1/$5 tier. Anthropic cache read is 0.1× input and 5m cache creation is 1.25× input."
+      "source": "Estimate: the 4.5 label has no published price sheet; based on the current Haiku $1/$5 tier. Anthropic cache read is 0.1× input; cache creation is 2× input — Claude Code writes 1-hour caches, and a least-squares fit of ccusage's own per-day costs recovers exactly 2× (see docs/token-efficiency.md)."
     }
   }
 }
