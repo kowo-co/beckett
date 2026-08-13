@@ -89,10 +89,17 @@ export async function deliverChilled(
     return messageId;
   }
 
+  // The chilltext rewrite is a lossy LLM pass that has, intermittently, mangled a `<@id>` ping
+  // into inert text (bare `@id`, angle brackets stripped) — which renders as a raw number and
+  // notifies nobody, defeating the whole point of `--ping`. `enforceMentions` structurally repairs
+  // every id in `postOpts.pingUserIds` back to a real `<@id>` in the FIRST bubble (the only one the
+  // gateway allow-lists), regardless of what the model returned. Belt-and-braces to any prompt ask.
+  const messages = enforceMentions(result.messages, postOpts?.pingUserIds ?? []);
+
   let firstId: string | null = null;
-  for (let i = 0; i < result.messages.length; i++) {
+  for (let i = 0; i < messages.length; i++) {
     if (i > 0) await sleep(cfg!.bubble_delay_ms);
-    const bubble = result.messages[i]!;
+    const bubble = messages[i]!;
     const bubbleOpts: ReplyOptions = { ...(i === 0 ? postOpts : {}), singleMessage: true };
     const messageId = await gateway.post(channelId, bubble, bubbleOpts);
     if (i === 0) firstId = messageId;

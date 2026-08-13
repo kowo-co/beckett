@@ -239,6 +239,90 @@ describe("deliverChilled — multi-bubble posting order/opts", () => {
   });
 });
 
+describe("deliverChilled — a --ping mention survives a mangling chilltext rewrite", () => {
+  // ro's report (aug 12): `--ping ro` posted the bare string `@1151230208783945818` — angle
+  // brackets stripped by the LLM rewrite — which renders as a raw number and notifies nobody. The
+  // gate must repair the mention STRUCTURALLY, not trust the model to have kept it. Each case feeds
+  // deliberately mangled transform output and asserts a real, notifying `<@RO>` still posts.
+  const RO = "1151230208783945818";
+  const pingOpts: ReplyOptions = { replyToMessageId: "m1", pingUserIds: [RO] };
+
+  function postedText(posts: Post[]): string {
+    return posts.map((p) => p.text).join("\n");
+  }
+
+  const mangled: Array<[string, string]> = [
+    ["bare @id (angle brackets stripped)", `hey @${RO} take a look`],
+    ["spaced < @id >", `hey < @${RO} > take a look`],
+    ["backticked \\`<@id>\\`", `hey \`<@${RO}>\` take a look`],
+    ["<@!id> variant", `hey <@!${RO}> take a look`],
+    ["dropped entirely", "hey take a look"],
+  ];
+
+  for (const [name, output] of mangled) {
+    test(`repairs ${name} back to a valid <@id> in the posted text`, async () => {
+      const { gateway, posts } = fakeGateway();
+      await deliverChilled(CHAN, `<@${RO}>\nhey take a look`, {
+        gateway,
+        cfg: cfg(),
+        postOpts: pingOpts,
+        sleep: async () => {},
+        transform: async () => ({ messages: [output] }),
+      });
+      expect(postedText(posts)).toContain(`<@${RO}>`);
+      // …and no inert/mangled residue is left behind.
+      expect(postedText(posts)).not.toContain(`@${RO} `);
+      expect(postedText(posts)).not.toContain(`\`<@${RO}>\``);
+    });
+  }
+
+  test("the repaired mention rides the FIRST bubble — the only one the gateway pings from", async () => {
+    const { gateway, posts } = fakeGateway();
+    await deliverChilled(CHAN, `<@${RO}>\nlong reply`, {
+      gateway,
+      cfg: cfg(),
+      postOpts: pingOpts,
+      sleep: async () => {},
+      // The model moved the (mangled) mention into the SECOND bubble, where allowed_mentions never
+      // reaches it. Repair must relocate it to the first bubble.
+      transform: async () => ({ messages: ["so here is the thing", `anyway @${RO} thoughts?`] }),
+    });
+    expect(posts[0]!.text).toContain(`<@${RO}>`);
+    // Exactly once across every posted bubble — never duplicated, never lost.
+    const count = postedText(posts).split(`<@${RO}>`).length - 1;
+    expect(count).toBe(1);
+    // The first bubble still carries the ping allow-list; later bubbles do not.
+    expect(posts[0]!.opts?.pingUserIds).toEqual([RO]);
+    expect(posts[1]!.opts?.pingUserIds).toBeUndefined();
+  });
+
+  test("a mention duplicated into every bubble collapses to exactly one, on the first", async () => {
+    const { gateway, posts } = fakeGateway();
+    await deliverChilled(CHAN, `<@${RO}>\nreply`, {
+      gateway,
+      cfg: cfg(),
+      postOpts: pingOpts,
+      sleep: async () => {},
+      transform: async () => ({ messages: [`<@${RO}> one`, `<@${RO}> two`, `@${RO} three`] }),
+    });
+    const count = postedText(posts).split(`<@${RO}>`).length - 1;
+    expect(count).toBe(1);
+    expect(posts[0]!.text).toContain(`<@${RO}>`);
+  });
+
+  test("no pingUserIds: ordinary prose (even prose the model happened to @-mangle) is untouched", async () => {
+    const { gateway, posts } = fakeGateway();
+    await deliverChilled(CHAN, "just a normal reply", {
+      gateway,
+      cfg: cfg(),
+      postOpts: { replyToMessageId: "m1" },
+      sleep: async () => {},
+      transform: async () => ({ messages: ["yeah all good", "talk soon"] }),
+    });
+    expect(posts.map((p) => p.text)).toEqual(["yeah all good", "talk soon"]);
+  });
+});
+
 describe("deliverChilled — a missing persona file never costs a message", () => {
   test("the real transform + a missing persona: the reply still lands, chilled, with no system", async () => {
     // No `transform` injected: this drives the REAL chillTransform (with a fake fetch) so the
