@@ -17,6 +17,7 @@ cd "$root"
 
 ROUNDS="${BENCH_ROUNDS:-5}"
 OUT="$root/bench-results/matrix.jsonl"
+ERRLOG="$root/bench-results/matrix-run.stderr"
 mkdir -p "$(dirname "$OUT")"
 
 STOCK_ARGS=""                       # unset => the shipped default
@@ -56,9 +57,9 @@ print(json.dumps({
     "startedAt": sys.argv[3],
     "ok": False,
     "exitCode": int(sys.argv[4]),
-    "stderr": open("/tmp/bench-stderr.txt").read()[-4000:],
+    "stderr": open(sys.argv[5]).read()[-4000:],
 }))
-' "$config" "$round" "$started" "$status" >>"$OUT"
+' "$config" "$round" "$started" "$status" "$ERRLOG" >>"$OUT"
     echo "[matrix] FAILED ($status): $config round $round" >&2
   fi
   sleep 2
