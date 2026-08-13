@@ -55,6 +55,11 @@ for config, runs in by_config.items():
     print(f"   warm p50       : {span([r['warmEvalMs']['p50'] for r in ok], ' ms')}")
     print(f"   warm p95       : {span([r['warmEvalMs']['p95'] for r in ok], ' ms')}")
     print(f"   warm min       : {span([r['warmEvalMs']['min'] for r in ok], ' ms')}")
+    if ok and "total" in ok[0]["warmEvalMs"]:
+        print(f"   warm total     : {span([r['warmEvalMs']['total'] for r in ok], ' ms')}")
+    if ok and "leaseTotalMs" in ok[0]:
+        print(f"   lease total    : {span([r['leaseTotalMs'] for r in ok], ' ms')}")
+        print(f"   warm series    : {ok[0]['warmEvalMs'].get('samples')}  (round {ok[0]['round']})")
     print(f"   peak RSS       : {span([r['peakRssMb'] for r in ok], ' MiB')}")
     print(f"   CPU-seconds    : {span([r['cpuSeconds'] for r in ok], ' s', 2)}")
     for ua in identities:

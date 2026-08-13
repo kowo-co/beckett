@@ -31,10 +31,10 @@ run_one() {
   # and the bench report labels the run with what the environment actually said.
   if [ -n "$backend" ]; then
     stdout="$(BROWSER_BENCH_CHROMIUM_ARGS="$args" BETTERWRIGHT_BACKEND="$backend" \
-      timeout 420 bun scripts/bench/browser-lane.ts 2>/tmp/bench-stderr.txt)"
+      timeout 420 bun scripts/bench/browser-lane.ts 2>"$ERRLOG")"
   else
     stdout="$(BROWSER_BENCH_CHROMIUM_ARGS="$args" env -u BETTERWRIGHT_BACKEND \
-      timeout 420 bun scripts/bench/browser-lane.ts 2>/tmp/bench-stderr.txt)"
+      timeout 420 bun scripts/bench/browser-lane.ts 2>"$ERRLOG")"
   fi
   status=$?
   if [ $status -eq 0 ] && [ -n "$stdout" ]; then

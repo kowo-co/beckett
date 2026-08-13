@@ -307,7 +307,15 @@ try {
       p50: Number(percentile(warmSamples, 0.5).toFixed(1)),
       p95: Number(percentile(warmSamples, 0.95).toFixed(1)),
       max: Number(Math.max(...warmSamples).toFixed(1)),
+      // The warm loop is bimodal on backends that launch a separate pixel renderer for
+      // the first proof screenshot, so a percentile alone hides what a lease really
+      // costs. Keep the whole series, and the total the lease actually paid.
+      total: Number(warmSamples.reduce((sum, value) => sum + value, 0).toFixed(1)),
+      samples: warmSamples.map((value) => Number(value.toFixed(1))),
     },
+    // What one lease costs end to end: acquire plus every warm iteration. This is the
+    // figure an operator feels, and the one metric no sub-step ordering can flatter.
+    leaseTotalMs: Number((coldAcquireMs + warmSamples.reduce((sum, value) => sum + value, 0)).toFixed(1)),
     peakRssMb,
     cpuSeconds,
     hostLaunches: stats.launches,
