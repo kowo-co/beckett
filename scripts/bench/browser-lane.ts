@@ -56,16 +56,16 @@ interface ProcStat {
  * (native BetterChromium fork vs managed CloakBrowser) and, on Linux, that
  * choice depends on a /dev/dri probe the sandbox's minimal --dev can defeat.
  * A benchmark number is only comparable once you know which one produced it,
- * so the sampler records argv[0] of every process in the host's tree and the
- * report names the browser executables it saw. This reads /proc only; it
+ * so the sampler resolves the executable of every process in the host's tree
+ * and the report names the browser binaries it saw. This reads /proc only; it
  * changes no launch behaviour.
  */
 function classifyBrowserBinary(exe: string): string | null {
   const lower = exe.toLowerCase();
-  if (lower.includes("betterchromium") || /\/(?:chromium\/|betterwright\/chromium)/.test(lower)) return exe;
-  if (lower.includes("cloakbrowser") || lower.includes(".cloakbrowser")) return exe;
-  if (lower.includes("obscura")) return exe;
-  if (/\/(?:chrome|chromium|headless_shell)$/.test(lower)) return exe;
+  if (lower.includes("betterchromium")) return exe; // 1.8.x native fork
+  if (lower.includes("cloakbrowser")) return exe; // managed compatibility backend
+  if (lower.includes("obscura")) return exe; // 1.7.x resident DOM runtime
+  if (/\/(?:chrome|chromium|headless_shell)$/.test(lower)) return exe; // any other Chromium
   return null;
 }
 
