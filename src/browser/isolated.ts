@@ -219,8 +219,10 @@ const CHROMIUM_FORK_PLATFORM_LAYOUT_1_8: Record<string, string> = {
 
 /** The pinned betterwright's own artifact layout, chosen by its major.minor. */
 export function chromiumForkPlatformLayout(betterwrightVersion: string | undefined): Record<string, string> {
-  const [major, minor] = (betterwrightVersion ?? "").split(".").map((part) => Number.parseInt(part, 10));
-  if (major === undefined || minor === undefined) return CHROMIUM_FORK_PLATFORM_LAYOUT_1_8;
+  const [major = NaN, minor = NaN] = (betterwrightVersion ?? "")
+    .split(".")
+    .map((part) => Number.parseInt(part, 10));
+  // An unreadable version falls forward to the current layout rather than guessing backwards.
   if (!Number.isFinite(major) || !Number.isFinite(minor)) return CHROMIUM_FORK_PLATFORM_LAYOUT_1_8;
   return major > 1 || (major === 1 && minor >= 8)
     ? CHROMIUM_FORK_PLATFORM_LAYOUT_1_8
