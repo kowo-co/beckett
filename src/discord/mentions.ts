@@ -90,7 +90,7 @@ function mentionStripRe(id: string): RegExp {
   // Anchored at the `@`/`<`, not on leading whitespace: consuming the space on BOTH sides would
   // fuse the words a mention sat between ("hey @id there" -> "heythere"). Trailing whitespace is
   // eaten so a stripped mention leaves at most one space, which the caller's tidy pass collapses.
-  return new RegExp("`?<?[ \\t]*@[ \\t]*!?[ \\t]*" + id + "(?![0-9])[ \\t]*>?[ \\t]*`?", "g");
+  return new RegExp("`?(?:<[ \\t]*)?@[ \\t]*!?[ \\t]*" + id + "(?![0-9])[ \\t]*>?[ \\t]*`?", "g");
 }
 
 /**
