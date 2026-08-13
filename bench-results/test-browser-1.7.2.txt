@@ -19,3 +19,12 @@ Ran 99 tests across 3 files. [102.95s]
 === run 3 ===
 $ bun test ./src/browser/runtime.test.ts ./src/browser/isolated.test.ts ./src/browser/agent.test.ts
 bun test v1.3.14 (0d9b296a)
+
+ 99 pass
+ 0 fail
+ 375 expect() calls
+Ran 99 tests across 3 files. [112.34s]
+--- exit 0 ---
+=== run 4 ===
+$ bun test ./src/browser/runtime.test.ts ./src/browser/isolated.test.ts ./src/browser/agent.test.ts
+bun test v1.3.14 (0d9b296a)
