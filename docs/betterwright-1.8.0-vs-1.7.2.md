@@ -6,6 +6,12 @@
 > (4-core Linux x64, kernel 7.1.4, Node 26.4.0, Bun 1.3.14) on 2026-08-12, alternating and
 > repeated; nothing here is a vendor claim carried over unchecked.
 
+> **Superseded in part.** Everything below the "1.8.2" heading is a later, independent
+> measurement pass against BetterWright **1.8.2** (2026-08-12), taken after the sandbox fork
+> bind landed. The 1.8.0 material is kept intact as the historical record of why 1.8.0 could
+> not run at all. The pin decision that stands today is the one in
+> [Decision — 1.8.2](#decision--182), not the 1.8.0 one.
+
 ## TL;DR
 
 **Hold the pin at 1.7.2.** 1.8.0 does not run on Beckett's production browser lane at all: it
