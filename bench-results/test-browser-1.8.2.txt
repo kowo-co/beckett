@@ -1,3 +1,12 @@
 === run 1 ===
 $ bun test ./src/browser/runtime.test.ts ./src/browser/isolated.test.ts ./src/browser/agent.test.ts
 bun test v1.3.14 (0d9b296a)
+
+ 99 pass
+ 0 fail
+ 375 expect() calls
+Ran 99 tests across 3 files. [110.20s]
+--- exit 0 ---
+=== run 2 ===
+$ bun test ./src/browser/runtime.test.ts ./src/browser/isolated.test.ts ./src/browser/agent.test.ts
+bun test v1.3.14 (0d9b296a)
