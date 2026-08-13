@@ -182,13 +182,21 @@ const spawn = ((options: Parameters<typeof Bun.spawn>[0]) => {
   return child;
 }) as typeof Bun.spawn;
 
-// Default: Beckett's stock browser_chromium_args (whatever config.ts ships).
-// BROWSER_BENCH_CHROMIUM_ARGS (a JSON array) swaps in an explicit list so the
-// same lane can be measured on a shared arg list both BetterWright versions
-// accept without a compatibility drop. It never edits the shipped default.
+// Default (unset): Beckett's stock browser_chromium_args, so a plain
+// `bun run browser:bench` stays byte-identical to the harness that produced the
+// historical numbers. BROWSER_BENCH_CHROMIUM_ARGS swaps in an explicit list so the
+// same lane can be measured on a shared arg list both BetterWright versions accept
+// without a compatibility drop (1.8.x reserves --disable-software-rasterizer, which
+// the shipped default contains). It never edits the shipped default.
+//
+// Two spellings are honored because both bench harnesses in this repo are still run:
+// a JSON array (`["--disable-gpu"]`, used by scripts/bench/betterwright-matrix.sh) and
+// a comma-separated list (used by bench-results/run-bench.sh). A leading "[" picks JSON,
+// since no Chromium switch starts with one.
 const chromiumArgsOverride = (() => {
   const raw = process.env.BROWSER_BENCH_CHROMIUM_ARGS?.trim();
   if (!raw) return undefined;
+  if (!raw.startsWith("[")) return raw.split(",").map((arg) => arg.trim()).filter(Boolean);
   const parsed = JSON.parse(raw);
   if (!Array.isArray(parsed) || parsed.some((arg) => typeof arg !== "string")) {
     throw new Error("BROWSER_BENCH_CHROMIUM_ARGS must be a JSON array of strings");

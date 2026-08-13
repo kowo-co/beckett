@@ -1,0 +1,25 @@
+Runtime
+  ✓ Node:            v26.4.0
+  ✓ Playwright:      1.61.1 (pinned 1.61.1)
+  ✓ Worker:          /home/beckett/Projects/beckett/.beckett/worktrees/run-20260812-finish-the-betterchromium-sandbox-bind-a/node_modules/betterwright/dist/src/worker.js
+
+Browser
+  ✓ BetterChromium:  BetterChromium 151.0.7922.108 — /home/beckett/.betterwright/chromium/linux-x64/betterchromium
+  ! Fork fonts:      fork binary has no fonts/ttf beside it; host fontconfig will leak (Linux tell). Deploy the macOS-metric font bundle next to chrome.
+  ✓ CloakBrowser:    146.0.7680.177.5 (free) — /home/beckett/.cloakbrowser/chromium-146.0.7680.177.5/chrome — compatibility backend available
+  ✓ In use:          chromium-fork
+  ✓ Stealth driver:  patchright-core 1.61.1 (enable with --stealth)
+
+Agent integration
+  ! Installed for:   no agent host wired up yet
+      → Run `betterwright init` to wire up the agents on this machine.
+  ✓ MCP SDK:         available — `betterwright mcp` can serve
+
+Built-in agent
+  ! Model backends:  none configured
+      → Only needed for `betterwright exec`. Run `betterwright auth --login codex`, or set ANTHROPIC_API_KEY.
+
+Credentials
+  ✓ Vault:           /home/beckett/.betterwright/vault — read it with `betterwright vault list`
+
+BetterWright is ready. 3 optional things above are not set up.

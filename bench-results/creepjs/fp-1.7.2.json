@@ -4,13 +4,13 @@
     "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
     "webdriver": false,
     "platform": "Win32",
-    "cores": 4,
+    "cores": 16,
     "deviceMemory": 4,
     "vendor": "Google Inc.",
     "webgl": {
       "ok": true,
-      "vendor": "Google Inc. (Intel)",
-      "renderer": "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)"
+      "vendor": "Google Inc. (NVIDIA)",
+      "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)"
     },
     "body": "\n \n \n \n \n \n FP ID: Computing...\n \n Fuzzy: 0000000000000000000000000000000000000000000000000000000000000000\n \n 0 ms\n \n \n \n \n WebRTC\n host connection:\n \n foundation/ip:\n \n \n \n sdp capabilities:\n stun connection:\n \n devices (0):\n \n \n \n \n \n Timezone\n \n \n \n Intl\n \n \n \n \n \n Headless\n chromium:\n 0% like headless:\n 0% headless:\n 0% stealth:\n platform hints:\n \n \n \n Resistance\n privacy:\n security:\n mode:\n extension:\n \n \n \n \n Worker\n lang/timezone:\n \n gpu:\n \n \n \n userAgent:\n \n device:\n \n userAgentData:\n \n \n \n \n \n WebGL\n images:\n pixels:\n params (0):\n exts (0):\n gpu:\n \n \n \n \n Screen\n ...screen:\n ....avail:\n touch:\n depth:\n viewport:\n \n \n \n \n \n Canvas 2d\n data:\n rendering:\n \n \n textMetrics:\n \n \n \n Fonts\n load (0):\n apps:\n \n \n \n \n \n \n DOMRect\n elems A:\n elems B:\n range A:\n range B:\n \n \n \n SVGRect\n bBox:\n char:\n subs:\n text:\n \n \n \n \n \n Audio\n sum:\n gain:\n freq:\n time:\n trap:\n unique:\n data:\n copy:\n values:\n \n \n Speech\n local (0):\n remote (0):\n lang (0):\n default:\n \n \n \n Media\n mimes (0):\n devices (0):\n \n \n \n \n \n Features:\n JS/DOM:\n \n \n CSS:\n Window:\n \n \n \n \n CSS Media Queries\n @media:\n matchMedia:\n touch device:\n screen query:\n \n \n Computed Style\n keys (0):\n system styles:\n \n system\n \n \n \n \n \n \n \n Math\n results:\n \n 0% of engine\n \n\n \n \n Error\n results:\n \n 0% of engine\n \n \n \n \n \n Window\n keys (0):\n \n 0% of version\n \n \n \n HTMLElement\n keys (0):\n \n 0% engine\n \n \n \n \n \n \n Navigator\n properties (0):\n dnt:\n gpc:\n lang:\n mimeTypes (0):\n permissions (0):\n plugins (0):\n vendor:\n webgpu:\n userAgentData:\n \n \n \n device:\n \n ua parsed:\n userAgent:\n \n appVersion:\n \n \n \n \n \n Status\n network:\n \n \n \n battery:\n \n \n \n available:\n \n \n \n \n Tests\n \n Workers\n Iframes\n Fonts\n Timezone\n Window Version\n Screen\n Prototype\n DOMRect\n Emojis\n Math\n Machine\n Chrome Extensions\n JS Proxy\n \n \n \n \n \n\n\n"
   },
@@ -25,6 +25,6 @@
       "active": true
     }
   ],
-  "durationMs": 23752.9,
+  "durationMs": 24665.9,
   "session": "default"
 }
