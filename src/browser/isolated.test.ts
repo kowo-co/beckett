@@ -496,6 +496,54 @@ describe("browser host sandbox policy", () => {
     }
   });
 
+  // BetterWright >=1.8.2's backend selector probes /dev/dri, which bwrap's minimal --dev
+  // always hides — so inside the sandbox `auto` reads GPU-less and picks CloakBrowser even
+  // on a GPU-equipped host. The override only reaches the host if --clearenv is answered
+  // with a matching --setenv, and it must stay absent when the operator did not set it.
+  test("an explicit BETTERWRIGHT_BACKEND is forwarded through --clearenv, and nothing is set otherwise", () => {
+    const fixture = fixturePaths();
+    const base = {
+      settings: fixture.settings,
+      platform: "linux" as const,
+      sandbox: "auto" as const,
+      execPath: process.execPath,
+      nodePath: fixture.node,
+      hostPath: fixture.host,
+      chromiumExecutable: fixture.browser,
+      repoRoot: resolve(import.meta.dir, "../.."),
+      bwrapPath: "/usr/bin/bwrap",
+      prlimitPath: fixture.prlimit,
+      backend: "betterwright" as const,
+    };
+    try {
+      const forced = buildBrowserHostLaunch({
+        ...base,
+        parentEnv: { PATH: "/usr/bin:/bin", BETTERWRIGHT_BACKEND: "chromium-fork" },
+      });
+      expect(hasTriple(forced.command, ["--setenv", "BETTERWRIGHT_BACKEND", "chromium-fork"])).toBe(true);
+
+      const auto = buildBrowserHostLaunch({ ...base, parentEnv: { PATH: "/usr/bin:/bin" } });
+      expect(auto.command).not.toContain("BETTERWRIGHT_BACKEND");
+
+      // An empty or whitespace value is not a selection; upstream would reject it.
+      const blank = buildBrowserHostLaunch({
+        ...base,
+        parentEnv: { PATH: "/usr/bin:/bin", BETTERWRIGHT_BACKEND: "  " },
+      });
+      expect(blank.command).not.toContain("BETTERWRIGHT_BACKEND");
+
+      // The legacy Playwright backend has no such selector; it must stay untouched.
+      const playwright = buildBrowserHostLaunch({
+        ...base,
+        backend: "playwright",
+        parentEnv: { PATH: "/usr/bin:/bin", BETTERWRIGHT_BACKEND: "chromium-fork" },
+      });
+      expect(playwright.command).not.toContain("BETTERWRIGHT_BACKEND");
+    } finally {
+      rmSync(fixture.dir, { recursive: true, force: true });
+    }
+  });
+
   test("the playwright backend gets no CloakBrowser shim at all", () => {
     const fixture = fixturePaths();
     const shimDir = join(fixture.dir, "cloak-storage-quota");

@@ -21,7 +21,7 @@
  * short-lived renderer still shows up in the CPU-seconds figure.
  */
 
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -51,6 +51,24 @@ interface ProcStat {
   rssPages: number;
 }
 
+/**
+ * Which browser binary actually ran. BetterWright picks its backend at launch
+ * (native BetterChromium fork vs managed CloakBrowser) and, on Linux, that
+ * choice depends on a /dev/dri probe the sandbox's minimal --dev can defeat.
+ * A benchmark number is only comparable once you know which one produced it,
+ * so the sampler resolves the executable of every process in the host's tree
+ * and the report names the browser binaries it saw. This reads /proc only; it
+ * changes no launch behaviour.
+ */
+function classifyBrowserBinary(exe: string): string | null {
+  const lower = exe.toLowerCase();
+  if (lower.includes("betterchromium")) return exe; // 1.8.x native fork
+  if (lower.includes("cloakbrowser")) return exe; // managed compatibility backend
+  if (lower.includes("obscura")) return exe; // 1.7.x resident DOM runtime
+  if (/\/(?:chrome|chromium|headless_shell)$/.test(lower)) return exe; // any other Chromium
+  return null;
+}
+
 function readProcStat(pid: number): ProcStat | null {
   try {
     const raw = readFileSync(`/proc/${pid}/stat`, "utf8");
@@ -71,7 +89,21 @@ function readProcStat(pid: number): ProcStat | null {
 /** Sample the host child + all its descendants: peak tree RSS and per-PID CPU. */
 function createTreeSampler(rootPid: number) {
   const cpuByPid = new Map<number, number>();
+  const browserBinaries = new Set<string>();
   let peakRssBytes = 0;
+
+  function recordBinary(pid: number): void {
+    try {
+      // readlink over cmdline: Chromium overwrites its own argv to set a process
+      // title, so /proc/<pid>/cmdline is one blob rather than NUL-separated argv.
+      // /proc/<pid>/exe is the kernel's record of the file actually executed.
+      const exe = readlinkSync(`/proc/${pid}/exe`);
+      const classified = classifyBrowserBinary(exe);
+      if (classified) browserBinaries.add(classified);
+    } catch {
+      // A process that exits between readdir and readlink is expected; skip it.
+    }
+  }
 
   function sample(): void {
     const stats = new Map<number, ProcStat>();
@@ -98,6 +130,7 @@ function createTreeSampler(rootPid: number) {
       if (!stat) continue;
       rssBytes += stat.rssPages * PAGE_SIZE;
       cpuByPid.set(pid, stat.cpuTicks); // monotonic; survives a PID that later exits.
+      recordBinary(pid);
     }
     if (rssBytes > peakRssBytes) peakRssBytes = rssBytes;
   }
@@ -111,6 +144,7 @@ function createTreeSampler(rootPid: number) {
     },
     peakRssBytes: () => peakRssBytes,
     cpuSeconds: () => [...cpuByPid.values()].reduce((sum, ticks) => sum + ticks, 0) / CLK_TCK,
+    browserBinaries: () => [...browserBinaries].sort(),
   };
 }
 
@@ -148,19 +182,34 @@ const spawn = ((options: Parameters<typeof Bun.spawn>[0]) => {
   return child;
 }) as typeof Bun.spawn;
 
-// Unset by default, so a plain `bun run browser:bench` is byte-identical to the harness
-// that produced the historical numbers. betterwright 1.8.1 reserves
-// --disable-software-rasterizer, which Beckett's default browser_chromium_args contains, so
-// comparing 1.8.1 against 1.7.2 needs both versions run on one explicit arg list.
-const chromiumArgsOverride = process.env.BROWSER_BENCH_CHROMIUM_ARGS;
+// Default (unset): Beckett's stock browser_chromium_args, so a plain
+// `bun run browser:bench` stays byte-identical to the harness that produced the
+// historical numbers. BROWSER_BENCH_CHROMIUM_ARGS swaps in an explicit list so the
+// same lane can be measured on a shared arg list both BetterWright versions accept
+// without a compatibility drop (1.8.x reserves --disable-software-rasterizer, which
+// the shipped default contains). It never edits the shipped default.
+//
+// Two spellings are honored because both bench harnesses in this repo are still run:
+// a JSON array (`["--disable-gpu"]`, used by scripts/bench/betterwright-matrix.sh) and
+// a comma-separated list (used by bench-results/run-bench.sh). A leading "[" picks JSON,
+// since no Chromium switch starts with one.
+const chromiumArgsOverride = (() => {
+  const raw = process.env.BROWSER_BENCH_CHROMIUM_ARGS?.trim();
+  if (!raw) return undefined;
+  if (!raw.startsWith("[")) return raw.split(",").map((arg) => arg.trim()).filter(Boolean);
+  const parsed = JSON.parse(raw);
+  if (!Array.isArray(parsed) || parsed.some((arg) => typeof arg !== "string")) {
+    throw new Error("BROWSER_BENCH_CHROMIUM_ARGS must be a JSON array of strings");
+  }
+  return parsed as string[];
+})();
+
 const config = validateConfig({
   paths: { beckett_dir: dir },
   quick: {
     browser_profile_dir: "browser/profile",
     browser_eval_timeout_ms: 30_000,
-    ...(chromiumArgsOverride === undefined
-      ? {}
-      : { browser_chromium_args: chromiumArgsOverride.split(",").map((arg) => arg.trim()).filter(Boolean) }),
+    ...(chromiumArgsOverride ? { browser_chromium_args: chromiumArgsOverride } : {}),
   },
 });
 const runtime = createIsolatedBrowserRuntime({
@@ -200,32 +249,83 @@ try {
   const coldAcquireMs = performance.now() - coldStarted;
 
   const warmSamples: number[] = [];
+  const warnings = new Set<string>();
   for (let i = 0; i < WARM_ITERATIONS; i++) {
     const started = performance.now();
     const result = await runtime.evaluate(runId, scriptedInteraction, token);
     warmSamples.push(performance.now() - started);
+    for (const warning of result.warnings ?? []) warnings.add(warning);
     if (typeof result.value !== "number" || result.value <= 0) {
       throw new Error(`unexpected scripted-interaction result: ${JSON.stringify(result.value)}`);
     }
   }
 
   sampler?.sample();
+  // Snapshot the cost figures before the identity probe so the probe's own work
+  // is not counted against the warm loop it follows.
+  const peakRssMb = Number((sampler!.peakRssBytes() / (1024 * 1024)).toFixed(1));
+  const cpuSeconds = Number(sampler!.cpuSeconds().toFixed(2));
+  const browserBinaries = sampler!.browserBinaries();
+
+  // Second empirical backend witness, independent of argv: a native BetterChromium
+  // fork and managed CloakBrowser report different Chrome majors and platforms.
+  const identity = await runtime
+    .evaluate(
+      runId,
+      `return await page.evaluate(() => JSON.stringify({
+         ua: navigator.userAgent,
+         platform: navigator.platform,
+         webdriver: navigator.webdriver,
+         cores: navigator.hardwareConcurrency,
+         webglRenderer: (() => {
+           try {
+             const gl = document.createElement('canvas').getContext('webgl');
+             if (!gl) return null;
+             const ext = gl.getExtension('WEBGL_debug_renderer_info');
+             return ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : 'no-debug-renderer-info';
+           } catch (error) { return 'error: ' + String(error); }
+         })(),
+       }));`,
+      token,
+    )
+    .then((result) => {
+      for (const warning of result.warnings ?? []) warnings.add(warning);
+      return typeof result.value === "string" ? JSON.parse(result.value) : result.value;
+    })
+    .catch((error) => ({ error: String(error) }));
+
   const stats = runtime.stats();
   const report = {
     fixture: baseUrl,
     backend: "betterwright/CloakBrowser (isolated host)",
+    betterwrightVersion: (await import("betterwright/package.json", { with: { type: "json" } }).then(
+      (mod) => (mod.default as { version?: string }).version,
+      () => undefined,
+    )) ?? "unknown",
+    betterwrightBackendEnv: process.env.BETTERWRIGHT_BACKEND ?? "(unset → auto)",
+    chromiumArgs: config.quick.browser_chromium_args,
+    browserBinaries,
+    identity,
+    warnings: [...warnings],
     headless: config.quick.browser_headless,
     warmIterations: WARM_ITERATIONS,
-    chromiumArgs: config.quick.browser_chromium_args,
     coldAcquireMs: Number(coldAcquireMs.toFixed(1)),
     warmEvalMs: {
       min: Number(Math.min(...warmSamples).toFixed(1)),
       p50: Number(percentile(warmSamples, 0.5).toFixed(1)),
       p95: Number(percentile(warmSamples, 0.95).toFixed(1)),
       max: Number(Math.max(...warmSamples).toFixed(1)),
+      // The warm loop is bimodal on backends that launch a separate pixel renderer for
+      // the first proof screenshot, so a percentile alone hides what a lease really
+      // costs. Keep the whole series, and the total the lease actually paid.
+      total: Number(warmSamples.reduce((sum, value) => sum + value, 0).toFixed(1)),
+      samples: warmSamples.map((value) => Number(value.toFixed(1))),
     },
-    peakRssMb: Number((sampler!.peakRssBytes() / (1024 * 1024)).toFixed(1)),
-    cpuSeconds: Number(sampler!.cpuSeconds().toFixed(2)),
+    // What one lease costs end to end: acquire plus every warm iteration. This is the
+    // figure an operator feels, and the one metric no sub-step ordering can flatter.
+    leaseTotalMs: Number((coldAcquireMs + warmSamples.reduce((sum, value) => sum + value, 0)).toFixed(1)),
+    peakRssMb,
+    cpuSeconds,
     hostLaunches: stats.launches,
     evaluations: stats.evaluations,
   };
