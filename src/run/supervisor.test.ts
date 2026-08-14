@@ -148,6 +148,9 @@ const gitFakes: Partial<RunGitOps> = {
   },
   removeWorktree: async () => {},
   fetchRemote: async () => true,
+  // Default: comparison unavailable → the generic push hand-off. Tests that assert case (a)/(b)/(c)
+  // advice override this per-test to return the specific branch-vs-main shape.
+  readBranchVsMain: async () => ({ compared: false, ahead: 0, behind: 0, aheadUnlanded: 0 }),
 };
 
 // ── helpers ─────────────────────────────────────────────────────────────────────────────────
