@@ -1018,6 +1018,7 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
   ): Promise<string | undefined> {
     const base = branch ?? await this.defaultBranch(repo);
     const url = `${this.gitHost()}/${repo}.git`;
+    await this.commitStrayWorkingTree(cwd, summary);
     await this.squashLocalCommits(cwd, workerBaseSha, summary);
     const fetch = await this.runner(["git", "fetch", url, base], { cwd, env: this.gitEnv() });
     if (fetch.code === 0) {
@@ -1042,6 +1043,55 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
     }
     await this.gitPush(cwd, repo, "HEAD", base);
     return await this.currentSha(cwd);
+  }
+
+  /**
+   * Commit whatever is still loose in the publish checkout, BEFORE the squash and the fetch/rebase
+   * below. `git rebase` refuses outright on a dirty tree ("cannot rebase: You have unstaged changes.
+   * error: additionally, your index contains uncommitted changes."), and that is not a transient
+   * fault — it fails identically on every attempt, so a run that hits it burns its retry ladder and
+   * parks without ever publishing (2026-08-14). The dirty state is our OWN doing: this is the run's
+   * private worktree, so loose changes are its own work that no stage got around to committing.
+   * Committing ships that work; stashing would silently drop it from the very push meant to deliver
+   * it, and {@link squashLocalCommits} then folds this commit into the run's single publish commit.
+   *
+   * Internal scaffolding is kept OUT of the index (`:(exclude)`) exactly as
+   * {@link stripTrackedScaffolding} keeps it out of the push — leaving it untracked, which a rebase
+   * does not mind. Best-effort throughout: a `git status` we can't read, or an add/commit that
+   * fails, leaves the tree exactly as it was and lets the rebase report the real problem.
+   */
+  private async commitStrayWorkingTree(cwd: string, summary: string | undefined): Promise<void> {
+    const status = await this.runner(["git", "status", "--porcelain"], { cwd, env: this.gitEnv() });
+    if (status.code !== 0 || status.stdout.trim() === "") return;
+    const dirty = status.stdout.split(/\r?\n/).map((line) => line.slice(3).trim()).filter(Boolean);
+    this.opts.logger.warn("publish checkout was dirty — committing its loose work before the rebase", {
+      cwd,
+      paths: dirty.slice(0, 20),
+    });
+    const add = await this.runner(["git", "add", "-A", "--", ".", `:(exclude)${SCAFFOLDING_DIR}`], {
+      cwd,
+      env: this.gitEnv(),
+    });
+    if (add.code !== 0) {
+      this.opts.logger.warn("could not stage the loose publish work (rebase will report the dirty tree)", {
+        cwd,
+        stderr: add.stderr.trim(),
+      });
+      return;
+    }
+    // Nothing staged ⇒ the only dirt was scaffolding/ignored noise, which never blocks a rebase.
+    const staged = await this.runner(["git", "diff", "--cached", "--quiet"], { cwd, env: this.gitEnv() });
+    if (staged.code === 0) return;
+    const commit = await this.runner(
+      ["git", "-c", "commit.gpgsign=false", "commit", "--no-verify", "-m", summary?.trim() || "beckett: commit loose publish work"],
+      { cwd, env: this.gitEnv() },
+    );
+    if (commit.code !== 0) {
+      this.opts.logger.warn("could not commit the loose publish work (rebase will report the dirty tree)", {
+        cwd,
+        stderr: commit.stderr.trim(),
+      });
+    }
   }
 
   /**
