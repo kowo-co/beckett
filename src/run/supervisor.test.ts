@@ -18,6 +18,7 @@ import { restartBlockingRunWorkers } from "../deploy/run-drain.ts";
 import type { RunGitOps } from "./supervisor.ts";
 import { RunStore } from "./store.ts";
 import type { Run } from "./types.ts";
+import type { BranchVsMainRaw } from "../worker/worktree.ts";
 
 // ── controllable fake worker handle + spawn mock ────────────────────────────────────────────
 interface SpawnCall {
@@ -148,6 +149,9 @@ const gitFakes: Partial<RunGitOps> = {
   },
   removeWorktree: async () => {},
   fetchRemote: async () => true,
+  // Default: comparison unavailable → the generic push hand-off. Tests that assert case (a)/(b)/(c)
+  // advice override this per-test to return the specific branch-vs-main shape.
+  readBranchVsMain: async () => ({ compared: false, ahead: 0, behind: 0, aheadUnlanded: 0 }),
 };
 
 // ── helpers ─────────────────────────────────────────────────────────────────────────────────
@@ -940,6 +944,137 @@ describe("publishing never stalls silently", () => {
 
     expect(pass.parked).toContain(run.id);
     expect(store.get(run.id)!.state).toBe("parked");
+  });
+
+  // BUG 1, sharpened by the 2026-08-14 `babble` stall: a durable row can give up after just ONE
+  // attempt (a non-retryable/permanent failure), not only after exhausting the four-rung ladder.
+  // Whichever marks the row terminal MUST drive the run out of `publishing` immediately — a give-up
+  // is never a state to sit in for hours waiting on a sweeper.
+  test("a non-retryable failure gives up on attempt 1 and leaves `publishing` at once (BUG 1)", async () => {
+    const dir = scratch();
+    const outbox = join(dir, "run-publish-outbox.jsonl");
+    const { supervisor, store, publishCalls } = newSupervisor({
+      publishOutboxPath: outbox,
+      // The exact 2026-08-14 mechanism: a dirty-tree rebase failure — deterministic, no retry can
+      // clear it.
+      publish: async () => {
+        throw new Error(
+          "publish: local work conflicts with kowo-co/babble@main and can't auto-rebase — needs a human " +
+            "(error: cannot rebase: You have unstaged changes.)",
+        );
+      },
+    });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    await settle();
+    created[1]!.finish("success", "pass", doneSignal("complete"));
+    await settle();
+
+    // Exactly ONE publish attempt was made, and the run is already OUT of publishing — no sweeper,
+    // no ladder, no hours of silence.
+    expect(publishCalls).toHaveLength(1);
+    const parked = store.get(run.id)!;
+    expect(parked.state).toBe("parked");
+    expect(parked.error).toContain("unrecoverable without a human");
+    expect(parked.error).toContain("You have unstaged changes");
+    const row = JSON.parse(readFileSync(outbox, "utf8").trim());
+    expect(row.attempt).toBe(1);
+    expect(row.nextAttemptAt).toBe(Number.MAX_SAFE_INTEGER); // gave up — never scheduled again
+  });
+
+  // The other half of BUG 1: exhausting all four attempts must ALSO leave `publishing` the moment
+  // the last attempt fails — proven without advancing any clock past the final failure.
+  test("exhausting the retry ladder leaves `publishing` on the final attempt, not hours later", async () => {
+    const dir = scratch();
+    const outbox = join(dir, "run-publish-outbox.jsonl");
+    const { supervisor, store } = newSupervisor({
+      publishOutboxPath: outbox,
+      publish: async () => {
+        throw new Error("fetch failed"); // transient — walks the ladder
+      },
+    });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    await settle();
+    created[1]!.finish("success", "pass", doneSignal("complete"));
+    await settle();
+    expect(store.get(run.id)!.state).toBe("publishing"); // attempt 1 retried — still honest
+
+    // Force each successive attempt due and drain. The run must be parked the instant attempt 4
+    // fails, in the SAME pass — never left publishing for a later sweeper.
+    for (let attempt = 2; attempt <= 4; attempt++) {
+      const row = JSON.parse(readFileSync(outbox, "utf8").trim());
+      writeFileSync(outbox, `${JSON.stringify({ ...row, nextAttemptAt: 1 })}\n`);
+      await supervisor.replayPublishes();
+      await settle();
+    }
+    const parked = store.get(run.id)!;
+    expect(parked.state).toBe("parked");
+    expect(parked.error).toContain("no attempts left after 4 of 4");
+  });
+
+  // BUG 2: the parked hand-off advice is computed from the branch's REAL state vs origin/main, and
+  // gives the SAFE command for each of the three shapes — never the blanket "just push it" that
+  // would have duplicated or reverted shipped work five-for-five on 2026-08-14.
+  async function parkWithBranchState(state: BranchVsMainRaw): Promise<Run> {
+    const dir = scratch();
+    const original = gitFakes.readBranchVsMain;
+    gitFakes.readBranchVsMain = async () => state;
+    try {
+      const { supervisor, store } = newSupervisor({
+        publishOutboxPath: join(dir, "run-publish-outbox.jsonl"),
+        // A permanent failure so it parks on attempt 1 — the branch check drives the advice.
+        publish: async () => {
+          throw new Error("HTTP 403 forbidden");
+        },
+      });
+      const run = seedRun(store, makeRun());
+      await supervisor.admit(run.id);
+      await tick();
+      created[0]!.finish("success", "implemented", doneSignal("complete"));
+      await settle();
+      created[1]!.finish("success", "pass", doneSignal("complete"));
+      await settle();
+      return store.get(run.id)!;
+    } finally {
+      gitFakes.readBranchVsMain = original;
+    }
+  }
+
+  test("(a) a genuinely-ahead branch parks with the push advice — the current advice IS correct", async () => {
+    const parked = await parkWithBranchState({ compared: true, ahead: 2, behind: 0, aheadUnlanded: 2 });
+    expect(parked.state).toBe("parked");
+    expect(parked.error).toContain("beckett gh push --repo <owner/name>");
+    expect(parked.error).toContain(`beckett task courier ${parked.id}`);
+  });
+
+  test("(b) an already-landed branch parks advising a courier-with-PR, NEVER a push", async () => {
+    const parked = await parkWithBranchState({
+      compared: true,
+      ahead: 1,
+      behind: 4,
+      aheadUnlanded: 0,
+      landedCommit: "2035e51deadbeef",
+      landedSubject: "babble: post training cycles",
+    });
+    expect(parked.state).toBe("parked");
+    expect(parked.error).toContain("ALREADY on origin/main");
+    expect(parked.error).toContain("babble: post training cycles");
+    expect(parked.error).toContain(`beckett task courier ${parked.id} --pr-url`);
+    expect(parked.error).not.toContain("gh push"); // pushing would duplicate the landed PR
+  });
+
+  test("(c) a superseded (behind) branch parks warning a push would REVERT, advising courier-closed", async () => {
+    const parked = await parkWithBranchState({ compared: true, ahead: 0, behind: 3, aheadUnlanded: 0 });
+    expect(parked.state).toBe("parked");
+    expect(parked.error).toContain("3 commit(s) BEHIND origin/main");
+    expect(parked.error).toContain("REVERT");
+    expect(parked.error).toContain(`beckett task courier ${parked.id}`);
+    expect(parked.error).not.toContain("gh push"); // pushing would revert shipped work
   });
 });
 

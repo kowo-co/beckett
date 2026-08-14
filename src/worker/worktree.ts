@@ -561,6 +561,105 @@ export async function fastForwardCheckout(
 }
 
 /**
+ * The raw, git-measured relationship between a worktree's HEAD and the repo's `main` — the facts a
+ * publish-hand-off message is computed from ({@link classifyBranchLanding}). Deliberately just
+ * numbers + strings so the INTERPRETATION (already-landed vs behind vs genuinely-ahead) is a pure,
+ * table-tested decision rather than something discovered live against real git.
+ */
+export interface BranchVsMainRaw {
+  /** False when no `main` ref could be resolved at all (no origin, offline, empty repo) → "unknown". */
+  compared: boolean;
+  /** Commits HEAD has that `main` does not (`git rev-list --count main..HEAD`). */
+  ahead: number;
+  /** Commits `main` has that HEAD does not (`git rev-list --count HEAD..main`). */
+  behind: number;
+  /**
+   * Of the `ahead` commits, how many are NOT already present on `main` as an equivalent patch —
+   * `git cherry`'s `+` lines (patch-id match). Zero while `ahead > 0` means every local commit has
+   * ALREADY landed on main under a different sha (the squash-merge case behind every 2026-08-14 stall).
+   */
+  aheadUnlanded: number;
+  /** When all local work is already on main: the matching `main` commit sha, if one was found by subject. */
+  landedCommit?: string;
+  /** HEAD's own subject line — names the work in the hand-off message, and finds its twin on main. */
+  landedSubject?: string;
+}
+
+/**
+ * Measure a worktree's HEAD against the repo's `main`, for the publish-hand-off advice
+ * ({@link classifyBranchLanding} / `publishParkAdvice`). A publish that gives up must tell the human
+ * the RIGHT thing to do, and that turns entirely on whether the branch (a) genuinely needs
+ * publishing, (b) already landed on main under a squash sha, or (c) is behind and would revert work
+ * if pushed — the three shapes that were all mis-advised as "just push it" on 2026-08-14.
+ *
+ * Fetches `main` fresh so the comparison is against the true remote tip, not a stale
+ * `origin/main`. NEVER throws: any git failure (no remote, detached HEAD, offline) returns
+ * `compared: false` so the caller falls back to generic advice rather than a wrong diagnosis.
+ */
+export async function readBranchVsMain(workspace: string, remote = "origin"): Promise<BranchVsMainRaw> {
+  const unknown: BranchVsMainRaw = { compared: false, ahead: 0, behind: 0, aheadUnlanded: 0 };
+  try {
+    // Prefer the freshly fetched remote tip; fall back to whatever local `main` ref exists so an
+    // offline box still gets a comparison instead of a wrong "just push it".
+    let mainRef: string | null = null;
+    if ((await runGit(["fetch", "--quiet", remote, "main"], workspace)).code === 0) {
+      mainRef = "FETCH_HEAD";
+    } else {
+      for (const cand of ["origin/main", "main"]) {
+        if ((await runGit(["rev-parse", "--verify", "--quiet", `${cand}^{commit}`], workspace)).code === 0) {
+          mainRef = cand;
+          break;
+        }
+      }
+    }
+    if (!mainRef) return unknown;
+    if ((await runGit(["rev-parse", "--verify", "--quiet", "HEAD"], workspace)).code !== 0) return unknown;
+
+    const aheadR = await runGit(["rev-list", "--count", `${mainRef}..HEAD`], workspace);
+    const behindR = await runGit(["rev-list", "--count", `HEAD..${mainRef}`], workspace);
+    if (aheadR.code !== 0 || behindR.code !== 0) return unknown;
+    const ahead = Number(aheadR.stdout.trim() || "0");
+    const behind = Number(behindR.stdout.trim() || "0");
+
+    let aheadUnlanded = ahead;
+    if (ahead > 0) {
+      // `git cherry` marks each local commit `+` (no equivalent upstream) or `-` (patch-id already on
+      // main). All `-` ⇒ the work has already landed under a squash sha.
+      const cherry = await runGit(["cherry", mainRef, "HEAD"], workspace);
+      if (cherry.code === 0) {
+        aheadUnlanded = cherry.stdout.split(/\r?\n/).filter((l) => l.trim().startsWith("+")).length;
+      }
+    }
+
+    let landedCommit: string | undefined;
+    let landedSubject: string | undefined;
+    const subjR = await runGit(["log", "-1", "--format=%s", "HEAD"], workspace);
+    if (subjR.code === 0 && subjR.stdout.trim()) landedSubject = subjR.stdout.trim();
+    // Name the twin commit on main only when the work is actually there (identical, or all-landed).
+    if (ahead === 0 || (ahead > 0 && aheadUnlanded === 0)) {
+      if (landedSubject) {
+        const found = await runGit(
+          ["log", mainRef, "-1", "--format=%H", "--fixed-strings", `--grep=${landedSubject}`],
+          workspace,
+        );
+        if (found.code === 0 && found.stdout.trim()) landedCommit = found.stdout.trim().split(/\s+/)[0];
+      }
+      if (!landedCommit) {
+        const tip = await runGit(["rev-parse", "--verify", "--quiet", mainRef], workspace);
+        if (tip.code === 0 && tip.stdout.trim()) landedCommit = tip.stdout.trim();
+      }
+    }
+    return { compared: true, ahead, behind, aheadUnlanded, landedCommit, landedSubject };
+  } catch (err) {
+    logger.warn("branch-vs-main comparison failed; publish hand-off falls back to generic advice", {
+      workspace,
+      error: (err as Error).message,
+    });
+    return unknown;
+  }
+}
+
+/**
  * Best-effort `git fetch origin` so a fresh per-ticket worktree can branch from an up-to-date
  * `origin/main` instead of a stale local checkout (the drift that stranded OPS-59/61). Project
  * repos are public, so this is unauthenticated. NEVER throws — a missing origin, offline box, or

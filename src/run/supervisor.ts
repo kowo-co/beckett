@@ -66,6 +66,7 @@ import {
   fetchRemote,
   hasDiffSince,
   headSha,
+  readBranchVsMain,
   readDiff,
   removeWorktree,
 } from "../worker/worktree.ts";
@@ -80,9 +81,11 @@ import { DispatchEventBus, type DispatchEventBusOptions, type DispatchOutcome } 
 import {
   PublishOutbox,
   PUBLISH_RETRY_DELAYS_MS,
+  classifyBranchLanding,
   planPublishRetry,
   publishFailureReason,
   publishFixHint,
+  publishParkAdvice,
   type PublishOperation,
   type PublishRetryPlan,
 } from "../dispatch/publish-outbox.ts";
@@ -109,6 +112,7 @@ export interface RunGitOps {
   createWorktree: typeof createWorktree;
   removeWorktree: typeof removeWorktree;
   fetchRemote: typeof fetchRemote;
+  readBranchVsMain: typeof readBranchVsMain;
 }
 
 /**
@@ -379,6 +383,7 @@ export class RunSupervisor {
       createWorktree,
       removeWorktree,
       fetchRemote,
+      readBranchVsMain,
       ...deps.gitOps,
     };
     this.stages = deps.stages ?? stageRegistry;
@@ -1172,12 +1177,14 @@ export class RunSupervisor {
         return;
       }
       // No durable outbox wired (a bare/embedded supervisor): there is no retry ladder to hand it
-      // to, so park immediately — with the same actionable text a laddered failure gets.
+      // to, so park immediately — with the same actionable text a laddered failure gets, including
+      // the branch-aware hand-off advice (BUG 2).
       const hint = publishFixHint(outcome.error);
+      const advice = await this.publishHandoffAdvice(publishing);
       await this.park(
         publishing,
         `the work is complete but could not be published: ${outcome.error.trim().replace(/[.\s]+$/, "")}` +
-          `${hint ? ` — ${hint}` : "."}`,
+          `${hint ? ` — ${hint}` : "."} ${advice}`,
       );
       return;
     }
@@ -1210,12 +1217,42 @@ export class RunSupervisor {
    * still accepts it, and {@link park} emits the `held` event that reaches the run's channel.
    */
   private async recordPublishFailure(run: Run, plan: PublishRetryPlan, attempt: number): Promise<void> {
-    const reason = publishFailureReason(plan, attempt, { runId: run.id, branch: run.branch });
     if (plan.action === "park") {
-      await this.park(run, reason);
+      // Only when the run is actually giving up do we pay for the branch-vs-main comparison — and it
+      // is what makes the hand-off advice correct instead of the blanket "just push it" that would
+      // have duplicated or reverted shipped work on every 2026-08-14 stall (BUG 2).
+      const advice = await this.publishHandoffAdvice(run);
+      await this.park(run, publishFailureReason(plan, attempt, advice));
       return;
     }
-    await this.patchRun(run.id, { error: reason });
+    await this.patchRun(run.id, { error: publishFailureReason(plan, attempt) });
+  }
+
+  /**
+   * The copy-pasteable instruction a parking publish leaves for a human, computed from the run's
+   * branch measured against `origin/main` (BUG 2): (a) genuinely-ahead ⇒ push it, (b) already-landed
+   * ⇒ courier closed against the PR that carried it, (c) behind ⇒ courier closed, do not revert. A
+   * comparison failure falls back to the generic push advice — never blocks the park.
+   */
+  private async publishHandoffAdvice(run: Run): Promise<string> {
+    const workspace = run.workspace ?? this.resolveRepoRoot(run);
+    let state = classifyBranchLanding({ compared: false, ahead: 0, behind: 0, aheadUnlanded: 0 });
+    try {
+      state = classifyBranchLanding(await this.git.readBranchVsMain(workspace));
+    } catch (err) {
+      this.logger.warn("branch-vs-main check threw — using generic publish hand-off advice", {
+        run: run.id,
+        error: (err as Error).message,
+      });
+    }
+    if (state.kind !== "ahead" && state.kind !== "unknown") {
+      this.logger.info("publish hand-off: branch already reconciled with main", {
+        run: run.id,
+        branch: run.branch,
+        state: state.kind,
+      });
+    }
+    return publishParkAdvice(state, { runId: run.id, branch: run.branch });
   }
 
   /** One publish attempt; never throws. */
@@ -1350,12 +1387,11 @@ export class RunSupervisor {
         : row
           ? `The durable publish row gave up after attempt ${row.attempt} and was never going to retry`
           : "No publish error was ever recorded, so the attempt never returned at all";
+      const advice = await this.publishHandoffAdvice(run);
       await this.park(
         run,
         `the publish step never completed: this run sat in \`publishing\` for ${minutes} minute(s) with no ` +
-          `attempt scheduled to move it. ${last}. Publish it by hand ` +
-          `(\`beckett gh push --repo <owner/name> --branch ${run.branch}\`), then close it out with ` +
-          `\`beckett task courier ${run.id}\`.`,
+          `attempt scheduled to move it. ${last}. ${advice}`,
       );
       parked.push(run.id);
     }

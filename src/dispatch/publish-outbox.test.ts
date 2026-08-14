@@ -3,16 +3,19 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  classifyBranchLanding,
   classifyPublishError,
   planPublishRetry,
   publishErrorMessage,
   publishFailureReason,
   publishFixHint,
+  publishParkAdvice,
   PublishOutbox,
   PUBLISH_MAX_ATTEMPTS,
   PUBLISH_RETRY_DELAYS_MS,
   type PublishOperation,
 } from "./publish-outbox.ts";
+import type { BranchVsMainRaw } from "../worker/worktree.ts";
 import type { Logger } from "../types.ts";
 
 test("publish failure classifier retries only genuinely permanent GitHub/auth failures", () => {
@@ -36,6 +39,73 @@ test("publish failure classifier retries only genuinely permanent GitHub/auth fa
   ]) {
     expect(classifyPublishError(new Error(message))).toBe("permanent");
   }
+});
+
+// BUG 4b (2026-08-14): a publish that fails on a property of the LOCAL tree or the branch itself
+// cannot be fixed by retrying — retrying "You have unstaged changes" four times fails four identical
+// times and then goes quiet. Those classes must park on attempt 1 with the real reason, not burn the
+// ladder. A genuinely transient GitHub/network hiccup still retries.
+test("classifier treats structurally-deterministic publish failures as non-retryable (park on attempt 1)", () => {
+  for (const message of [
+    "publish: local work conflicts with kowo-co/babble@main and can't auto-rebase — needs a human (error: cannot rebase: You have unstaged changes.)",
+    "error: cannot rebase: You have unstaged changes. error: additionally, your index contains uncommitted changes.",
+    "publish: squash-apply still conflicts with main; residual conflicting files: a.ts — needs a human",
+    "Please commit or stash them.",
+  ]) {
+    expect(classifyPublishError(new Error(message))).toBe("permanent");
+  }
+  // A retry could conceivably clear these — they stay transient.
+  for (const message of ["fetch failed", "GitHub returned 503", "ETIMEDOUT contacting api.github.com"]) {
+    expect(classifyPublishError(new Error(message))).toBe("transient");
+  }
+});
+
+// ── BUG 2: the parked hand-off advice is computed from the branch's real state vs origin/main ─────
+
+function raw(over: Partial<BranchVsMainRaw> = {}): BranchVsMainRaw {
+  return { compared: true, ahead: 0, behind: 0, aheadUnlanded: 0, ...over };
+}
+
+test("classifyBranchLanding names the three shapes (a) ahead, (b) already-landed, (c) superseded", () => {
+  // (a) genuinely-new work main does not have yet.
+  expect(classifyBranchLanding(raw({ ahead: 2, aheadUnlanded: 2 }))).toEqual({ kind: "ahead" });
+  // (a') new work AND behind — still needs publishing (the push integrates main first); never landed.
+  expect(classifyBranchLanding(raw({ ahead: 1, aheadUnlanded: 1, behind: 3 }))).toEqual({ kind: "ahead" });
+  // (b) every local commit already on main under a squash sha (patch-id match, git cherry all `-`).
+  expect(
+    classifyBranchLanding(raw({ ahead: 1, aheadUnlanded: 0, landedCommit: "2035e51abcdef", landedSubject: "babble: post training cycles" })),
+  ).toEqual({ kind: "landed", commit: "2035e51abcdef", subject: "babble: post training cycles" });
+  // (c) 0 ahead, strictly behind — pushing would revert.
+  expect(classifyBranchLanding(raw({ ahead: 0, behind: 3 }))).toEqual({ kind: "superseded", behind: 3 });
+  // identical to main → the work IS on main → landed (courier closed, never push).
+  expect(classifyBranchLanding(raw({ ahead: 0, behind: 0, landedCommit: "deadbeef0000" }))).toMatchObject({ kind: "landed" });
+  // no comparison possible → unknown (generic push advice).
+  expect(classifyBranchLanding({ compared: false, ahead: 0, behind: 0, aheadUnlanded: 0 })).toEqual({ kind: "unknown" });
+});
+
+test("publishParkAdvice gives the SAFE command for each shape — push only for (a)/unknown", () => {
+  const ref = { runId: "run-x", branch: "beckett/run-x" };
+
+  const ahead = publishParkAdvice({ kind: "ahead" }, ref);
+  expect(ahead).toContain("beckett gh push --repo <owner/name> --branch beckett/run-x");
+  expect(ahead).toContain("beckett task courier run-x");
+
+  const landed = publishParkAdvice({ kind: "landed", commit: "2035e51abcdef01", subject: "babble: post training cycles" }, ref);
+  expect(landed).toContain("ALREADY on origin/main");
+  expect(landed).toContain("2035e51abcde"); // named commit, short form
+  expect(landed).toContain("babble: post training cycles");
+  expect(landed).toContain("DUPLICATE");
+  expect(landed).toContain("beckett task courier run-x --pr-url");
+  expect(landed).not.toContain("gh push"); // must NEVER tell them to push already-landed work
+
+  const superseded = publishParkAdvice({ kind: "superseded", behind: 3 }, ref);
+  expect(superseded).toContain("3 commit(s) BEHIND origin/main");
+  expect(superseded).toContain("REVERT");
+  expect(superseded).toContain("beckett task courier run-x");
+  expect(superseded).not.toContain("gh push");
+
+  // Comparison failed → fall back to the generic push hand-off (the pre-existing behavior).
+  expect(publishParkAdvice({ kind: "unknown" }, ref)).toContain("beckett gh push");
 });
 
 test("the ladder is a visible, testable const table: attempts 1..4, 30s / 2m / 10m, then park", () => {
@@ -180,4 +250,13 @@ test("publishFailureReason names the step, the attempt, the cause, and what to d
   const permanent = publishFailureReason(planPublishRetry(1, new Error("HTTP 403 forbidden"), 1_000), 1);
   expect(permanent).toContain("unrecoverable without a human");
   expect(permanent).toContain("beckett gh preflight");
+
+  // A parked reason appends the caller's branch-aware hand-off advice VERBATIM (BUG 2) — a retry
+  // never does (there's nothing to hand off yet).
+  const advice = "This branch's work is ALREADY on origin/main — do NOT push.";
+  const withAdvice = publishFailureReason(planPublishRetry(4, new Error("fetch failed"), 1_000), 4, advice);
+  expect(withAdvice).toContain(advice);
+  expect(withAdvice).not.toContain("beckett gh push");
+  const retryWithAdvice = publishFailureReason(planPublishRetry(2, new Error("fetch failed"), 1_000), 2, advice);
+  expect(retryWithAdvice).not.toContain(advice);
 });
