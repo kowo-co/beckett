@@ -58,7 +58,7 @@ import {
 import { log } from "../log.ts";
 import { projectSlug } from "./cast.ts";
 import { classifyDiffSurface, reviewDepthLine } from "./review-depth.ts";
-import { sweepLedgeredWorker } from "../drivers/proc.ts";
+import { hardCapSeconds, sweepLedgeredWorker } from "../drivers/proc.ts";
 import {
   commitWorktree,
   createWorktree,
@@ -1844,7 +1844,9 @@ export class RunSupervisor {
     // The one-line check the issue asks for: `stop()` raised this before the drain began, so a
     // worker that died after it died BECAUSE the daemon is going down.
     if (this.shuttingDown) clauses.push("killed during daemon shutdown");
-    else if (result?.timedOut) clauses.push("stopped by the wall-clock cap");
+    // A worker WE stopped on the clock is a complete explanation on its own — say so and stop,
+    // rather than appending a `failure class` clause that reads like the harness broke.
+    else if (result?.timedOut) return this.wallClockCapCause(handle);
     const named = result?.errorMessage?.trim();
     if (named) clauses.push(named);
     else if (result?.errorClass) clauses.push(`failure class \`${result.errorClass}\``);
@@ -1852,9 +1854,37 @@ export class RunSupervisor {
     return clauses.join(" — ");
   }
 
+  /**
+   * The cause for a worker the wall-clock backstop stopped — deliberately self-contained, and
+   * deliberately NOT the word "crash".
+   *
+   * The message this replaces ("failure class `crash`") sent two people hunting for a segfault on
+   * 2026-08-14 for a worker Beckett itself had killed, mid-edit, for running 3601s. So this names
+   * the three things a reader needs and none of the ones they don't: that the CAP fired, how long
+   * it allowed, and the exact knob that changes it.
+   */
+  private wallClockCapCause(handle: WorkerHandle): string {
+    const capS = hardCapSeconds(this.config);
+    const hours = (capS / 3600).toFixed(1).replace(/\.0$/, "");
+    // Only `finishImplement` commits WIP before it parks — a dead reviewer wrote nothing to save,
+    // so promising a WIP commit there would be a claim this code does not actually honour.
+    const wip =
+      handle.stage === "implement"
+        ? " Whatever it had written to disk was committed as WIP on the branch before this park."
+        : "";
+    return (
+      `hit the wall-clock backstop after ${hours}h — Beckett stopped the harness, it did NOT crash. ` +
+      `That backstop is \`supervise.worker_hard_cap_s\` (currently ${capS}s) in ~/.beckett/config.toml; ` +
+      `raise it if this work legitimately needs longer.${wip}`
+    );
+  }
+
   /** The park reason for a dead worker: the cause and nothing the model happened to be saying. */
   private workerDeathReason(stage: RunStage, handle: WorkerHandle): string {
-    return `the ${stage} worker died before it reported a verdict: ${this.workerDeathCause(handle)}`;
+    // "died" is the wrong word for a worker Beckett deliberately stopped, and the wrong word is
+    // exactly what made this misread as a harness fault.
+    const verb = handle.result?.timedOut && !this.shuttingDown ? "was stopped" : "died";
+    return `the ${stage} worker ${verb} before it reported a verdict: ${this.workerDeathCause(handle)}`;
   }
 
   /**

@@ -7,7 +7,8 @@
  *   1. The GENEROUS, CONFIGURABLE wall-clock backstop cap the per-worker watchdog enforces
  *      ({@link hardCapSeconds}). This is a runaway-worker safety net, NOT a normal work limit —
  *      real tickets routinely need far more than the old tight per-effort caps. The old 600s
- *      "guillotine" (OPS-50) is gone; the driver watchdog now trips only at this backstop.
+ *      "guillotine" (OPS-50) is gone; the driver watchdog now trips only at this backstop, and
+ *      the backstop itself moved 1h → 4h once real runs started hitting it mid-edit.
  *
  *   2. Killing a harness AND ITS WHOLE PROCESS TREE ({@link wrapProcessGroup} + {@link
  *      killProcessTree}). A `claude`/`pi`/`codex` worker forks descendants (bash tool runs, MCP
@@ -32,14 +33,31 @@ const SETSID_BIN: string | null = (() => {
   }
 })();
 
+/** Default backstop wall-clock cap: 4 hours. See {@link hardCapSeconds} for why this number. */
+export const DEFAULT_HARD_CAP_S = 14_400;
+
+/** Below this, a configured cap is treated as a stray value and the default is used instead. */
+export const HARD_CAP_FLOOR_S = 1_800;
+
 /**
  * The generous, configurable backstop wall-clock cap (seconds) the per-worker watchdog enforces.
  * Reads `config.supervise.worker_hard_cap_s`. Defensive floor of 1800s (30min) so a stray config
- * value can never tighten it back into the old guillotine; defaults to 3600s (60min) when unset.
+ * value can never tighten it back into the old guillotine; defaults to {@link DEFAULT_HARD_CAP_S}
+ * when unset or below the floor.
+ *
+ * WHY 4h and not the old 1h (2026-08-14): the 1h default was demonstrably a WORK limit, not a
+ * backstop. `run-20260814-collect-an-unlabelled-pretraining-corpus` was killed at 3601s having
+ * written ~4000 lines across 31 files, mid-edit and nearly done — a healthy worker, stopped for
+ * being slow. A backstop must only ever fire on a worker that is not converging, and it is not
+ * this layer's job to catch a merely-silent one: `supervise.worker_stall_s` (default 300s) already
+ * signals a wedge in 5 minutes and the dispatcher escalates nudge → abort+retry off that. What is
+ * left for the wall-clock cap is the narrow case of a worker making noise forever, so it should sit
+ * far above any real run — 4h is ~4x the longest legitimate implement run observed, and still bounds
+ * a runaway's burn to one session. Raise it per-install if a repo genuinely needs longer.
  */
 export function hardCapSeconds(config: Config): number {
   const v = config.supervise?.worker_hard_cap_s;
-  return typeof v === "number" && v >= 1800 ? v : 3600;
+  return typeof v === "number" && v >= HARD_CAP_FLOOR_S ? v : DEFAULT_HARD_CAP_S;
 }
 
 /**

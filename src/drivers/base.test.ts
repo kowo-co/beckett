@@ -36,9 +36,12 @@ class TestDriver extends OneShotDriver {
 /** The private surface the tests reach into (same pattern as the per-driver tests). */
 interface Guts {
   finished: boolean;
+  capTripped: boolean;
   workerState: WorkerState;
   childGen: number;
+  spawnedAt: number;
   spec: unknown;
+  tickWatchdog(): void;
   lastProgressTs: number;
   lastStallEmitTs: number;
   stderrRing: { record(text: string): void };
@@ -165,6 +168,90 @@ test("the hard-cap timeout emits a graceful error_wall_clock_cap finish", async 
   expect(finished.subtype).toBe("error_wall_clock_cap");
   expect(finished.errorClass).toBe("timeout");
   expect(d.workerState).toBe("aborted");
+});
+
+// The 2026-08-14 misreport. `timeOut` kills the tree FIRST and emits its verdict only after the
+// reap (kill-first, OPS-50) — and a harness spends that SIGTERM grace window flushing its own
+// dying words. `claude` emits a final stream-json `result` line, which `claude.ts#handleResult`
+// turns into a `finished` carrying `errorClass: "crash"`. `spawn.ts#fireDone` latches the FIRST
+// finish, so that lie won and the run was parked as a segfault it never had.
+test("a harness finish that races the wall-clock cap kill is dropped, not reported as a crash", async () => {
+  const d = makeDriver();
+  const events: WorkerEvent[] = [];
+  d.onEvent((e) => events.push(e));
+  d.spec = { workspace: undefined };
+  d.workerState = "running";
+  d.spawnedAt = Date.now() - 3_601_000; // one second past the cap this config sets
+
+  d.tickWatchdog(); // trips the cap → kills the tree, THEN emits its verdict
+  expect(d.capTripped).toBe(true);
+
+  // Mid-kill, the dying harness flushes its own terminal result line.
+  d.emit({
+    kind: "finished",
+    status: "error",
+    subtype: "error_during_execution",
+    structuredOutput: null,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheCreate: 0 },
+    errorClass: "crash",
+    ts: Date.now(),
+  });
+
+  await Promise.resolve(); // let the async timeOut() settle
+  await Promise.resolve();
+
+  const finishes = events.filter((e) => e.kind === "finished");
+  expect(finishes).toHaveLength(1); // the crash lie never reached a subscriber
+  if (finishes[0]?.kind !== "finished") throw new Error("unreachable");
+  expect(finishes[0].subtype).toBe("error_wall_clock_cap");
+  expect(finishes[0].errorClass).toBe("timeout");
+});
+
+// The guard the ticket asked us to verify: `tickWatchdog` sets `finished` BEFORE the kill, so the
+// child's real exit — which lands after the cap has already ruled — must not synthesize a second,
+// crash-class finish either.
+test("the process exit that follows a cap kill does not synthesize a second finish", async () => {
+  const d = makeDriver();
+  const events: WorkerEvent[] = [];
+  d.onEvent((e) => events.push(e));
+  d.spec = { workspace: undefined };
+  d.workerState = "running";
+  d.spawnedAt = Date.now() - 3_601_000;
+
+  d.tickWatchdog();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  // The SIGTERM lands and the child finally exits.
+  await d.onProcessExit(null as unknown as number, d.childGen, 12345, false, "SIGTERM");
+
+  const finishes = events.filter((e) => e.kind === "finished");
+  expect(finishes).toHaveLength(1);
+  if (finishes[0]?.kind !== "finished") throw new Error("unreachable");
+  expect(finishes[0].subtype).toBe("error_wall_clock_cap");
+  expect(finishes[0].errorClass).toBe("timeout");
+  expect(events.filter((e) => e.kind === "error")).toHaveLength(0);
+});
+
+// The cap's finish is now the ONLY event that can close a capped worker, so it has to survive a
+// kill that throws — otherwise a failed reap would wedge the run open with no terminal event at
+// all, which is worse than the mislabelled park this change fixes.
+test("the cap still reports its timeout when the kill itself throws", async () => {
+  const d = makeDriver();
+  const events: WorkerEvent[] = [];
+  d.onEvent((e) => events.push(e));
+  d.workerState = "running";
+  (d as unknown as { killChild(): Promise<void> }).killChild = () => {
+    throw new Error("reap exploded");
+  };
+
+  await d.timeOut(14400, 14401);
+
+  const finishes = events.filter((e) => e.kind === "finished");
+  expect(finishes).toHaveLength(1);
+  if (finishes[0]?.kind !== "finished") throw new Error("unreachable");
+  expect(finishes[0].subtype).toBe("error_wall_clock_cap");
+  expect(finishes[0].errorClass).toBe("timeout");
 });
 
 // ── stall detection (issue #21) ──────────────────────────────────────────────────

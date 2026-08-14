@@ -835,7 +835,9 @@ export interface Config {
   };
   supervise: {
     /** Generous backstop wall-clock cap (s) the per-worker watchdog enforces — a runaway safety
-     *  net, not a work limit (drivers/proc.ts#hardCapSeconds). Floor 1800, default 3600. */
+     *  net, not a work limit (drivers/proc.ts#hardCapSeconds). Floor 1800, default 14400 (4h);
+     *  a value under the floor falls back to the default. Tripping it parks the run as a
+     *  `timeout` naming this knob, never as a crash. */
     worker_hard_cap_s: number;
     /** Stall window (s): no progress event for this long → the driver emits a `stalled` signal
      *  and the dispatcher escalates (nudge → abort+retry). 0 disables. Default 300 (issue #21). */

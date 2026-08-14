@@ -69,6 +69,12 @@ export abstract class BaseDriver {
 
   protected workerState: WorkerState = "spawning";
   protected finished = false;
+  /**
+   * Set the instant {@link tickWatchdog} trips the wall-clock backstop — BEFORE the kill goes out,
+   * and never cleared. Once the cap has ruled, {@link emit} lets NOTHING but the cap's own
+   * `error_wall_clock_cap` finish close this worker (see the guard there for why).
+   */
+  protected capTripped = false;
   protected spawnedAt = 0;
   protected lastActivityTs = 0;
   /**
@@ -372,9 +378,11 @@ export abstract class BaseDriver {
     const capS = hardCapSeconds(this.config);
     const totalS = (Date.now() - this.spawnedAt) / 1000;
     if (totalS > capS) {
-      // Trip the generous backstop cap. Set finished up-front so this can't re-enter and so
-      // onProcessExit (fired by the kill below) won't also synthesize a finish.
+      // Trip the generous backstop cap. Set both flags up-front so this can't re-enter, so
+      // onProcessExit (fired by the kill below) won't also synthesize a finish, and so the
+      // harness's own dying words can't outrank the cap's verdict (see {@link emit}).
       this.finished = true;
+      this.capTripped = true;
       void this.timeOut(capS, totalS);
       return;
     }
@@ -417,7 +425,17 @@ export abstract class BaseDriver {
       totalS: Math.round(totalS),
     });
     this.setState("aborted");
-    await this.killChild();
+    // The kill is best-effort; the VERDICT is not. Since `capTripped` now suppresses every other
+    // finish (see {@link emit}), a throw between here and the emit below would leave the worker
+    // with no terminal event at all — a run wedged open, which is strictly worse than the
+    // mislabelled park this whole change exists to fix. So the finish is emitted regardless.
+    try {
+      await this.killChild();
+    } catch (err) {
+      this.log.error("wall-clock cap kill failed — reporting the timeout anyway", {
+        err: String(err),
+      });
+    }
     this.emit({
       kind: "finished",
       status: "error",
@@ -521,6 +539,24 @@ export abstract class BaseDriver {
   ]);
 
   protected emit(e: WorkerEvent): void {
+    // ── the cap has already ruled; nothing else may close this worker (2026-08-14) ──
+    // {@link timeOut} kills the process tree FIRST and emits its verdict only after the tree is
+    // reaped (kill-first, OPS-50). That leaves a whole SIGTERM grace window in between — and a
+    // harness spends it flushing its own dying words. `claude` in stream-json mode emits a final
+    // `result` line on SIGTERM, which `claude.ts#handleResult` (no `finished` guard, by design —
+    // it is the normal terminal path) turns into a `finished` carrying `errorClass: "crash"`.
+    //
+    // `dispatch/spawn.ts#fireDone` latches the FIRST finish it sees, so that lie won the race and
+    // the cap's honest `timeout` finish, ~400ms later, was dropped on the floor. A run we
+    // deliberately stopped mid-edit was parked as "failure class `crash`" and cost two people a
+    // hunt for a segfault that never happened. Only the cap's own finish may close a capped worker.
+    if (e.kind === "finished" && this.capTripped && e.subtype !== "error_wall_clock_cap") {
+      this.log.warn("dropping a harness finish that raced the wall-clock cap kill", {
+        subtype: e.subtype,
+        errorClass: e.errorClass,
+      });
+      return;
+    }
     // Our own stall signal is not activity — counting it would reset the very clock it reports.
     if (e.kind !== "stalled") this.lastActivityTs = e.ts;
     if (BaseDriver.PROGRESS_KINDS.has(e.kind)) this.lastProgressTs = e.ts;

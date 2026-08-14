@@ -1815,7 +1815,7 @@ max_workers = 2
 per_task_usd_cap = 0
 
 [supervise]
-worker_hard_cap_s = 3600
+worker_hard_cap_s = 14400
 worker_stall_s = 300
 worker_checkpoint_s = 120
 worker_slow_tool_s = 30

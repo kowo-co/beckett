@@ -270,8 +270,9 @@ export const configFragments = {
       // watchdog (drivers/proc.ts#hardCapSeconds). A runaway-worker safety net, NOT a normal work
       // limit — real tickets routinely need far more than the old tight per-effort caps. Floor of
       // 1800s (30min) so it can never be tightened back into the retired 600s guillotine (OPS-50);
-      // default 3600s (60min).
-      worker_hard_cap_s: int.min(1800).default(3600),
+      // default 14400s (4h) — the old 60min default was killing healthy multi-file runs mid-edit,
+      // and `worker_stall_s` (not this) is what catches a worker that has actually gone silent.
+      worker_hard_cap_s: int.min(1800).default(14400),
       // Stall window (issue #21): a worker with NO progress event for this many seconds gets a
       // `stalled` signal (driver watchdog) and the dispatcher escalates nudge → abort+retry,
       // instead of burning a slot until the hard cap. 0 disables stall detection.

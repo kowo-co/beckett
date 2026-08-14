@@ -4,7 +4,14 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { Config } from "../types.ts";
-import { hardCapSeconds, wrapProcessGroup, killGroup, killProcessTree } from "./proc.ts";
+import {
+  DEFAULT_HARD_CAP_S,
+  HARD_CAP_FLOOR_S,
+  hardCapSeconds,
+  wrapProcessGroup,
+  killGroup,
+  killProcessTree,
+} from "./proc.ts";
 
 const cfgWith = (worker_hard_cap_s?: number): Config =>
   ({ supervise: worker_hard_cap_s === undefined ? {} : { worker_hard_cap_s } }) as unknown as Config;
@@ -14,17 +21,32 @@ describe("hardCapSeconds", () => {
     expect(hardCapSeconds(cfgWith(3600))).toBe(3600);
     expect(hardCapSeconds(cfgWith(1800))).toBe(1800);
     expect(hardCapSeconds(cfgWith(5400))).toBe(5400);
+    expect(hardCapSeconds(cfgWith(28800))).toBe(28800);
   });
 
-  test("defaults to 3600s (60min) when unset", () => {
-    expect(hardCapSeconds(cfgWith(undefined))).toBe(3600);
-    expect(hardCapSeconds({} as unknown as Config)).toBe(3600);
+  // Raised 3600 → 14400 on 2026-08-14: the 1h default was killing healthy multi-file runs mid-edit
+  // (~4000 lines across 31 files, still going at 3601s), which makes it a work limit, not a
+  // backstop. `worker_stall_s` is what catches a worker that has actually gone quiet.
+  test("defaults to 14400s (4h) when unset", () => {
+    expect(DEFAULT_HARD_CAP_S).toBe(14400);
+    expect(hardCapSeconds(cfgWith(undefined))).toBe(14400);
+    expect(hardCapSeconds({} as unknown as Config)).toBe(14400);
   });
 
   test("floors a too-tight value so it can never be the old 600s guillotine", () => {
-    expect(hardCapSeconds(cfgWith(600))).toBe(3600);
-    expect(hardCapSeconds(cfgWith(60))).toBe(3600);
-    expect(hardCapSeconds(cfgWith(1799))).toBe(3600);
+    expect(HARD_CAP_FLOOR_S).toBe(1800);
+    expect(hardCapSeconds(cfgWith(600))).toBe(DEFAULT_HARD_CAP_S);
+    expect(hardCapSeconds(cfgWith(60))).toBe(DEFAULT_HARD_CAP_S);
+    expect(hardCapSeconds(cfgWith(HARD_CAP_FLOOR_S - 1))).toBe(DEFAULT_HARD_CAP_S);
+    // The floor itself is honoured, not bumped — it is a floor, not a minimum-plus-one.
+    expect(hardCapSeconds(cfgWith(HARD_CAP_FLOOR_S))).toBe(HARD_CAP_FLOOR_S);
+  });
+
+  // The override is the whole point of a configurable backstop — an install that genuinely needs a
+  // longer (or a deliberately tighter, floor-respecting) cap must still get exactly what it asked for.
+  test("an explicit override still wins over the raised default, in both directions", () => {
+    expect(hardCapSeconds(cfgWith(1800))).toBe(1800);
+    expect(hardCapSeconds(cfgWith(43200))).toBe(43200);
   });
 });
 
