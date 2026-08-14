@@ -108,6 +108,25 @@ test("publishParkAdvice gives the SAFE command for each shape — push only for 
   expect(publishParkAdvice({ kind: "unknown" }, ref)).toContain("beckett gh push");
 });
 
+test("the advice names the branch it actually compared against, on a repo whose default isn't `main`", () => {
+  // `readBranchVsMain` measures against the REMOTE's default branch, so a `trunk`-default project
+  // must not be told its work is "already on origin/main" — a branch that doesn't exist there.
+  const ref = { runId: "run-x", branch: "beckett/run-x" };
+  const landed = publishParkAdvice(
+    { kind: "landed", commit: "2035e51abcdef01", subject: "trunk work", mainRef: "origin/trunk" },
+    ref,
+  );
+  expect(landed).toContain("ALREADY on origin/trunk");
+  expect(landed).not.toContain("origin/main");
+
+  const superseded = publishParkAdvice({ kind: "superseded", behind: 2, mainRef: "origin/trunk" }, ref);
+  expect(superseded).toContain("2 commit(s) BEHIND origin/trunk");
+  expect(superseded).not.toContain("origin/main");
+
+  // Unnamed (an older row, or a comparison that never got a name) still reads sensibly.
+  expect(publishParkAdvice({ kind: "superseded", behind: 1 }, ref)).toContain("BEHIND origin/main");
+});
+
 test("the ladder is a visible, testable const table: attempts 1..4, 30s / 2m / 10m, then park", () => {
   expect(PUBLISH_RETRY_DELAYS_MS).toEqual([30_000, 120_000, 600_000]);
   expect(PUBLISH_MAX_ATTEMPTS).toBe(4);

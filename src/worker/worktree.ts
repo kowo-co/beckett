@@ -82,7 +82,11 @@ export interface CreateWorktreeOpts {
   workspace: string;
   /** Branch to create/checkout, e.g. "beckett/<task>/<node>". */
   branch: string;
-  /** Base ref to branch from (origin/main or the DAG integration branch). */
+  /**
+   * Base ref to branch from (origin/main or the DAG integration branch). When it doesn't resolve
+   * here, {@link resolveDefaultBaseRef} supplies the remote's real default branch instead — the
+   * checkout's `HEAD` is only ever a last resort, never a silent substitute.
+   */
   baseRef: string;
   /** When resuming, reuse an existing worktree/branch instead of recreating (Spec 02 §4.5). */
   reuseIfExists?: boolean;
@@ -185,9 +189,32 @@ export async function createWorktree(opts: CreateWorktreeOpts): Promise<Worktree
 
   // If the branch already exists (e.g. a prior failed attempt), check it out instead of -b.
   const branchExists = (await runGit(["rev-parse", "--verify", "--quiet", branch], repoRoot)).code === 0;
-  // The requested baseRef may not exist on a just-initialized repo (e.g. origin/main) — fall back to HEAD.
+  // The requested baseRef may not exist here (a just-initialized repo, or a repo whose default
+  // branch simply isn't called `main`). Fall back to the branch the REMOTE calls default — never
+  // straight to `HEAD`, which in a shared project checkout is whatever OTHER run's branch happens
+  // to be checked out there. That fallback is how a second run in flight against the same repo got
+  // cut from its SIBLING's branch on 2026-08-14, and then tried to rebase its publish onto that
+  // instead of the repo's real default branch. `HEAD` survives only as the last resort for a repo
+  // that has no default branch to name at all (a fresh `git init` project).
   const baseOk = (await runGit(["rev-parse", "--verify", "--quiet", baseRef], repoRoot)).code === 0;
-  const effectiveBase = baseOk ? baseRef : "HEAD";
+  let effectiveBase = baseRef;
+  if (!baseOk) {
+    const fallback = await resolveDefaultBaseRef(repoRoot);
+    if (fallback) {
+      logger.warn("base ref is absent — branching from the remote's default branch instead", {
+        repoRoot,
+        baseRef,
+        fallback,
+      });
+    } else {
+      logger.warn("no default branch could be resolved — branching from this checkout's HEAD", {
+        repoRoot,
+        baseRef,
+        head: await currentBranch(repoRoot),
+      });
+    }
+    effectiveBase = fallback ?? "HEAD";
+  }
   const args = branchExists
     ? ["worktree", "add", workspace, branch]
     : ["worktree", "add", "-b", branch, workspace, effectiveBase];
@@ -200,6 +227,50 @@ export async function createWorktree(opts: CreateWorktreeOpts): Promise<Worktree
 /** Whether a local or fetched ref is available as a safe worktree base. */
 export async function refExists(repoRoot: string, ref: string): Promise<boolean> {
   return (await runGit(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], repoRoot)).code === 0;
+}
+
+/**
+ * The repo's default branch NAME (`main`, `master`, `trunk`, …) as the REMOTE reports it: the
+ * recorded `refs/remotes/<remote>/HEAD` first, then a live `ls-remote --symref` for a checkout that
+ * never had one written (a `git init` + `remote add` provisioning). Null when no remote can answer.
+ *
+ * Deliberately never derived from the checkout's own `HEAD`/current branch. A shared project
+ * checkout routinely sits on some run's `beckett/<run>` branch, so "whatever is checked out" is a
+ * sibling's work, not the default branch — the confusion that made a second in-flight run aim its
+ * publish at its sibling's branch (2026-08-14). Best-effort: never throws.
+ */
+export async function remoteDefaultBranch(repoRoot: string, remote = "origin"): Promise<string | null> {
+  const recorded = await runGit(["symbolic-ref", "--quiet", "--short", `refs/remotes/${remote}/HEAD`], repoRoot);
+  const short = recorded.code === 0 ? recorded.stdout.trim() : "";
+  if (short) return short.startsWith(`${remote}/`) ? short.slice(remote.length + 1) : short;
+  const symref = await runGit(["ls-remote", "--symref", remote, "HEAD"], repoRoot);
+  if (symref.code === 0) {
+    const match = /^ref:\s+refs\/heads\/(\S+)\s+HEAD$/m.exec(symref.stdout);
+    if (match?.[1]) return match[1];
+  }
+  return null;
+}
+
+/**
+ * A ref that resolves to the tip of the repo's default branch — {@link remoteDefaultBranch}'s answer
+ * preferred as its remote-tracking ref, then the conventional names, and null if the repo has none
+ * of them (a brand-new project with no commits yet). This is the ONLY safe base/rebase target when
+ * the caller's requested ref is missing: every candidate here is a branch the remote named, never
+ * the checkout's current position.
+ */
+export async function resolveDefaultBaseRef(repoRoot: string, remote = "origin"): Promise<string | null> {
+  const named = await remoteDefaultBranch(repoRoot, remote);
+  const candidates = [
+    ...(named ? [`${remote}/${named}`, named] : []),
+    `${remote}/main`,
+    `${remote}/master`,
+    "main",
+    "master",
+  ];
+  for (const ref of candidates) {
+    if (await refExists(repoRoot, ref)) return ref;
+  }
+  return null;
 }
 
 /** Compose multiple completed task branches into a dependent branch before its worker starts. */
@@ -583,6 +654,11 @@ export interface BranchVsMainRaw {
   landedCommit?: string;
   /** HEAD's own subject line — names the work in the hand-off message, and finds its twin on main. */
   landedSubject?: string;
+  /**
+   * The ref the comparison was actually made against, named for the human reading the hand-off
+   * (`origin/main`, `origin/trunk`, …). Absent when nothing could be compared.
+   */
+  mainRef?: string;
 }
 
 /**
@@ -592,22 +668,32 @@ export interface BranchVsMainRaw {
  * publishing, (b) already landed on main under a squash sha, or (c) is behind and would revert work
  * if pushed — the three shapes that were all mis-advised as "just push it" on 2026-08-14.
  *
- * Fetches `main` fresh so the comparison is against the true remote tip, not a stale
- * `origin/main`. NEVER throws: any git failure (no remote, detached HEAD, offline) returns
+ * The trunk it measures against is the one the REMOTE calls default ({@link remoteDefaultBranch}),
+ * not the literal name `main`: a project whose default is `trunk`/`master` otherwise resolved no ref
+ * at all, fell through to "unknown", and got handed back the very generic "just push it" this exists
+ * to prevent — on exactly the already-landed branches where pushing is the wrong move.
+ *
+ * Fetches that branch fresh so the comparison is against the true remote tip, not a stale
+ * remote-tracking ref. NEVER throws: any git failure (no remote, detached HEAD, offline) returns
  * `compared: false` so the caller falls back to generic advice rather than a wrong diagnosis.
  */
 export async function readBranchVsMain(workspace: string, remote = "origin"): Promise<BranchVsMainRaw> {
   const unknown: BranchVsMainRaw = { compared: false, ahead: 0, behind: 0, aheadUnlanded: 0 };
   try {
-    // Prefer the freshly fetched remote tip; fall back to whatever local `main` ref exists so an
-    // offline box still gets a comparison instead of a wrong "just push it".
+    // Prefer the freshly fetched remote tip; fall back to whatever local ref exists so an offline
+    // box still gets a comparison instead of a wrong "just push it". `main` stays in the candidate
+    // list as the last resort for a repo whose remote can't name a default at all.
+    const trunk = (await remoteDefaultBranch(workspace, remote)) ?? "main";
     let mainRef: string | null = null;
-    if ((await runGit(["fetch", "--quiet", remote, "main"], workspace)).code === 0) {
+    let named: string | null = null;
+    if ((await runGit(["fetch", "--quiet", remote, trunk], workspace)).code === 0) {
       mainRef = "FETCH_HEAD";
+      named = `${remote}/${trunk}`;
     } else {
-      for (const cand of ["origin/main", "main"]) {
+      for (const cand of [`${remote}/${trunk}`, trunk, `${remote}/main`, "main"]) {
         if ((await runGit(["rev-parse", "--verify", "--quiet", `${cand}^{commit}`], workspace)).code === 0) {
           mainRef = cand;
+          named = cand.includes("/") ? cand : `${remote}/${cand}`;
           break;
         }
       }
@@ -649,7 +735,7 @@ export async function readBranchVsMain(workspace: string, remote = "origin"): Pr
         if (tip.code === 0 && tip.stdout.trim()) landedCommit = tip.stdout.trim();
       }
     }
-    return { compared: true, ahead, behind, aheadUnlanded, landedCommit, landedSubject };
+    return { compared: true, ahead, behind, aheadUnlanded, landedCommit, landedSubject, mainRef: named ?? undefined };
   } catch (err) {
     logger.warn("branch-vs-main comparison failed; publish hand-off falls back to generic advice", {
       workspace,

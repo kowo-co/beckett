@@ -22,6 +22,9 @@ import {
   fastForwardCheckout,
   ensureProjectRepo,
   projectRemoteUrl,
+  remoteDefaultBranch,
+  resolveDefaultBaseRef,
+  readBranchVsMain,
   SCAFFOLDING_DIR,
 } from "./worktree.ts";
 
@@ -200,12 +203,105 @@ describe("worktree lifecycle (real git)", () => {
     }
   });
 
-  test("falls back to HEAD when the base ref is absent (offline / private, fetch got nothing)", async () => {
+  test("an absent base ref falls back to the DEFAULT BRANCH, not to a sibling run's checked-out HEAD", async () => {
+    // A sibling run is in flight against the same project, so the shared checkout is sitting on ITS
+    // branch, carrying ITS work. Falling back to `HEAD` here (the old behavior) cut the new run's
+    // tree from the sibling and made its publish rebase replay a sibling's commits (2026-08-14).
+    await run(["checkout", "-q", "-b", "beckett/run-sibling"], repo);
+    writeFileSync(join(repo, "sibling.txt"), "the sibling run's in-progress work\n");
+    await run(["add", "-A"], repo);
+    await run(["commit", "-m", "sibling run checkpoint"], repo);
+
     const ws = wtPath("t1");
-    // No such ref — createWorktree must not throw; it branches from local HEAD instead.
     const handle = await createWorktree({ repoRoot: repo, workspace: ws, branch: "beckett/t1", baseRef: "origin/does-not-exist" });
+
     expect(existsSync(handle.workspace)).toBe(true);
     expect((await run(["rev-parse", "--abbrev-ref", "HEAD"], ws)).stdout.trim()).toBe("beckett/t1");
+    const originMain = (await run(["rev-parse", "origin/main"], repo)).stdout.trim();
+    expect((await run(["rev-parse", "HEAD"], ws)).stdout.trim()).toBe(originMain);
+    expect(existsSync(join(ws, "sibling.txt"))).toBe(false); // the sibling's work never came along
+  });
+
+  describe("the base/rebase target is the remote's default branch, never local checkout state", () => {
+    /**
+     * A second project fixture whose default branch is `trunk` — so `origin/main` genuinely does not
+     * exist and the supervisor's requested base ref must be replaced by something. The only correct
+     * answer is what the remote calls default; the wrong one is whatever is checked out locally.
+     */
+    async function trunkProject(): Promise<string> {
+      const seed = join(root, "trunk-seed");
+      const bare = join(root, "trunk-origin.git");
+      const clone = join(root, "trunk-clone");
+      mkdirSync(seed, { recursive: true });
+      await run(["init", "-b", "trunk"], seed);
+      await run(["config", "user.email", "beckett@test"], seed);
+      await run(["config", "user.name", "Beckett"], seed);
+      await run(["config", "commit.gpgsign", "false"], seed);
+      writeFileSync(join(seed, "base.txt"), "base\n");
+      await run(["add", "-A"], seed);
+      await run(["commit", "-m", "base on trunk"], seed);
+      await run(["init", "--bare", "-b", "trunk", bare], root);
+      await run(["remote", "add", "origin", bare], seed);
+      await run(["push", "origin", "trunk"], seed);
+      await run(["clone", bare, clone], root);
+      await run(["config", "user.email", "beckett@test"], clone);
+      await run(["config", "user.name", "Beckett"], clone);
+      await run(["config", "commit.gpgsign", "false"], clone);
+      return clone;
+    }
+
+    test("the default branch is read from origin/HEAD, and from a live ls-remote when none is recorded", async () => {
+      const project = await trunkProject();
+      expect(await remoteDefaultBranch(project)).toBe("trunk");
+      expect(await resolveDefaultBaseRef(project)).toBe("origin/trunk");
+
+      // A checkout provisioned by `git init` + `remote add` (the empty-repo path) has no recorded
+      // `origin/HEAD` at all — the live symref lookup still answers, so the fallback stays remote-derived.
+      await run(["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"], project);
+      expect(await remoteDefaultBranch(project)).toBe("trunk");
+      expect(await resolveDefaultBaseRef(project)).toBe("origin/trunk");
+    }, 30_000);
+
+    test("with a SIBLING run's branch checked out, a new worktree is still cut from the default branch", async () => {
+      const project = await trunkProject();
+      // Run A in flight: the shared checkout is on its branch, holding a commit main doesn't have.
+      await run(["checkout", "-q", "-b", "beckett/run-sibling"], project);
+      writeFileSync(join(project, "sibling.txt"), "run A's in-progress work\n");
+      await run(["add", "-A"], project);
+      await run(["commit", "-m", "run A checkpoint"], project);
+      expect((await run(["rev-parse", "--abbrev-ref", "HEAD"], project)).stdout.trim()).toBe("beckett/run-sibling");
+      expect((await run(["rev-parse", "--verify", "--quiet", "origin/main"], project)).code).not.toBe(0);
+
+      // Run B starts. The supervisor asks for `origin/main`; this repo's default is `trunk`.
+      const ws = join(project, SCAFFOLDING_DIR, "worktrees", "run-mine");
+      await createWorktree({ repoRoot: project, workspace: ws, branch: "beckett/run-mine", baseRef: "origin/main" });
+
+      const trunkTip = (await run(["rev-parse", "origin/trunk"], project)).stdout.trim();
+      expect((await run(["rev-parse", "HEAD"], ws)).stdout.trim()).toBe(trunkTip);
+      expect(existsSync(join(ws, "sibling.txt"))).toBe(false); // never based on the sibling's branch
+      expect((await run(["rev-parse", "--abbrev-ref", "HEAD"], ws)).stdout.trim()).toBe("beckett/run-mine");
+    }, 30_000);
+
+    test("the parked-publish comparison also measures against the default branch, not the literal `main`", async () => {
+      // The hand-off advice is only as good as the ref it compares to. Looking for `main` alone, this
+      // repo resolved NO ref, reported `compared: false`, and fell back to the blanket "push it by
+      // hand" — the exact wrong answer for a branch whose work is already on the default branch.
+      const project = await trunkProject();
+      const seed = join(root, "trunk-seed");
+      await run(["checkout", "-q", "-b", "beckett/run-mine"], project);
+
+      const level = await readBranchVsMain(project);
+      expect(level).toMatchObject({ compared: true, ahead: 0, behind: 0, mainRef: "origin/trunk" });
+
+      // Trunk moves on while the run sits parked; the branch now carries nothing trunk doesn't have.
+      writeFileSync(join(seed, "landed.txt"), "shipped meanwhile\n");
+      await run(["add", "-A"], seed);
+      await run(["commit", "-m", "shipped meanwhile"], seed);
+      await run(["push", "origin", "trunk"], seed);
+
+      const behind = await readBranchVsMain(project);
+      expect(behind).toMatchObject({ compared: true, ahead: 0, behind: 1, mainRef: "origin/trunk" });
+    }, 30_000);
   });
 
   describe("fastForwardCheckout (#91 — land keeps ~/Projects/<slug> current)", () => {

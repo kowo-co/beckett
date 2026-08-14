@@ -434,6 +434,141 @@ test("a dependent cut from pre-squash predecessor history squash-applies only it
   }
 }, 30_000); // real-git: many shell-outs; needs headroom over the 5s default under full-suite parallel load
 
+/**
+ * A publish checkout carrying loose, uncommitted work, against a remote whose `main` moved on — so
+ * the publish must genuinely rebase, and `git rebase` genuinely refuses on the dirty tree. `checkout`
+ * picks WHOSE dirt it is: a run's own `git worktree add` checkout (ours to commit), or a shared
+ * project clone (a human's, never ours to commit).
+ */
+async function dirtyPublishFixture(root: string, checkout: "run-worktree" | "shared-clone") {
+  const remoteParent = join(root, "0xbeckett");
+  const remote = join(remoteParent, "beckett.git");
+  const seed = join(root, "seed");
+  const project = join(root, "project");
+  const worker = join(root, "worker");
+  const other = join(root, "other");
+  await mkdir(remoteParent, { recursive: true });
+  await git(root, "init", "--bare", remote);
+  await git(root, "init", "--initial-branch=main", seed);
+  await git(seed, "config", "user.email", "test@example.com");
+  await git(seed, "config", "user.name", "Test");
+  await writeFile(join(seed, "README.md"), "root\n");
+  await git(seed, "add", ".");
+  await git(seed, "commit", "-m", "root");
+  await git(seed, "remote", "add", "origin", `file://${remote}`);
+  await git(seed, "push", "origin", "main");
+
+  // The publish checkout: one committed turn, plus loose work no stage got around to committing (an
+  // edit to a tracked file AND a brand-new file) — exactly what makes `git rebase` refuse.
+  if (checkout === "run-worktree") {
+    await git(root, "clone", "-b", "main", `file://${remote}`, project);
+    await git(project, "config", "user.email", "test@example.com");
+    await git(project, "config", "user.name", "Test");
+    await git(project, "worktree", "add", "-b", "beckett/ops-dirty", worker, "main");
+  } else {
+    await git(root, "clone", "-b", "main", `file://${remote}`, worker);
+    await git(worker, "config", "user.email", "test@example.com");
+    await git(worker, "config", "user.name", "Test");
+  }
+  await writeFile(join(worker, "feature.ts"), "export const v = 1;\n");
+  await git(worker, "add", ".");
+  await git(worker, "commit", "-m", "run checkpoint");
+  await writeFile(join(worker, "feature.ts"), "export const v = 2;\n"); // unstaged edit
+  await writeFile(join(worker, "late.ts"), "export const late = true;\n"); // untracked addition
+  await mkdir(join(worker, ".beckett"), { recursive: true });
+  await writeFile(join(worker, ".beckett", "notes.md"), "internal scaffolding\n");
+
+  // Main moved on while the run worked, so the publish must actually rebase (not fast-forward).
+  await git(root, "clone", "-b", "main", `file://${remote}`, other);
+  await git(other, "config", "user.email", "test@example.com");
+  await git(other, "config", "user.name", "Test");
+  await writeFile(join(other, "elsewhere.md"), "landed meanwhile\n");
+  await git(other, "add", ".");
+  await git(other, "commit", "-m", "someone else landed");
+  await git(other, "push", "origin", "main");
+
+  const calls: string[] = [];
+  const gh = new GitHubCli({
+    pat: "tok",
+    account: "0xbeckett",
+    apiBase: "https://api.github.com",
+    resolveRepoDir: () => worker,
+    logger: noopLog,
+    run: (async (cmd: string[], opts?: { cwd?: string; env?: Record<string, string | undefined> }) => {
+      calls.push(cmd.join(" "));
+      if (cmd[0] === "git") return realRun(cmd, opts);
+      if (cmd.join(" ").startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
+      if (cmd.join(" ").includes("api --method PATCH")) return ok();
+      if (cmd.join(" ").includes("--json defaultBranchRef")) return ok("main");
+      return fail(`unrouted: ${cmd.join(" ")}`);
+    }) as never,
+  });
+  (gh as unknown as { gitHost: () => string }).gitHost = () => `file://${root}`;
+  return { remote, worker, gh, calls };
+}
+
+/**
+ * 2026-08-14: a run's publish tripped on "cannot rebase: You have unstaged changes. error:
+ * additionally, your index contains uncommitted changes." and then burned its whole retry ladder on
+ * a state no retry could ever clear. The dirty tree is OUR OWN doing — it's the run's private
+ * worktree — so the publish path commits that loose work before it rebases, rather than handing a
+ * human an error we caused ourselves. Real git: the rebase has to genuinely refuse for this to mean
+ * anything.
+ */
+test("a dirty publish checkout is committed BEFORE the rebase, instead of failing it (2026-08-14)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "beckett-publish-dirty-"));
+  try {
+    const { remote, worker, gh, calls } = await dirtyPublishFixture(root, "run-worktree");
+
+    const result = await gh.ensurePublished({
+      slug: "beckett",
+      sourceDir: worker,
+      description: "run title",
+      ticket: "OPS-dirty",
+      commitMessage: "the run's summary",
+    });
+
+    // The rebase ran and stuck — no abort, no "needs a human" park over a mess we made ourselves.
+    expect(result.kind).toBe("pushed");
+    expect(calls.some((call) => call.startsWith("git rebase FETCH_HEAD"))).toBe(true);
+    expect(calls.some((call) => call.startsWith("git rebase --abort"))).toBe(false);
+    // Every bit of the loose work shipped — committing it, not stashing it, is what delivers the run.
+    expect(await git(root, "--git-dir", remote, "show", "main:feature.ts")).toBe("export const v = 2;");
+    expect(await git(root, "--git-dir", remote, "show", "main:late.ts")).toBe("export const late = true;");
+    expect(await git(root, "--git-dir", remote, "show", "main:elsewhere.md")).toBe("landed meanwhile");
+    // …and the internal scaffolding still never leaves the machine.
+    expect((await realRun(["git", "--git-dir", remote, "cat-file", "-e", "main:.beckett/notes.md"])).code).not.toBe(0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30_000); // real-git: many shell-outs; needs headroom over the 5s default under full-suite parallel load
+
+/**
+ * The other side of that fix, and the reason it is gated rather than unconditional: `sourceDir` is
+ * `run.workspace ?? resolveRepoRoot(run)`, so a run with no recorded workspace publishes from the
+ * SHARED project checkout — a directory a human also edits in. Auto-committing there would sweep
+ * someone's in-progress work into the run's commit and push it. Only a checkout we created (a linked
+ * `git worktree`) is ours to tidy; anywhere else the dirty tree stays untouched and the publish fails
+ * loudly, which `classifyPublishError` already treats as terminal (park on attempt 1, real reason).
+ */
+test("loose work in a SHARED checkout is never committed by a publish — it isn't ours", async () => {
+  const root = await mkdtemp(join(tmpdir(), "beckett-publish-shared-"));
+  try {
+    const { remote, worker, gh } = await dirtyPublishFixture(root, "shared-clone");
+
+    await expect(
+      gh.ensurePublished({ slug: "beckett", sourceDir: worker, description: "run title", ticket: "OPS-dirty" }),
+    ).rejects.toThrow(/unstaged changes|uncommitted changes|cannot rebase/i);
+
+    // The human's loose edits are still exactly where they left them — uncommitted and unpushed.
+    expect(await git(worker, "status", "--porcelain")).toContain("feature.ts");
+    expect(await git(worker, "show", "HEAD:feature.ts")).toBe("export const v = 1;");
+    expect((await realRun(["git", "--git-dir", remote, "cat-file", "-e", "main:late.ts"])).code).not.toBe(0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30_000); // real-git: many shell-outs; needs headroom over the 5s default under full-suite parallel load
+
 test("case 1 — cloned third-party upstream: fork → push to fork → PR to upstream", async () => {
   const { gh, calls } = cli((j) => {
     if (j.startsWith("git remote get-url origin")) return ok("https://github.com/SSHdotCodes/probabilities.git");
