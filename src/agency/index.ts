@@ -1066,12 +1066,34 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
    * {@link stripTrackedScaffolding} keeps it out of the push — leaving it untracked, which a rebase
    * does not mind. Best-effort throughout: a `git status` we can't read, or an add/commit that
    * fails, leaves the working tree exactly as it was and lets the rebase report the real problem.
+   *
+   * The ONE state it refuses outright is an unmerged path (a half-finished merge/rebase left in the
+   * worktree). "Loose work" means work no stage got around to committing, NOT a file full of
+   * conflict markers: `git add -A` stages `<<<<<<<`/`>>>>>>>` verbatim, and the commit below would
+   * carry that wreckage to trunk under the run's own summary. That throws a `needs a human` error
+   * instead, which `classifyPublishError` calls permanent, so the run parks on attempt 1 naming the
+   * conflicted files rather than shipping them.
    */
   private async commitStrayWorkingTree(cwd: string, summary: string | undefined): Promise<void> {
     if (!(await this.isRunWorktree(cwd))) return;
     const status = await this.runner(["git", "status", "--porcelain"], { cwd, env: this.gitEnv() });
     if (status.code !== 0 || status.stdout.trim() === "") return;
-    const dirty = status.stdout.split(/\r?\n/).map((line) => line.slice(3).trim()).filter(Boolean);
+    const lines = status.stdout.split(/\r?\n/).filter((line) => line.trim() !== "");
+    // UNMERGED paths are never ours to commit. `git add -A` stages a conflicted file verbatim —
+    // `<<<<<<<`/`=======`/`>>>>>>>` markers and all — and the commit below would then push that
+    // wreckage straight to trunk under the run's own summary. A half-finished merge is exactly the
+    // "belongs to a human immediately" shape item 1 exists to park on, so name the files and stop.
+    const conflicted = lines.filter((line) => {
+      const [x, y] = [line[0], line[1]];
+      return x === "U" || y === "U" || (x === "A" && y === "A") || (x === "D" && y === "D");
+    }).map((line) => line.slice(3).trim());
+    if (conflicted.length > 0) {
+      throw new Error(
+        `publish: the run's checkout has unresolved merge conflicts and can't be committed or ` +
+          `rebased — needs a human (${conflicted.slice(0, 20).join(", ")})`,
+      );
+    }
+    const dirty = lines.map((line) => line.slice(3).trim()).filter(Boolean);
     this.opts.logger.warn("publish checkout was dirty — committing its loose work before the rebase", {
       cwd,
       paths: dirty.slice(0, 20),

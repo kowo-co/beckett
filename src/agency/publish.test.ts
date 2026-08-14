@@ -7,7 +7,7 @@
  */
 
 import { expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GitHubCli, parseRepoNwo } from "./index.ts";
@@ -564,6 +564,58 @@ test("loose work in a SHARED checkout is never committed by a publish — it isn
     expect(await git(worker, "status", "--porcelain")).toContain("feature.ts");
     expect(await git(worker, "show", "HEAD:feature.ts")).toBe("export const v = 1;");
     expect((await realRun(["git", "--git-dir", remote, "cat-file", "-e", "main:late.ts"])).code).not.toBe(0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30_000); // real-git: many shell-outs; needs headroom over the 5s default under full-suite parallel load
+
+/**
+ * The limit of "commit the loose work": loose means work no stage got around to committing, NOT a
+ * half-finished merge. `git status --porcelain` reports an unmerged file as `UU`, and `git add -A`
+ * stages it verbatim — conflict markers and all — so an unguarded auto-commit would have pushed
+ * `<<<<<<<`/`>>>>>>>` to trunk under the run's own summary, which is strictly worse than the stall
+ * it was fixing. A conflicted tree is a human's call: park on attempt 1 naming the files.
+ */
+test("a publish checkout with UNRESOLVED conflicts parks — it never commits conflict markers", async () => {
+  const root = await mkdtemp(join(tmpdir(), "beckett-publish-conflict-"));
+  try {
+    const { remote, worker, gh, calls } = await dirtyPublishFixture(root, "run-worktree");
+
+    // Turn the loose work into a genuine unmerged index: commit our side, then merge a branch that
+    // touched the same lines. Real git, real `UU` — not a hand-written status string.
+    await git(worker, "add", "feature.ts", "late.ts");
+    await git(worker, "commit", "-m", "run work"); // our side: feature.ts = 2
+    await git(worker, "checkout", "-b", "sidecar", "HEAD~1");
+    await writeFile(join(worker, "feature.ts"), "export const v = 99;\n");
+    await git(worker, "add", "feature.ts");
+    await git(worker, "commit", "-m", "conflicting edit");
+    await git(worker, "checkout", "beckett/ops-dirty");
+    await realRun(["git", "merge", "sidecar"], { cwd: worker }); // expected to conflict
+    expect(await git(worker, "status", "--porcelain")).toMatch(/^UU |\nUU /);
+    expect(await readFile(join(worker, "feature.ts"), "utf8")).toContain("<<<<<<<");
+
+    const failure = await gh.ensurePublished({
+      slug: "beckett",
+      sourceDir: worker,
+      description: "run title",
+      ticket: "OPS-conflict",
+      commitMessage: "the run's summary",
+    }).then(() => null, (err: Error) => err.message);
+
+    // "needs a human" is what `classifyPublishError` keys on to park on attempt 1 rather than burn
+    // the retry ladder, and the message names the file so the human knows what to resolve.
+    expect(failure).toMatch(/unresolved merge conflicts/i);
+    expect(failure).toMatch(/needs a human/i);
+    expect(failure).toContain("feature.ts");
+
+    // Nothing was committed over the conflict, and nothing reached the remote.
+    expect(await readFile(join(worker, "feature.ts"), "utf8")).toContain("<<<<<<<");
+    expect(calls.some((call) => call.startsWith("git push"))).toBe(false);
+    // The remote is untouched: main still carries only what landed before this run.
+    for (const path of ["feature.ts", "late.ts"]) {
+      expect((await realRun(["git", "--git-dir", remote, "cat-file", "-e", `main:${path}`])).code).not.toBe(0);
+    }
+    expect(await git(root, "--git-dir", remote, "show", "main:elsewhere.md")).toBe("landed meanwhile");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

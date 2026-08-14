@@ -79,7 +79,7 @@ export function classifyPublishError(error: unknown): PublishFailureKind {
 }
 
 /**
- * The three shapes a run's branch can be in against `origin/main` when a publish gives up — the
+ * The four shapes a run's branch can be in against `origin/main` when a publish gives up — the
  * decision that determines what the hand-off message must tell a human to DO. Computed from
  * {@link BranchVsMainRaw} (real `git` measurements) so the advice is never a guess. Every stall
  * cleaned up by hand on 2026-08-14 was mis-advised as case (a) ("just push it") when it was really
@@ -87,7 +87,14 @@ export function classifyPublishError(error: unknown): PublishFailureKind {
  */
 export type BranchLandedState =
   /** (a) HEAD carries commits `main` does not yet have → genuinely needs publishing; push IS right. */
-  | { kind: "ahead" }
+  | { kind: "ahead"; ahead?: number }
+  /**
+   * (d) HEAD has unlanded commits AND `main` has commits HEAD lacks — the histories DIVERGED. A
+   * plain push is rejected (non-fast-forward), and forcing it drops main's side, so this is the one
+   * ahead-shaped state where "just push it" is still the wrong answer: it needs a rebase first,
+   * which is a judgement call about someone else's commits and therefore a human's.
+   */
+  | { kind: "diverged"; ahead: number; behind: number; mainRef?: string }
   /** (b) Every local commit is ALREADY on `main` (patch-id/subject match) → pushing duplicates it. */
   | { kind: "landed"; commit: string; subject: string; mainRef?: string }
   /** (c) HEAD is behind `main` with nothing new → pushing would REVERT the work main already carries. */
@@ -96,13 +103,20 @@ export type BranchLandedState =
   | { kind: "unknown" };
 
 /**
- * Interpret the raw HEAD-vs-`main` measurements into one of the three named shapes. Pure and
+ * Interpret the raw HEAD-vs-`main` measurements into one of the four named shapes. Pure and
  * table-tested — the whole point is that "already landed" is decided by patch-id (`git cherry`),
  * never by re-running git in production and hoping.
  */
 export function classifyBranchLanding(raw: BranchVsMainRaw): BranchLandedState {
   if (!raw.compared) return { kind: "unknown" };
-  if (raw.ahead > 0 && raw.aheadUnlanded > 0) return { kind: "ahead" };
+  if (raw.ahead > 0 && raw.aheadUnlanded > 0) {
+    // Unlanded work on BOTH sides ⇒ diverged, not simply ahead. Told to "just push it" a human hits
+    // a non-fast-forward reject and the tempting next move is `--force`, which discards whatever
+    // main gained meanwhile.
+    return raw.behind > 0
+      ? { kind: "diverged", ahead: raw.aheadUnlanded, behind: raw.behind, mainRef: raw.mainRef }
+      : { kind: "ahead", ahead: raw.aheadUnlanded };
+  }
   if (raw.ahead > 0) {
     return { kind: "landed", commit: raw.landedCommit ?? "", subject: raw.landedSubject ?? "", mainRef: raw.mainRef };
   }
@@ -117,11 +131,15 @@ function shortSha(sha: string): string {
   return sha.length > 12 ? sha.slice(0, 12) : sha;
 }
 
-/** The generic hand-off used for case (a) and when the branch state can't be determined. */
-function pushHandoff(ref: { runId: string; branch: string }): string {
+/**
+ * The generic hand-off used for case (a) and when the branch state can't be determined. `ahead`
+ * names how much is actually unpushed when we measured it; the unknown case has no count to give.
+ */
+function pushHandoff(ref: { runId: string; branch: string }, ahead?: number): string {
+  const carries = ahead && ahead > 0 ? `This branch carries ${ahead} unpushed commit(s). ` : "";
   return (
-    `Publish it by hand (\`beckett gh push --repo <owner/name> --branch ${ref.branch}\`), then close it ` +
-    `out with \`beckett task courier ${ref.runId}\`.`
+    `${carries}Publish it by hand (\`beckett gh push --repo <owner/name> --branch ${ref.branch}\`), ` +
+    `then close it out with \`beckett task courier ${ref.runId}\`.`
   );
 }
 
@@ -151,7 +169,18 @@ export function publishParkAdvice(state: BranchLandedState, ref: { runId: string
         `bookkeeping out with \`beckett task courier ${ref.runId}\`.`
       );
     }
+    case "diverged": {
+      const trunk = state.mainRef || "origin/main";
+      return (
+        `This branch has DIVERGED from ${trunk}: ${state.ahead} unpushed commit(s) here, ` +
+        `${state.behind} commit(s) there that this branch does not have. A plain push is rejected as ` +
+        `non-fast-forward and forcing it would DROP ${trunk}'s side — do NOT push. Rebase it onto ` +
+        `${trunk} by hand, check the result, then publish and close out with ` +
+        `\`beckett task courier ${ref.runId}\`.`
+      );
+    }
     case "ahead":
+      return pushHandoff(ref, state.ahead);
     case "unknown":
     default:
       return pushHandoff(ref);

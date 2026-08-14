@@ -66,11 +66,21 @@ function raw(over: Partial<BranchVsMainRaw> = {}): BranchVsMainRaw {
   return { compared: true, ahead: 0, behind: 0, aheadUnlanded: 0, ...over };
 }
 
-test("classifyBranchLanding names the three shapes (a) ahead, (b) already-landed, (c) superseded", () => {
-  // (a) genuinely-new work main does not have yet.
-  expect(classifyBranchLanding(raw({ ahead: 2, aheadUnlanded: 2 }))).toEqual({ kind: "ahead" });
-  // (a') new work AND behind — still needs publishing (the push integrates main first); never landed.
-  expect(classifyBranchLanding(raw({ ahead: 1, aheadUnlanded: 1, behind: 3 }))).toEqual({ kind: "ahead" });
+test("classifyBranchLanding names the four shapes: ahead, diverged, already-landed, superseded", () => {
+  // (a) genuinely-new work main does not have yet, and nothing new on main → a plain push works.
+  expect(classifyBranchLanding(raw({ ahead: 2, aheadUnlanded: 2 }))).toEqual({ kind: "ahead", ahead: 2 });
+  // (d) new work on BOTH sides → diverged, NOT plain-ahead: a push is a non-fast-forward reject and
+  // forcing it would drop main's side, so this must never be advised as "just push it".
+  expect(classifyBranchLanding(raw({ ahead: 1, aheadUnlanded: 1, behind: 3 }))).toEqual({
+    kind: "diverged",
+    ahead: 1,
+    behind: 3,
+  });
+  // Diverged counts the UNLANDED commits, not the raw ahead: already-landed ones need no push.
+  expect(classifyBranchLanding(raw({ ahead: 5, aheadUnlanded: 2, behind: 1 }))).toMatchObject({
+    kind: "diverged",
+    ahead: 2,
+  });
   // (b) every local commit already on main under a squash sha (patch-id match, git cherry all `-`).
   expect(
     classifyBranchLanding(raw({ ahead: 1, aheadUnlanded: 0, landedCommit: "2035e51abcdef", landedSubject: "babble: post training cycles" })),
@@ -86,9 +96,19 @@ test("classifyBranchLanding names the three shapes (a) ahead, (b) already-landed
 test("publishParkAdvice gives the SAFE command for each shape — push only for (a)/unknown", () => {
   const ref = { runId: "run-x", branch: "beckett/run-x" };
 
-  const ahead = publishParkAdvice({ kind: "ahead" }, ref);
+  const ahead = publishParkAdvice({ kind: "ahead", ahead: 4 }, ref);
   expect(ahead).toContain("beckett gh push --repo <owner/name> --branch beckett/run-x");
   expect(ahead).toContain("beckett task courier run-x");
+  expect(ahead).toContain("4 unpushed commit(s)"); // (a) says WHAT is unpushed, not just "push it"
+
+  // (d) diverged → says so, gives both counts, and must never recommend a push (plain or forced).
+  const diverged = publishParkAdvice({ kind: "diverged", ahead: 2, behind: 3 }, ref);
+  expect(diverged).toContain("DIVERGED from origin/main");
+  expect(diverged).toContain("2 unpushed commit(s)");
+  expect(diverged).toContain("3 commit(s) there");
+  expect(diverged).toContain("do NOT push");
+  expect(diverged).not.toContain("gh push");
+  expect(diverged).not.toContain("--force");
 
   const landed = publishParkAdvice({ kind: "landed", commit: "2035e51abcdef01", subject: "babble: post training cycles" }, ref);
   expect(landed).toContain("ALREADY on origin/main");
