@@ -12,8 +12,16 @@ Recovery narrates itself on the run card and in update turns.
   first. If the resolution is clear, deploy a new run that states it outright ("the reviewer wants
   X; the last attempt is on branch `beckett/run-…`; finish it that way"). If it genuinely needs a
   human call, relay the impasse instead of guessing.
-- **"the work is complete but could not be published"** — YOUR job; see
-  `couriering-finished-work-the-dispatche.md`.
+- **A publish that stopped** — YOUR job; see `couriering-finished-work-the-dispatche.md`. Three
+  wordings, all parked, all carrying the reason and the fix in the run's `error`:
+  - **"the work is complete but could not be published"** / **"publishing failed and is now parked
+    for a human"** — the push/PR step failed and the retry ladder is spent. The error names the
+    cause verbatim and, when it is a class we recognize (no `origin`, a credential that cannot
+    write, a missing repo), the exact command that clears it.
+  - **"the publish step never completed"** — the stall guard: the run sat in `publishing` with
+    nothing scheduled to move it. Nothing was pushed; courier it.
+  A run in `publishing` with `error: null` is still WORKING. One with an error is telling you what
+  it needs — read it before deploying anything new.
 - **A run that's live but silent** — ask the worker directly (*Progress questions*) before you
   assume anything is wrong. A quiet worker is usually a working worker. While it is still going,
   new direction is a steering note (*Steering work in flight*), not a second deploy.

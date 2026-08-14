@@ -25,6 +25,7 @@ import {
   finishAuditLine,
   gateMerge,
   parseFinishArgs,
+  planRemote,
   primaryWorktree,
   repoFromRemoteUrl,
   runGuardedDeploy,
@@ -121,6 +122,58 @@ describe("repoFromRemoteUrl", () => {
     expect(repoFromRemoteUrl("")).toBeNull();
     expect(repoFromRemoteUrl("/srv/git/mirror")).toBeNull();
     expect(repoFromRemoteUrl("https://github.com/lonely")).toBeNull();
+  });
+});
+
+// The 2026-08-14 regression (`kowo-co/babble`): a run whose project repo had no remote, and a
+// GitHub repo that existed but was EMPTY, both ended at "this work is already merged, or nothing
+// was committed" — on a branch carrying the entire build. Three distinguishable cases, three
+// answers, and only ONE of them is "nothing to do".
+describe("planRemote — the three remote cases", () => {
+  const base = { base: "main", dir: "/home/beckett/Projects/babble" };
+
+  test("(a) no remote at all is said out loud, and never mistaken for already-merged", () => {
+    const plan = planRemote({ ...base, repo: undefined, originUrl: null, baseExists: null });
+    expect(plan.kind).toBe("no-remote");
+    const error = plan.kind === "no-remote" ? plan.error : "";
+    expect(error).toContain("NO `origin` remote configured");
+    expect(error).toContain('This is not "already merged"');
+    // Names the missing thing AND both commands that supply it.
+    expect(error).toContain("git remote add origin https://github.com/<owner>/<name>.git");
+    expect(error).toContain("--repo <owner/name>");
+  });
+
+  test("(a) an origin that is not a GitHub owner/name remote is its own message, quoting the URL", () => {
+    const plan = planRemote({ ...base, repo: undefined, originUrl: "/srv/mirrors/babble.git", baseExists: null });
+    expect(plan.kind).toBe("no-remote");
+    const error = plan.kind === "no-remote" ? plan.error : "";
+    expect(error).toContain("/srv/mirrors/babble.git");
+    expect(error).toContain("--repo <owner/name>");
+    expect(error).not.toContain("already merged");
+  });
+
+  test("(b) a remote whose base branch does not exist yet is a first push, not an error", () => {
+    expect(
+      planRemote({ ...base, repo: "kowo-co/babble", originUrl: null, baseExists: false }).kind,
+    ).toBe("first-push");
+    // …including when `--repo` supplied the name and the checkout still has no origin: an empty
+    // repo is exactly the shape that leaves a checkout remote-less in the first place.
+    expect(
+      planRemote({ ...base, repo: "kowo-co/babble", originUrl: null, baseExists: false }).kind,
+    ).toBe("first-push");
+  });
+
+  test("(c) a base that really exists lands normally — the landing engine's verdicts mean what they say", () => {
+    expect(
+      planRemote({ ...base, repo: "kowo-co/babble", originUrl: "https://github.com/kowo-co/babble.git", baseExists: true }).kind,
+    ).toBe("land");
+  });
+
+  test("an unanswerable probe lands rather than inventing a first push", () => {
+    // `baseExists: null` means GitHub could not be asked — NOT evidence that the repo is empty.
+    expect(
+      planRemote({ ...base, repo: "kowo-co/babble", originUrl: "https://github.com/kowo-co/babble.git", baseExists: null }).kind,
+    ).toBe("land");
   });
 });
 

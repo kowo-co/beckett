@@ -164,6 +164,10 @@ describe("landBranch", () => {
     const err = (await landBranch(gh, { ...OPTS, now: clock(1_000) }).catch((e) => e)) as LandError;
     expect(err.stage).toBe("pr");
     expect(err.message).toContain("has no commits that main does not already have");
+    // …and it says so as a REAL comparison. This verdict is only reachable once the base branch is
+    // known to exist (`beckett finish` probes first); an empty repo is a first push, never this.
+    expect(err.message).toContain("This is a REAL comparison");
+    expect(err.message).toContain("first push");
   });
 
   test("an unreadable PR stops rather than guessing it is safe to merge", async () => {

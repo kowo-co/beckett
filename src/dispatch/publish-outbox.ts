@@ -108,6 +108,60 @@ export function planPublishRetry(attempt: number, error: unknown, now: number = 
   };
 }
 
+/**
+ * The actionable half of a publish failure: what to DO about the class of error git/gh reported.
+ * The verbatim error already says what broke; an operator reading a parked run needs the command
+ * that clears it. Null when the error is not a shape we can name a fix for — never a guess.
+ */
+export function publishFixHint(error: string): string | null {
+  if (/does not appear to be a git repository|no such remote|remote .+ (?:does not exist|not found)|no (?:configured )?(?:push destination|remote)/i.test(error)) {
+    return (
+      "the checkout has no usable `origin` remote, so there is nowhere to push. Wire one — " +
+      "`git remote add origin https://github.com/<owner>/<name>.git` in the project checkout — then re-run the publish."
+    );
+  }
+  if (/\b(?:401|403)\b|unauthori[sz]ed|forbidden|resource not accessible by integration|permission denied/i.test(error)) {
+    return (
+      "the GitHub credential cannot write there. Check it with `beckett gh preflight --repo <owner/name>` " +
+      "and make sure the App is installed on that repo."
+    );
+  }
+  if (/\b404\b|repository not found|could not resolve to a repository|name already exists/i.test(error)) {
+    return (
+      "the target repo is missing or invisible to the credential. Confirm it with " +
+      "`beckett gh raw -- repo view <owner/name>`, create it if it is genuinely absent, then re-run the publish."
+    );
+  }
+  return null;
+}
+
+/**
+ * The `error` string a run carries while (and after) a publish attempt fails — the fix for a run
+ * that sat in `publishing` with `error: null` for half an hour and told nobody anything
+ * (2026-08-14). Names the STEP, the attempt, the verbatim cause, and — when the cause is a shape we
+ * recognize — the command that clears it.
+ */
+export function publishFailureReason(
+  plan: PublishRetryPlan,
+  attempt: number,
+  /** The run this is about, so the hand-off commands are copy-pasteable rather than placeholders. */
+  ref?: { runId: string; branch: string },
+): string {
+  const head =
+    plan.action === "park"
+      ? `publishing failed and is now parked for a human (${plan.reason === "permanent" ? "unrecoverable without a human" : `no attempts left after ${attempt} of ${PUBLISH_MAX_ATTEMPTS}`})`
+      : `publishing failed on attempt ${attempt} of ${PUBLISH_MAX_ATTEMPTS} — ${plan.message.replace(/^publish attempt \d+ failed — /, "")}`;
+  const cause = plan.error.trim().replace(/[.\s]+$/, "");
+  const hint = publishFixHint(plan.error);
+  const detail = hint ? `${cause} — ${hint}` : `${cause}.`;
+  const courier =
+    plan.action === "park"
+      ? ` Publish it by hand (\`beckett gh push --repo <owner/name> --branch ${ref?.branch ?? "<branch>"}\`), ` +
+        `then close it out with \`beckett task courier ${ref?.runId ?? "<run-id>"}\`.`
+      : "";
+  return `${head}: ${detail}${courier}`;
+}
+
 /** "30s" / "2m" / "10m" — the ladder's own delays are round numbers, so this stays simple. */
 function formatDelay(ms: number): string {
   const seconds = Math.max(0, Math.round(ms / 1000));
@@ -153,6 +207,16 @@ export class PublishOutbox {
 
   has(itemId: string): boolean {
     return this.read().some((op) => op.item.id === itemId);
+  }
+
+  /**
+   * The row that owns `itemId`, or undefined. `has()` answers "is something holding this run",
+   * which is not enough for the publishing-stall guard: a row parked at
+   * {@link Number.MAX_SAFE_INTEGER} is holding the run and is NEVER going to run again, and a run
+   * held by one of those is exactly the silent forever-`publishing` wedge the guard exists to end.
+   */
+  get(itemId: string): PublishOperation | undefined {
+    return this.read().find((op) => op.item.id === itemId);
   }
 
   /** A human courier owns publishing from this point; never race them with a stale retry. */

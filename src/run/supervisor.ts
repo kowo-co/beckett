@@ -81,7 +81,10 @@ import {
   PublishOutbox,
   PUBLISH_RETRY_DELAYS_MS,
   planPublishRetry,
+  publishFailureReason,
+  publishFixHint,
   type PublishOperation,
+  type PublishRetryPlan,
 } from "../dispatch/publish-outbox.ts";
 import { appendSpendRecord, readSpendLedger, spendForTicket, type SpendOutcome } from "../spend.ts";
 import { resolveProjectOwner, selfProjectSlug } from "../github/owner.ts";
@@ -276,6 +279,13 @@ const DEFAULT_WATCHDOG_GRACE_S = 120;
 const WATCHDOG_MIN_INTERVAL_MS = 15_000;
 /** Publish-outbox drain cadence — the shortest retry delay, so a due row waits at most one tick. */
 const PUBLISH_DRAIN_INTERVAL_MS = PUBLISH_RETRY_DELAYS_MS[0];
+/**
+ * The longest a run may sit in `publishing` with nothing scheduled to move it before
+ * {@link RunSupervisor.reconcilePublishing} parks it. Comfortably longer than the whole retry
+ * ladder (30s + 2m + 10m plus drain slack), because a row with a real `nextAttemptAt` is EXEMPT —
+ * this budget only ever measures a run nothing is going to touch again.
+ */
+export const PUBLISH_STALL_MS = 20 * 60_000;
 
 // =======================================================================================
 // RunSupervisor
@@ -315,6 +325,13 @@ export class RunSupervisor {
   private readonly finishing = new Set<string>();
   private readonly spendMetaByWorker = new Map<string, SpendStageMeta>();
   private readonly unstaffedSince = new Map<string, number>();
+  /**
+   * When the current publish attempt for a run started — the clock {@link reconcilePublishing}
+   * measures a stall against. Seeded from `updatedAt` for a run the daemon inherited (a restart
+   * loses the in-process map but not the ledger), and restarted by every real attempt so a retry
+   * that is genuinely running is never mistaken for a wedge.
+   */
+  private readonly publishStallClock = new Map<string, number>();
   private readonly watchdogRestaffed = new Set<string>();
   private readonly budgetBlocked = new Set<string>();
   /**
@@ -1151,11 +1168,20 @@ export class RunSupervisor {
         };
         this.publishOutbox.append(op, plan);
         this.trace(publishing, "publish", "held", plan.message, plan.error);
+        await this.recordPublishFailure(publishing, plan, 1);
         return;
       }
-      await this.park(publishing, `the work is complete but could not be published (${outcome.error}).`);
+      // No durable outbox wired (a bare/embedded supervisor): there is no retry ladder to hand it
+      // to, so park immediately — with the same actionable text a laddered failure gets.
+      const hint = publishFixHint(outcome.error);
+      await this.park(
+        publishing,
+        `the work is complete but could not be published: ${outcome.error.trim().replace(/[.\s]+$/, "")}` +
+          `${hint ? ` — ${hint}` : "."}`,
+      );
       return;
     }
+    this.publishStallClock.delete(run.id);
     const prUrl = outcome.status === "published" ? outcome.prUrl ?? outcome.url ?? null : null;
     await this.patchRun(run.id, {
       state: "done",
@@ -1170,12 +1196,37 @@ export class RunSupervisor {
     this.logger.info("run done", { run: run.id });
   }
 
+  /**
+   * Write a failed publish attempt onto the RUN, where an operator (and `beckett status`) actually
+   * looks. Before this, a run whose publish failed sat in `publishing` with `error: null` — the
+   * durable row carried the reason and nothing surfaced it, so a wedged run was indistinguishable
+   * from one still working (2026-08-14, `babble`: 30+ minutes of `publishing`, `error: null`, and
+   * no channel message at all).
+   *
+   * A plan that PARKS moves the run to `parked` as well: the row it leaves behind is scheduled at
+   * `Number.MAX_SAFE_INTEGER` and will never run again, so leaving the run `publishing` was a state
+   * that claimed work was in progress when nothing was. `parked` is the held-for-a-human state the
+   * rest of the supervisor already understands — it still shows on the board, `beckett task courier`
+   * still accepts it, and {@link park} emits the `held` event that reaches the run's channel.
+   */
+  private async recordPublishFailure(run: Run, plan: PublishRetryPlan, attempt: number): Promise<void> {
+    const reason = publishFailureReason(plan, attempt, { runId: run.id, branch: run.branch });
+    if (plan.action === "park") {
+      await this.park(run, reason);
+      return;
+    }
+    await this.patchRun(run.id, { error: reason });
+  }
+
   /** One publish attempt; never throws. */
   private async publishOnce(run: Run, summary: string): Promise<PublishOutcome> {
     if (!this.publishRepo) {
       this.trace(run, "publish", "passed", "publishing unavailable; local-only completion");
       return { status: "skipped" };
     }
+    // Restart the stall clock: an attempt that is actually running is progress, and one that never
+    // returns is measured from HERE rather than from whenever the run entered `publishing`.
+    this.publishStallClock.set(run.id, Date.now());
     try {
       // #246: the squashed publish commit is the ONLY place the review summary/mechanism writeup can
       // land once a direct push carries no PR body — so its message must carry both the run's title
@@ -1239,11 +1290,13 @@ export class RunSupervisor {
           reason: plan.reason, error: plan.error,
         });
         this.trace(run, "publish-retry", "held", plan.message, plan.error);
+        await this.recordPublishFailure(run, plan, attempt);
         return {
           action: "keep",
           operation: { ...op, attempt, nextAttemptAt: plan.nextAttemptAt },
         };
       }
+      this.publishStallClock.delete(run.id);
       const prUrl = pub.status === "published" ? pub.prUrl ?? pub.url ?? null : null;
       await this.patchRun(run.id, {
         state: "done",
@@ -1255,6 +1308,58 @@ export class RunSupervisor {
       this.trace(run, "done", "passed", shipped || "durable publish retry succeeded");
       return { action: "remove" };
     });
+  }
+
+  /**
+   * The publishing-stall guard: no run may sit in `publishing` indefinitely with nothing scheduled
+   * to move it. Three shapes reach here, and all three used to be permanent silent wedges because
+   * `stageFor()` returns null for `publishing` (so the staffing watchdog skips it):
+   *
+   *   1. a durable row whose ladder is exhausted (`nextAttemptAt: MAX_SAFE_INTEGER`) — it holds the
+   *      run and will never run again. New failures park at that moment
+   *      ({@link recordPublishFailure}); this catches rows written by older code;
+   *   2. an attempt that never returned — a `git push`/`gh` call hung, so no failure was ever
+   *      classified and no row was ever written;
+   *   3. a run whose row was removed out from under it without a terminal state.
+   *
+   * A row with a REAL `nextAttemptAt` is exempt: the ladder owns it, and the whole point of the
+   * durable outbox is that a scheduled retry is progress. Everything else is parked with a specific
+   * `error` naming the step, the elapsed time, and how to finish it by hand.
+   */
+  async reconcilePublishing(nowMs: number = Date.now()): Promise<string[]> {
+    const parked: string[] = [];
+    for (const run of this.store.live()) {
+      if (run.state !== "publishing") continue;
+      const row = this.publishOutbox?.get(run.id);
+      if (row && row.nextAttemptAt < Number.MAX_SAFE_INTEGER) {
+        this.publishStallClock.delete(run.id);
+        continue; // a real retry is scheduled — that IS progress
+      }
+      let since = this.publishStallClock.get(run.id);
+      if (since === undefined) {
+        const entered = Date.parse(run.updatedAt);
+        since = Number.isFinite(entered) ? entered : nowMs;
+        this.publishStallClock.set(run.id, since);
+      }
+      const stalledMs = nowMs - since;
+      if (stalledMs < PUBLISH_STALL_MS) continue;
+      this.publishStallClock.delete(run.id);
+      const minutes = Math.max(1, Math.round(stalledMs / 60_000));
+      const last = run.error
+        ? `Last recorded publish error: ${run.error}`
+        : row
+          ? `The durable publish row gave up after attempt ${row.attempt} and was never going to retry`
+          : "No publish error was ever recorded, so the attempt never returned at all";
+      await this.park(
+        run,
+        `the publish step never completed: this run sat in \`publishing\` for ${minutes} minute(s) with no ` +
+          `attempt scheduled to move it. ${last}. Publish it by hand ` +
+          `(\`beckett gh push --repo <owner/name> --branch ${run.branch}\`), then close it out with ` +
+          `\`beckett task courier ${run.id}\`.`,
+      );
+      parked.push(run.id);
+    }
+    return parked;
   }
 
   /**
@@ -1332,6 +1437,7 @@ export class RunSupervisor {
     this.publishOutbox?.cancel(runId);
     this.dropPending(runId);
     this.unstaffedSince.delete(runId);
+    this.publishStallClock.delete(runId);
     this.watchdogRestaffed.delete(runId);
     this.budgetBlocked.delete(runId);
     this.restartInterrupted.delete(runId);
@@ -1414,6 +1520,7 @@ export class RunSupervisor {
     this.staffing.delete(runId);
     this.dropPending(runId);
     this.unstaffedSince.delete(runId);
+    this.publishStallClock.delete(runId);
     this.watchdogRestaffed.delete(runId);
     this.budgetBlocked.delete(runId);
     this.restartInterrupted.delete(runId);
@@ -1546,6 +1653,14 @@ export class RunSupervisor {
         await this.replayPublishes();
       } catch (err) {
         this.logger.warn("publish outbox drain failed (staffing pass continues)", { error: String(err) });
+      }
+      // …then end any `publishing` run nothing is going to move. The loop below CANNOT do it:
+      // `stageFor()` returns null for `publishing`, so a run wedged there is invisible to the
+      // staffing watchdog by design — which is exactly how one sat there silently for half an hour.
+      try {
+        parked.push(...(await this.reconcilePublishing(nowMs)));
+      } catch (err) {
+        this.logger.warn("publishing-stall guard failed (staffing pass continues)", { error: String(err) });
       }
       const graceMs = (this.config.supervise?.staffing_watchdog_s ?? DEFAULT_WATCHDOG_GRACE_S) * 1000;
       const wedged = new Set<string>();

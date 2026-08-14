@@ -264,7 +264,9 @@ export async function landBranch(gh: LandClient, opts: LandOptions): Promise<Lan
       throw new LandError(
         `${opts.head} has no commits that ${opts.base} does not already have, so there is no PR to open — ` +
           `this work is already merged, or nothing was committed. Check with ` +
-          `\`git log origin/${opts.base}..${opts.head}\`${where}.`,
+          `\`git log origin/${opts.base}..${opts.head}\`${where}. ` +
+          `(This is a REAL comparison against ${opts.repo}: a base branch that does not exist yet — an empty ` +
+          `repo — is a first push, which \`beckett finish\` detects and performs before it ever gets here.)`,
         "pr",
       );
     }

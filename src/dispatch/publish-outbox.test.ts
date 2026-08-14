@@ -6,6 +6,8 @@ import {
   classifyPublishError,
   planPublishRetry,
   publishErrorMessage,
+  publishFailureReason,
+  publishFixHint,
   PublishOutbox,
   PUBLISH_MAX_ATTEMPTS,
   PUBLISH_RETRY_DELAYS_MS,
@@ -142,4 +144,40 @@ test("append logs 'parked for human courier' — never 'queued for retry' — on
   expect(warns[0]!.fields).toMatchObject({ error: "HTTP 403 forbidden", reason: "permanent" });
   const persisted = JSON.parse(readFileSync(join(dir, "outbox.jsonl"), "utf8").trim());
   expect(persisted.nextAttemptAt).toBe(Number.MAX_SAFE_INTEGER);
+});
+
+// A run that cannot publish must carry a reason an operator can ACT on. Before this, the reason
+// lived only in the durable row and the run itself said `error: null` (2026-08-14: 30+ minutes of
+// `publishing`, no error, no channel message, no push).
+test("publishFixHint names the fix for the failure classes we can recognize, and guesses at none", () => {
+  expect(publishFixHint("fatal: 'origin' does not appear to be a git repository")).toContain(
+    "git remote add origin",
+  );
+  expect(publishFixHint("git push failed (128): No configured push destination")).toContain(
+    "no usable `origin` remote",
+  );
+  expect(publishFixHint("gh api failed (403): Resource not accessible by integration")).toContain(
+    "beckett gh preflight",
+  );
+  expect(publishFixHint("gh repo view failed (404): Not Found")).toContain("beckett gh raw -- repo view");
+  expect(publishFixHint("connection reset by peer")).toBeNull();
+});
+
+test("publishFailureReason names the step, the attempt, the cause, and what to do about it", () => {
+  const retrying = planPublishRetry(2, new Error("fetch failed"), 1_000);
+  const whileRetrying = publishFailureReason(retrying, 2);
+  expect(whileRetrying).toContain("publishing failed on attempt 2 of 4");
+  expect(whileRetrying).toContain("retrying in 2m");
+  expect(whileRetrying).toContain("fetch failed");
+
+  const parked = publishFailureReason(planPublishRetry(4, new Error("fatal: 'origin' does not appear to be a git repository"), 1_000), 4);
+  expect(parked).toContain("parked for a human");
+  expect(parked).toContain("no attempts left after 4 of 4");
+  expect(parked).toContain("git remote add origin"); // the actionable half
+  expect(parked).toContain("beckett task courier");
+
+  // A permanent class parks on attempt 1 and says WHY it will not be retried.
+  const permanent = publishFailureReason(planPublishRetry(1, new Error("HTTP 403 forbidden"), 1_000), 1);
+  expect(permanent).toContain("unrecoverable without a human");
+  expect(permanent).toContain("beckett gh preflight");
 });

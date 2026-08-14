@@ -602,6 +602,36 @@ async function applyRepoIdentity(repoRoot: string, owner: string): Promise<void>
   }
 }
 
+/** The URL a managed project repo's `origin` points at — one place, so every path agrees. */
+export function projectRemoteUrl(owner: string, slug: string): string {
+  return `https://github.com/${owner}/${slug}.git`;
+}
+
+/**
+ * Point `origin` at `remote` when the checkout has NONE — the fix for a run that could never
+ * publish (2026-08-14, `babble`). A project repo that is EMPTY on GitHub (or momentarily
+ * unreadable) fails the `ls-remote` probe below, so {@link ensureProjectRepoUncached} took the
+ * `git init` path — which wired no remote at all. Everything downstream then had nowhere to push:
+ * `git remote -v` was empty in the checkout AND in every worktree cut from it (linked worktrees
+ * share `.git/config`, so a missing remote is missing for all of them), the run sat in `publishing`
+ * forever, and `beckett finish` had nothing to compare against.
+ *
+ * Deliberately NEVER clobbers an existing `origin`: a checkout cloned from a third-party upstream
+ * publishes through that upstream (`GitHubCli.ensurePublished` case 1), and rewriting its origin to
+ * `<owner>/<slug>` would silently retarget the whole publish. Idempotent, and applied to EXISTING
+ * checkouts too, so repos an older code path left remote-less repair themselves on the next run.
+ */
+export async function ensureOriginRemote(repoRoot: string, remote: string): Promise<void> {
+  const existing = await runGit(["remote", "get-url", "origin"], repoRoot);
+  if (existing.code === 0 && existing.stdout.trim()) return;
+  const added = await runGit(["remote", "add", "origin", remote], repoRoot);
+  if (added.code !== 0) {
+    logger.warn("could not wire the project origin remote", { repoRoot, remote, stderr: added.stderr.trim() });
+    return;
+  }
+  logger.info("wired project origin remote", { repoRoot, remote });
+}
+
 const projectRepoEnsures = new Map<string, Promise<void>>();
 
 /**
@@ -611,31 +641,48 @@ const projectRepoEnsures = new Map<string, Promise<void>>();
  * `project: beckett`) it is **cloned**; otherwise a fresh repo is `git init`-ed on `main`. The
  * worker then commits in place and (if the ticket calls for it) creates/pushes the GitHub repo via
  * the github skill. Idempotent — a no-op once `repoRoot/.git` exists.
+ *
+ * BOTH provisioning paths end with a usable `origin` ({@link ensureOriginRemote}): the clone path
+ * gets one from git itself, and the init path — taken whenever `<owner>/<slug>` is empty or
+ * unreadable on GitHub — is wired explicitly, because a project repo with no remote is a run that
+ * silently cannot publish. `remote` is injectable so the real-git tests can point at a local bare
+ * repo instead of reaching github.com.
  */
-export async function ensureProjectRepo(repoRoot: string, slug: string, owner: string): Promise<void> {
+export async function ensureProjectRepo(
+  repoRoot: string,
+  slug: string,
+  owner: string,
+  remote: string = projectRemoteUrl(owner, slug),
+): Promise<void> {
   const existing = projectRepoEnsures.get(repoRoot);
   if (existing) return existing;
 
-  const ensure = ensureProjectRepoUncached(repoRoot, slug, owner).finally(() => {
+  const ensure = ensureProjectRepoUncached(repoRoot, slug, owner, remote).finally(() => {
     projectRepoEnsures.delete(repoRoot);
   });
   projectRepoEnsures.set(repoRoot, ensure);
   return ensure;
 }
 
-async function ensureProjectRepoUncached(repoRoot: string, slug: string, owner: string): Promise<void> {
+async function ensureProjectRepoUncached(
+  repoRoot: string,
+  slug: string,
+  owner: string,
+  remote: string,
+): Promise<void> {
   if (existsSync(`${repoRoot}/.git`)) {
     await applyRepoIdentity(repoRoot, owner); // re-pin every call — existing checkouts predate this
+    await ensureOriginRemote(repoRoot, remote); // repair checkouts an older init path left remote-less
     return;
   }
   const parent = dirname(repoRoot);
   mkdirSync(parent, { recursive: true });
 
-  const remote = `https://github.com/${owner}/${slug}.git`;
   const onGitHub = (await runGit(["ls-remote", remote, "HEAD"], parent)).code === 0;
   if (onGitHub) {
     await git(["clone", remote, repoRoot], parent);
     await applyRepoIdentity(repoRoot, owner);
+    await ensureOriginRemote(repoRoot, remote); // clone sets it; assert it rather than assume it
     logger.info("provisioned project repo by clone", { repoRoot, remote });
     return;
   }
@@ -643,5 +690,6 @@ async function ensureProjectRepoUncached(repoRoot: string, slug: string, owner: 
   mkdirSync(repoRoot, { recursive: true });
   await git(["init", "-b", "main"], repoRoot);
   await applyRepoIdentity(repoRoot, owner);
-  logger.info("provisioned new project repo (git init)", { repoRoot, slug });
+  await ensureOriginRemote(repoRoot, remote);
+  logger.info("provisioned new project repo (git init)", { repoRoot, slug, remote });
 }

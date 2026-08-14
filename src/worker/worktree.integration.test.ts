@@ -20,6 +20,8 @@ import {
   refExists,
   mergeBranchesIntoWorktree,
   fastForwardCheckout,
+  ensureProjectRepo,
+  projectRemoteUrl,
   SCAFFOLDING_DIR,
 } from "./worktree.ts";
 
@@ -262,5 +264,84 @@ describe("worktree lifecycle (real git)", () => {
       expect(result.reason).toMatch(/some-other-branch/);
       expect((await run(["rev-parse", "--abbrev-ref", "HEAD"], repo)).stdout.trim()).toBe("some-other-branch");
     });
+  });
+});
+
+/**
+ * Provisioning a project repo (`ensureProjectRepo`) — the 2026-08-14 defect. `babble` existed on
+ * GitHub but was completely EMPTY, so the `ls-remote` probe below did not resolve it, provisioning
+ * took the `git init` path, and that path wired NO remote at all. `git remote -v` was empty in the
+ * checkout and in every worktree cut from it, so the finished run had nowhere to push: it sat in
+ * `publishing` forever and `beckett finish` had nothing to compare against.
+ *
+ * `remote` is injected here so this runs against a local bare repo instead of github.com — the
+ * assertions are about which remote ends up configured, not about who is hosting it.
+ */
+describe("ensureProjectRepo wires a usable origin on BOTH provisioning paths", () => {
+  let projects: string;
+  beforeEach(() => {
+    projects = mkdtempSync(join(tmpdir(), "beckett-projects-"));
+  });
+  afterEach(() => rmSync(projects, { recursive: true, force: true }));
+
+  const originOf = async (dir: string) => (await run(["remote", "get-url", "origin"], dir)).stdout.trim();
+
+  test("the init path (repo empty/unreachable on GitHub) still ends with origin configured", async () => {
+    const target = join(projects, "babble");
+    const remote = join(projects, "unreachable", "babble.git"); // nothing there → ls-remote fails
+
+    await ensureProjectRepo(target, "babble", "kowo-co", remote);
+
+    expect(existsSync(join(target, ".git"))).toBe(true);
+    expect(await originOf(target)).toBe(remote);
+    // …and it is on `main`, so the first push creates the branch publishing expects.
+    expect((await run(["symbolic-ref", "--short", "HEAD"], target)).stdout.trim()).toBe("main");
+  });
+
+  test("a worktree cut from an init-provisioned repo inherits that remote (they share .git/config)", async () => {
+    const target = join(projects, "babble");
+    const remote = join(projects, "unreachable", "babble.git");
+    await ensureProjectRepo(target, "babble", "kowo-co", remote);
+
+    const ws = join(target, SCAFFOLDING_DIR, "worktrees", "run-1");
+    await createWorktree({ repoRoot: target, workspace: ws, branch: "beckett/run-1", baseRef: "origin/main", reuseIfExists: true });
+
+    expect(await originOf(ws)).toBe(remote);
+  });
+
+  test("the clone path keeps the origin git itself configured", async () => {
+    const target = join(projects, "cloned");
+    await ensureProjectRepo(target, "cloned", "kowo-co", origin);
+
+    expect(await originOf(target)).toBe(origin);
+    expect(existsSync(join(target, "base.txt"))).toBe(true); // really cloned, not re-inited
+  });
+
+  test("an EXISTING checkout left remote-less by the old code path is repaired in place", async () => {
+    const target = join(projects, "legacy");
+    await initRepo(target); // a checkout with commits and no remote — exactly the babble shape
+    writeFileSync(join(target, "work.txt"), "built\n");
+    await run(["add", "-A"], target);
+    await run(["commit", "-m", "the whole build"], target);
+    const before = (await run(["rev-parse", "HEAD"], target)).stdout.trim();
+
+    await ensureProjectRepo(target, "legacy", "kowo-co", join(projects, "unreachable", "legacy.git"));
+
+    expect(await originOf(target)).toBe(join(projects, "unreachable", "legacy.git"));
+    expect((await run(["rev-parse", "HEAD"], target)).stdout.trim()).toBe(before); // history untouched
+  });
+
+  test("an existing origin is NEVER clobbered — a third-party upstream still publishes upstream", async () => {
+    const target = join(projects, "fork-of-someones-repo");
+    await initRepo(target);
+    await run(["remote", "add", "origin", "https://github.com/someone-else/their-repo.git"], target);
+
+    await ensureProjectRepo(target, "fork-of-someones-repo", "kowo-co", join(projects, "unreachable", "x.git"));
+
+    expect(await originOf(target)).toBe("https://github.com/someone-else/their-repo.git");
+  });
+
+  test("projectRemoteUrl is the one place the GitHub URL is spelled", () => {
+    expect(projectRemoteUrl("kowo-co", "babble")).toBe("https://github.com/kowo-co/babble.git");
   });
 });

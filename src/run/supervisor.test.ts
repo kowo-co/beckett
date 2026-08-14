@@ -121,7 +121,7 @@ mock.module("../dispatch/spawn.ts", () => ({
   spawnWorker: fakeSpawn,
 }));
 
-const { RunSupervisor, runProjectSlug, runSpecReader } = await import("./supervisor.ts");
+const { RunSupervisor, runProjectSlug, runSpecReader, PUBLISH_STALL_MS } = await import("./supervisor.ts");
 const { resolveSelfProjectOwner } = await import("../github/owner.ts");
 
 // ── injected git fakes ──────────────────────────────────────────────────────────────────────
@@ -756,8 +756,15 @@ describe("publish outbox backoff ladder (#227)", () => {
     row = readRow();
     expect(row.attempt).toBe(4);
     expect(row.nextAttemptAt).toBe(Number.MAX_SAFE_INTEGER);
-    // The run stays honestly `publishing` — it is not silently vanished nor falsely marked done.
-    expect(store.get(run.id)!.state).toBe("publishing");
+    // …and the RUN parks with it. A row scheduled at MAX_SAFE_INTEGER is never going to run again,
+    // so leaving the run `publishing` claimed work was in progress when nothing was — the
+    // 2026-08-14 wedge. `parked` is the held-for-a-human state (still on the board, still
+    // courier-able), and it carries the reason instead of `error: null`.
+    const done = store.get(run.id)!;
+    expect(done.state).toBe("parked");
+    expect(done.error).toContain("parked for a human");
+    expect(done.error).toContain("some future gh error text nobody wrote a regex for");
+    expect(done.error).toContain(`beckett task courier ${run.id}`);
 
     // Every attempt after the first logged VERBATIM with honest wording — retry while there was a
     // rung left, "parked for human courier" (never "retry") on the last one.
@@ -791,11 +798,148 @@ describe("publish outbox backoff ladder (#227)", () => {
     const row = JSON.parse(readFileSync(outbox, "utf8").trim());
     expect(row.attempt).toBe(1);
     expect(row.nextAttemptAt).toBe(Number.MAX_SAFE_INTEGER);
-    expect(store.get(run.id)!.state).toBe("publishing");
+    // A permanent failure parks on attempt 1 — and the run says so, with the fix for THIS class of
+    // error (a credential that cannot write), not a bare `error: null`.
+    const parked = store.get(run.id)!;
+    expect(parked.state).toBe("parked");
+    expect(parked.error).toContain("HTTP 403 forbidden");
+    expect(parked.error).toContain("beckett gh preflight");
 
     const held = events.find((e) => e.stage === "publish" && e.outcome === "held");
     expect(held?.message).toBe("parked for human courier");
     expect(held?.error).toBe("HTTP 403 forbidden");
+  });
+});
+
+/**
+ * 2026-08-14 (`babble`): a finished run — 43/43 checklist items, reviewer PASS, 115/115 tests —
+ * sat in `publishing` with `live:false`, `prUrl:null` and `error:null` for over half an hour and
+ * published nothing. Nothing was going to move it and nothing said so. `publishing` is invisible to
+ * the staffing watchdog by design (`stageFor()` returns null for it), so it needs its own guard.
+ */
+describe("publishing never stalls silently", () => {
+  test("a failed attempt writes the reason onto the RUN, not only into the durable row", async () => {
+    const dir = scratch();
+    const { supervisor, store } = newSupervisor({
+      publishOutboxPath: join(dir, "run-publish-outbox.jsonl"),
+      publish: async () => {
+        throw new Error("git push failed (128): fatal: 'origin' does not appear to be a git repository");
+      },
+    });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    await settle();
+    created[1]!.finish("success", "pass", doneSignal("complete"));
+    await settle();
+
+    const held = store.get(run.id)!;
+    expect(held.state).toBe("publishing"); // a scheduled retry IS progress — still honest
+    expect(held.error).toContain("publishing failed on attempt 1 of 4");
+    expect(held.error).toContain("does not appear to be a git repository");
+    // The actionable half: the missing thing, and the command that supplies it.
+    expect(held.error).toContain("git remote add origin");
+  });
+
+  test("a run wedged in `publishing` with nothing scheduled is parked with a specific error", async () => {
+    const dir = scratch();
+    const { supervisor, store } = newSupervisor({
+      publishOutboxPath: join(dir, "run-publish-outbox.jsonl"),
+    });
+    // The exact shape: `publishing`, no outbox row, no error, nothing in flight.
+    const run = seedRun(store, makeRun({ state: "publishing", updatedAt: "2026-08-10T00:00:00.000Z" }));
+    await supervisor.admit(run.id);
+
+    const at = Date.parse("2026-08-10T00:00:00.000Z");
+    // Inside the budget: still publishing, still untouched — the guard must not be trigger-happy.
+    expect(await supervisor.reconcilePublishing(at + PUBLISH_STALL_MS - 1)).toEqual([]);
+    expect(store.get(run.id)!.state).toBe("publishing");
+
+    expect(await supervisor.reconcilePublishing(at + PUBLISH_STALL_MS + 60_000)).toEqual([run.id]);
+    const parked = store.get(run.id)!;
+    expect(parked.state).toBe("parked");
+    expect(parked.error).toContain("the publish step never completed");
+    expect(parked.error).toContain("the attempt never returned at all");
+    expect(parked.error).toContain(`beckett task courier ${run.id}`);
+    expect(parked.error).toContain(run.branch);
+  });
+
+  test("a row parked at MAX_SAFE_INTEGER by older code is repaired, not left holding the run", async () => {
+    const dir = scratch();
+    const outbox = join(dir, "run-publish-outbox.jsonl");
+    const storePath = join(dir, "runs.json");
+    const seed = new RunStore(storePath);
+    const run = seedRun(seed, makeRun({ state: "publishing", updatedAt: "2026-08-10T00:00:00.000Z" }));
+    writeFileSync(
+      outbox,
+      `${JSON.stringify({
+        id: "op-legacy",
+        item: { id: run.id, identifier: run.id },
+        slug: "gateway",
+        repoRoot: join(dir, "wt"),
+        messagePrefix: "Review passed → **done**.",
+        summary: "pass",
+        purpose: "done",
+        attempt: 4,
+        nextAttemptAt: Number.MAX_SAFE_INTEGER, // gave up; will never come due again
+        createdAt: new Date().toISOString(),
+      })}\n`,
+    );
+    const { supervisor, store } = newSupervisor({
+      publishOutboxPath: outbox,
+      store: new RunStore(storePath),
+    });
+
+    const parkedIds = await supervisor.reconcilePublishing(Date.parse("2026-08-10T01:00:00.000Z"));
+
+    expect(parkedIds).toEqual([run.id]);
+    const parked = store.get(run.id)!;
+    expect(parked.state).toBe("parked");
+    expect(parked.error).toContain("gave up after attempt 4");
+  });
+
+  test("a row with a real next attempt is left alone — a scheduled retry is progress", async () => {
+    const dir = scratch();
+    const outbox = join(dir, "run-publish-outbox.jsonl");
+    const storePath = join(dir, "runs.json");
+    const seed = new RunStore(storePath);
+    const run = seedRun(seed, makeRun({ state: "publishing", updatedAt: "2026-08-10T00:00:00.000Z" }));
+    writeFileSync(
+      outbox,
+      `${JSON.stringify({
+        id: "op-live",
+        item: { id: run.id, identifier: run.id },
+        slug: "gateway",
+        repoRoot: join(dir, "wt"),
+        messagePrefix: "Review passed → **done**.",
+        summary: "pass",
+        purpose: "done",
+        attempt: 2,
+        nextAttemptAt: Date.parse("2026-08-10T02:00:00.000Z"),
+        createdAt: new Date().toISOString(),
+      })}\n`,
+    );
+    const { supervisor, store } = newSupervisor({ publishOutboxPath: outbox, store: new RunStore(storePath) });
+
+    expect(await supervisor.reconcilePublishing(Date.parse("2026-08-11T00:00:00.000Z"))).toEqual([]);
+    expect(store.get(run.id)!.state).toBe("publishing");
+  });
+
+  test("the guard rides the watchdog pass, so a live daemon needs no restart to notice", async () => {
+    const dir = scratch();
+    const storePath = join(dir, "runs.json");
+    const seed = new RunStore(storePath);
+    const run = seedRun(seed, makeRun({ state: "publishing", updatedAt: "2026-08-10T00:00:00.000Z" }));
+    const { supervisor, store } = newSupervisor({
+      publishOutboxPath: join(dir, "run-publish-outbox.jsonl"),
+      store: new RunStore(storePath),
+    });
+
+    const pass = await supervisor.reconcileStaffing(Date.parse("2026-08-10T00:00:00.000Z") + PUBLISH_STALL_MS + 1);
+
+    expect(pass.parked).toContain(run.id);
+    expect(store.get(run.id)!.state).toBe("parked");
   });
 });
 

@@ -623,3 +623,43 @@ test("idempotent (upstream PR) — an already-open PR is reused, gh pr create is
   expect(calls.some((c) => c.startsWith("git push"))).toBe(false);
   expect(calls.some((c) => c.startsWith("gh repo fork"))).toBe(false);
 });
+
+// The signal `beckett finish` uses to tell "already merged" apart from "the base branch does not
+// exist yet" (2026-08-14, `kowo-co/babble`: an EMPTY GitHub repo, so no `main` at all).
+test("branchExists reports a real branch, a 404 branch, and an empty repo distinctly", async () => {
+  const { gh, calls } = cli((j) => {
+    if (j.startsWith("gh api repos/kowo-co/beckett/branches/main")) return ok("main\n");
+    if (j.startsWith("gh api repos/kowo-co/babble/branches/main")) return fail("gh: Not Found (HTTP 404)", 1);
+    return undefined;
+  });
+  expect(await gh.branchExists("kowo-co/beckett", "main")).toBe(true);
+  // An empty repo has no branches at all — a 404, which must read as "does not exist", never as an
+  // error the caller has to guess about.
+  expect(await gh.branchExists("kowo-co/babble", "main")).toBe(false);
+  // A read, not a write: nothing here creates or pushes anything.
+  expect(calls.every((c) => c.startsWith("gh api repos/"))).toBe(true);
+});
+
+// An EMPTY repo (exists, no commits) has no default branch, and `gh -q .defaultBranchRef.name`
+// prints the literal `null` for it — exit 0. Publishing a project's first commits to a branch
+// called `null` is how "the repo existed but nothing ever landed on main" happens.
+test("case 2 — an owned repo that is EMPTY publishes to main, never to a branch called `null`", async () => {
+  const { gh, calls } = cli((j) => {
+    if (j.startsWith("git remote get-url origin")) return ok("https://github.com/0xbeckett/babble.git");
+    if (j.startsWith("gh repo view 0xbeckett/babble --json name")) return ok('{"name":"babble"}'); // repoExists → yes
+    if (j.startsWith("gh api --method PATCH")) return ok(); // setPublic
+    if (j.includes("--json defaultBranchRef")) return ok("null\n"); // ← the empty-repo answer
+    if (j.startsWith("git ls-files")) return ok("");
+    if (j.startsWith("git fetch")) return fail("fatal: couldn't find remote ref main", 128); // no base yet
+    if (j.startsWith("git push")) return ok();
+    if (j.startsWith("git rev-parse HEAD")) return ok("abc1234\n");
+    return undefined;
+  });
+
+  const r = await gh.ensurePublished({ slug: "babble", sourceDir: "/src", ticket: "run-1" });
+
+  expect(r.kind).toBe("pushed");
+  const push = calls.find((c) => c.startsWith("git push"))!;
+  expect(push).toContain("HEAD:refs/heads/main");
+  expect(push).not.toContain("refs/heads/null");
+});

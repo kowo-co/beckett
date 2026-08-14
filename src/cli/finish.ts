@@ -194,6 +194,58 @@ export function repoFromRemoteUrl(url: string): string | null {
 }
 
 /**
+ * What `beckett finish` can actually do about the remote, decided BEFORE it touches GitHub. The
+ * three cases exist because they used to collapse into one confident wrong answer: a repo with no
+ * remote, and a repo whose base branch does not exist yet, both ended up at the landing engine's
+ * `no commits between` translation — "this work is already merged, or nothing was committed" — on a
+ * branch carrying an entire unpushed build (2026-08-14, `kowo-co/babble`). A wrong diagnosis is
+ * worse than an error: it tells the operator to stop looking.
+ */
+export type RemotePlan =
+  /** (a) Nothing to push to. `error` names the missing thing and the command that supplies it. */
+  | { kind: "no-remote"; error: string }
+  /** (b) The remote exists but `base` does not yet — an empty repo. Normal: do the first push. */
+  | { kind: "first-push" }
+  /** (c) A real comparison is possible; the landing engine's verdicts mean what they say. */
+  | { kind: "land" };
+
+/**
+ * Decide which of the three cases holds. Pure so every message is pinned by tests rather than
+ * discovered in production.
+ *
+ * `baseExists` is `null` when GitHub could not be asked at all — that is NOT evidence of an empty
+ * repo, so it falls through to `land` and lets the landing engine report whatever GitHub actually
+ * says, rather than inventing a first push against a repo that may well have a base branch.
+ */
+export function planRemote(p: {
+  /** The resolved `owner/name`, or undefined when neither `--repo` nor `origin` supplied one. */
+  repo?: string;
+  /** `origin`'s URL, or null when the checkout has no `origin` remote at all. */
+  originUrl: string | null;
+  base: string;
+  dir: string;
+  baseExists: boolean | null;
+}): RemotePlan {
+  if (!p.repo) {
+    const nudge =
+      `Either wire the remote up — \`git remote add origin https://github.com/<owner>/<name>.git\` in ` +
+      `${p.dir} — or name the repo for this run: \`beckett finish -m "…" --repo <owner/name>\`.`;
+    return {
+      kind: "no-remote",
+      error:
+        p.originUrl === null
+          ? `${p.dir} has NO \`origin\` remote configured (\`git remote -v\` is empty), so there is nowhere to ` +
+            `push and nothing to compare this branch against. This is not "already merged" — nothing has ` +
+            `been published at all. ${nudge}`
+          : `${p.dir}'s \`origin\` is \`${p.originUrl}\`, which is not a GitHub \`owner/name\` remote, so this ` +
+            `command cannot work out where to push. ${nudge}`,
+    };
+  }
+  if (p.baseExists === false) return { kind: "first-push" };
+  return { kind: "land" };
+}
+
+/**
  * The repo's PRIMARY checkout, out of `git worktree list --porcelain` (its first entry, always the
  * main working tree — linked worktrees follow).
  *
@@ -429,17 +481,14 @@ export async function runFinish(argv: string[]): Promise<void> {
     );
   }
 
-  let repo = opts.repo;
-  if (!repo) {
-    const remote = await git(["remote", "get-url", "origin"], repoRoot);
-    repo = (remote.code === 0 ? repoFromRemoteUrl(remote.stdout) : null) ?? undefined;
-  }
-  if (!repo) {
-    fail(
-      `beckett finish: could not work out which GitHub repo ${repoRoot} belongs to (no usable \`origin\` ` +
-        `remote). Pass it explicitly: \`beckett finish -m "…" --repo <owner/name>\`.`,
-    );
-  }
+  const remote = await git(["remote", "get-url", "origin"], repoRoot);
+  const originUrl = remote.code === 0 && remote.stdout.trim() ? remote.stdout.trim() : null;
+  const repo = opts.repo ?? (originUrl ? repoFromRemoteUrl(originUrl) ?? undefined : undefined);
+  // Case (a) is decidable with no network at all, so say it here rather than after a pointless
+  // audit post and commit.
+  const unresolved = planRemote({ repo, originUrl, base: opts.base, dir: repoRoot, baseExists: null });
+  if (unresolved.kind === "no-remote") fail(`beckett finish: ${unresolved.error}`);
+  if (!repo) throw new Error("unreachable: planRemote accepted a missing repo");
 
   // Announce FIRST: the ledger should record the runs that go on to fail, not only the clean ones.
   const audit = await postAuditLine(finishAuditLine(repo, branch, opts.title, new Date()));
@@ -472,6 +521,24 @@ export async function runFinish(argv: string[]): Promise<void> {
     committed = true;
   }
 
+  const gh = await buildGh(repoRoot);
+
+  // ── which of the three remote cases is this? ─────────────────────────────────────────────
+  // Ask GitHub whether the base branch exists BEFORE opening anything. A brand-new repo with no
+  // commits has no `main`, and a PR against it fails with the very same `No commits between …`
+  // text GitHub uses for genuinely-landed work — which is how a branch carrying an entire build
+  // got reported as "already merged, or nothing was committed" (2026-08-14).
+  let baseExists: boolean | null = null;
+  try {
+    baseExists = await gh.branchExists(repo, opts.base);
+  } catch (err) {
+    step(`could not read ${repo}'s ${opts.base} branch (${(err as Error).message}) — treating this as an ordinary landing`);
+  }
+  const plan = planRemote({ repo, originUrl, base: opts.base, dir: repoRoot, baseExists });
+  if (plan.kind === "no-remote") fail(`beckett finish: ${plan.error}`); // re-checked: nothing changed above
+  const firstPush = plan.kind === "first-push";
+  if (firstPush) step(`${repo} has no \`${opts.base}\` branch yet — this is a first push, not a PR`);
+
   // ── already landed? ──────────────────────────────────────────────────────────────────────
   // Re-running finish on a branch whose commits are all on the target used to die inside the
   // landing engine ("this work is already merged, or nothing was committed") — a hard failure
@@ -480,21 +547,26 @@ export async function runFinish(argv: string[]): Promise<void> {
   // HERE: when origin/<base> already has every commit on this branch, exit clean without
   // landing, deploying, or touching GitHub. (A commit made just above makes the branch ahead
   // again, so freshly committed work never takes this exit.)
-  const fetched = await git(["fetch", "origin", opts.base], repoRoot);
-  if (fetched.code === 0) {
-    const ahead = await git(["log", `origin/${opts.base}..HEAD`, "--oneline"], repoRoot);
-    if (ahead.code === 0 && !ahead.stdout.trim()) {
-      step(`nothing to land — origin/${opts.base} already has every commit on ${branch}`);
-      out({
-        ok: true,
-        repo,
-        branch,
-        base: opts.base,
-        committed,
-        alreadyLanded: true,
-        deploy: { ran: false, reason: "nothing to land — the branch is already on the target" },
-        audit,
-      });
+  //
+  // Skipped entirely on a first push: there is no remote base to compare against, and a failed
+  // `git fetch` must never be read as "nothing to do".
+  if (!firstPush) {
+    const fetched = await git(["fetch", "origin", opts.base], repoRoot);
+    if (fetched.code === 0) {
+      const ahead = await git(["log", `origin/${opts.base}..HEAD`, "--oneline"], repoRoot);
+      if (ahead.code === 0 && !ahead.stdout.trim()) {
+        step(`nothing to land — origin/${opts.base} already has every commit on ${branch}`);
+        out({
+          ok: true,
+          repo,
+          branch,
+          base: opts.base,
+          committed,
+          alreadyLanded: true,
+          deploy: { ran: false, reason: "nothing to land — the branch is already on the target" },
+          audit,
+        });
+      }
     }
   }
 
@@ -530,34 +602,53 @@ export async function runFinish(argv: string[]): Promise<void> {
     }
   }
 
-  const gh = await buildGh(repoRoot);
-
-  // ── push → PR → CI → merge ───────────────────────────────────────────────────────────────
-  // The shared landing engine (`land.ts`): the same motion `beckett gh land` runs for the deploy's
-  // release bump, so a protected `main` is satisfied the one way that works and every blocker is
-  // named once, in one place.
-  let pr: { number: number; url: string };
-  let merged: "merged" | "already-merged";
-  try {
-    const landed = await landBranch(gh, {
-      repo,
-      head: branch,
-      localRef: "HEAD",
-      base: opts.base,
-      title: opts.title,
-      body: opts.body,
-      strategy: opts.strategy,
-      ciTimeoutMs: opts.ciTimeoutMs,
-      dir: repoRoot,
-      command: "beckett finish",
-      timeoutAlso: " and nothing was deployed",
-      step,
-    });
-    pr = landed.pr;
-    merged = landed.merge;
-  } catch (err) {
-    if (err instanceof LandError) fail(`beckett finish: ${err.message}`);
-    throw err;
+  // ── (b) the first push ───────────────────────────────────────────────────────────────────
+  // An empty repo is a SUPPORTED case, not an error: push the branch (so the history has a name)
+  // and then push the same commits to the base, which creates it. There is nothing to open a PR
+  // against and nothing to merge — the work IS the base branch after this.
+  let pr: { number: number; url: string } | null = null;
+  let merged: "merged" | "already-merged" | "first-push";
+  if (firstPush) {
+    try {
+      step(`pushing ${branch} to ${repo}`);
+      await gh.pushBranch(repo, "HEAD", branch);
+      step(`creating ${opts.base} on ${repo} from ${branch} (first push — the repo is empty)`);
+      await gh.pushBranch(repo, "HEAD", opts.base);
+    } catch (err) {
+      fail(
+        `beckett finish: the first push to ${repo} failed, so ${opts.base} still does not exist there. ` +
+          `Check the credential with \`beckett gh preflight --repo ${repo}\`, then re-run \`beckett finish\`.\n` +
+          `${(err as Error).message}`,
+      );
+    }
+    merged = "first-push";
+    step(`${opts.base} on ${repo} now carries this work — nothing to merge`);
+  } else {
+    // ── push → PR → CI → merge ─────────────────────────────────────────────────────────────
+    // The shared landing engine (`land.ts`): the same motion `beckett gh land` runs for the
+    // deploy's release bump, so a protected `main` is satisfied the one way that works and every
+    // blocker is named once, in one place.
+    try {
+      const landed = await landBranch(gh, {
+        repo,
+        head: branch,
+        localRef: "HEAD",
+        base: opts.base,
+        title: opts.title,
+        body: opts.body,
+        strategy: opts.strategy,
+        ciTimeoutMs: opts.ciTimeoutMs,
+        dir: repoRoot,
+        command: "beckett finish",
+        timeoutAlso: " and nothing was deployed",
+        step,
+      });
+      pr = landed.pr;
+      merged = landed.merge;
+    } catch (err) {
+      if (err instanceof LandError) fail(`beckett finish: ${err.message}`);
+      throw err;
+    }
   }
 
   // ── the guarded redeploy ─────────────────────────────────────────────────────────────────
@@ -583,8 +674,12 @@ export async function runFinish(argv: string[]): Promise<void> {
     branch,
     base: opts.base,
     committed,
-    pr: { number: pr.number, url: pr.url },
-    merge: { state: merged, strategy: opts.strategy },
+    // A first push has no PR — the base branch did not exist, so there was nothing to open one
+    // against. Reporting `pr: null` is the honest shape; inventing one would be worse than none.
+    pr: pr ? { number: pr.number, url: pr.url } : null,
+    merge: merged === "first-push"
+      ? { state: merged, strategy: "first-push", note: `${opts.base} was created on ${repo} by this push` }
+      : { state: merged, strategy: opts.strategy },
     deploy: deploy.ran ? { ran: true, script, cwd: deployRoot, bump: opts.bump } : { ran: false, reason: deploy.reason },
     audit,
   });

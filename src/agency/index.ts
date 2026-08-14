@@ -796,6 +796,25 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
   }
 
   /**
+   * Whether `branch` exists on `repo` RIGHT NOW. The one signal that separates "this work is
+   * already merged" from "the base branch does not exist yet" — a brand-new repo with no commits
+   * has no `main`, and GitHub answers a PR against it with the same `No commits between …` text it
+   * uses for genuinely-landed work. `beckett finish` asks this BEFORE opening a PR so it can do the
+   * first push instead of reporting a confident wrong diagnosis (2026-08-14, `kowo-co/babble`).
+   *
+   * A 404 (no such branch, or an empty repo with no branches at all) is `false`; any other failure
+   * is also `false` — the caller treats "cannot confirm the base exists" the same as "it doesn't"
+   * only when it is about to CREATE it, which is a first push either way. FREE: a read.
+   */
+  async branchExists(repo: string, branch: string): Promise<boolean> {
+    await this.ensureCreds("read a branch", { repo });
+    const r = await this.runner(["gh", "api", `repos/${repo}/branches/${branch}`, "--jq", ".name"], {
+      env: this.ghEnv(),
+    });
+    return r.code === 0 && r.stdout.trim() === branch;
+  }
+
+  /**
    * Make a repo publicly visible (idempotent — a no-op if it's already public). Project repos are
    * public so the links Beckett hands out resolve; this self-heals repos an older code path left
    * private (the cause of the `<owner>/<slug>` 404s). Uses the REST `private=false` field, which
@@ -1184,14 +1203,22 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
     return /^(ADMIN|MAINTAIN|WRITE)$/i.test(r.stdout.trim());
   }
 
-  /** A repo's default branch (`main`/`master`/…) via the API; falls back to `main` if unknown. */
+  /**
+   * A repo's default branch (`main`/`master`/…) via the API; falls back to `main` if unknown.
+   *
+   * An EMPTY repo — one that exists with no commits — has NO default branch, and `gh -q` prints the
+   * literal string `null` for that (jq indexing a null object), exit code 0. Taken at face value
+   * that publishes a project's first commits to a branch called `null` instead of creating `main`
+   * (2026-08-14, `kowo-co/babble`). `null` means "there isn't one yet", which is exactly the case
+   * the `main` fallback exists for.
+   */
   private async defaultBranch(repo: string): Promise<string> {
     const r = await this.runner(
       ["gh", "repo", "view", repo, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"],
       { env: this.ghEnv() },
     );
     const name = r.code === 0 ? r.stdout.trim() : "";
-    return name || "main";
+    return name && name !== "null" ? name : "main";
   }
 
   /**
