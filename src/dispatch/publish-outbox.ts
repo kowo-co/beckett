@@ -89,9 +89,9 @@ export type BranchLandedState =
   /** (a) HEAD carries commits `main` does not yet have → genuinely needs publishing; push IS right. */
   | { kind: "ahead" }
   /** (b) Every local commit is ALREADY on `main` (patch-id/subject match) → pushing duplicates it. */
-  | { kind: "landed"; commit: string; subject: string }
+  | { kind: "landed"; commit: string; subject: string; mainRef?: string }
   /** (c) HEAD is behind `main` with nothing new → pushing would REVERT the work main already carries. */
-  | { kind: "superseded"; behind: number }
+  | { kind: "superseded"; behind: number; mainRef?: string }
   /** The comparison could not be made (no remote, offline) → fall back to the generic push advice. */
   | { kind: "unknown" };
 
@@ -103,11 +103,13 @@ export type BranchLandedState =
 export function classifyBranchLanding(raw: BranchVsMainRaw): BranchLandedState {
   if (!raw.compared) return { kind: "unknown" };
   if (raw.ahead > 0 && raw.aheadUnlanded > 0) return { kind: "ahead" };
-  if (raw.ahead > 0) return { kind: "landed", commit: raw.landedCommit ?? "", subject: raw.landedSubject ?? "" };
+  if (raw.ahead > 0) {
+    return { kind: "landed", commit: raw.landedCommit ?? "", subject: raw.landedSubject ?? "", mainRef: raw.mainRef };
+  }
   // ahead === 0: nothing of ours is missing from main.
-  if (raw.behind > 0) return { kind: "superseded", behind: raw.behind };
+  if (raw.behind > 0) return { kind: "superseded", behind: raw.behind, mainRef: raw.mainRef };
   // Identical to main — the work is literally on main.
-  return { kind: "landed", commit: raw.landedCommit ?? "", subject: raw.landedSubject ?? "" };
+  return { kind: "landed", commit: raw.landedCommit ?? "", subject: raw.landedSubject ?? "", mainRef: raw.mainRef };
 }
 
 /** First 12 chars of a sha for a human-readable reference; whole string if already short. */
@@ -132,20 +134,23 @@ function pushHandoff(ref: { runId: string; branch: string }): string {
 export function publishParkAdvice(state: BranchLandedState, ref: { runId: string; branch: string }): string {
   switch (state.kind) {
     case "landed": {
+      const trunk = state.mainRef || "origin/main";
       const named = state.commit ? ` as ${shortSha(state.commit)}` : "";
       const subject = state.subject ? ` ("${state.subject}")` : "";
       return (
-        `This branch's work is ALREADY on origin/main${named}${subject}, so pushing it would open a ` +
+        `This branch's work is ALREADY on ${trunk}${named}${subject}, so pushing it would open a ` +
         `DUPLICATE pull request of work that has already landed — do NOT push. Close the bookkeeping ` +
         `out with \`beckett task courier ${ref.runId} --pr-url <the PR that merged it>\`.`
       );
     }
-    case "superseded":
+    case "superseded": {
+      const trunk = state.mainRef || "origin/main";
       return (
-        `This branch is ${state.behind} commit(s) BEHIND origin/main and carries nothing origin/main ` +
+        `This branch is ${state.behind} commit(s) BEHIND ${trunk} and carries nothing ${trunk} ` +
         `does not already have, so publishing it would REVERT that work — do NOT push. Close the ` +
         `bookkeeping out with \`beckett task courier ${ref.runId}\`.`
       );
+    }
     case "ahead":
     case "unknown":
     default:

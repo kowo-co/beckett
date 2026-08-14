@@ -1050,17 +1050,25 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
    * below. `git rebase` refuses outright on a dirty tree ("cannot rebase: You have unstaged changes.
    * error: additionally, your index contains uncommitted changes."), and that is not a transient
    * fault — it fails identically on every attempt, so a run that hits it burns its retry ladder and
-   * parks without ever publishing (2026-08-14). The dirty state is our OWN doing: this is the run's
-   * private worktree, so loose changes are its own work that no stage got around to committing.
-   * Committing ships that work; stashing would silently drop it from the very push meant to deliver
-   * it, and {@link squashLocalCommits} then folds this commit into the run's single publish commit.
+   * parks without ever publishing (2026-08-14). The dirty state is our OWN doing: the run's private
+   * worktree holds only its own work, so loose changes are its own, that no stage got around to
+   * committing. Committing ships that work; stashing would silently drop it from the very push meant
+   * to deliver it, and {@link squashLocalCommits} then folds this commit into the run's single
+   * publish commit.
+   *
+   * ONLY in a run's own worktree ({@link isRunWorktree}), and that gate is the point rather than a
+   * formality: `sourceDir` falls back to the SHARED project checkout when a run carries no workspace
+   * (`run.workspace ?? resolveRepoRoot(run)`), and loose edits there are a human's in-progress work,
+   * not ours to commit and push. Undecidable ⇒ treated as not ours, so the worst case is the old
+   * behavior (the rebase reports the dirty tree) rather than shipping someone else's changes.
    *
    * Internal scaffolding is kept OUT of the index (`:(exclude)`) exactly as
    * {@link stripTrackedScaffolding} keeps it out of the push — leaving it untracked, which a rebase
    * does not mind. Best-effort throughout: a `git status` we can't read, or an add/commit that
-   * fails, leaves the tree exactly as it was and lets the rebase report the real problem.
+   * fails, leaves the working tree exactly as it was and lets the rebase report the real problem.
    */
   private async commitStrayWorkingTree(cwd: string, summary: string | undefined): Promise<void> {
+    if (!(await this.isRunWorktree(cwd))) return;
     const status = await this.runner(["git", "status", "--porcelain"], { cwd, env: this.gitEnv() });
     if (status.code !== 0 || status.stdout.trim() === "") return;
     const dirty = status.stdout.split(/\r?\n/).map((line) => line.slice(3).trim()).filter(Boolean);
@@ -1092,6 +1100,23 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
         stderr: commit.stderr.trim(),
       });
     }
+  }
+
+  /**
+   * Is `cwd` a checkout Beckett created for a run, rather than a checkout a human also works in?
+   * Run worktrees are made with `git worktree add` ({@link createWorktree}), so their `--git-dir` is
+   * `<repo>/.git/worktrees/<name>` while the shared project clone's is the common `<repo>/.git` —
+   * the one property that distinguishes them without pattern-matching a path. `--path-format` makes
+   * both answers absolute, so this never compares a relative `.git` against an absolute one.
+   * Anything unreadable answers false: only a checkout we can PROVE is ours may be auto-committed.
+   */
+  private async isRunWorktree(cwd: string): Promise<boolean> {
+    const gitDir = await this.runner(["git", "rev-parse", "--path-format=absolute", "--git-dir"], { cwd, env: this.gitEnv() });
+    const commonDir = await this.runner(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, env: this.gitEnv() });
+    if (gitDir.code !== 0 || commonDir.code !== 0) return false;
+    const own = gitDir.stdout.trim();
+    const common = commonDir.stdout.trim();
+    return own !== "" && common !== "" && own !== common;
   }
 
   /**

@@ -654,6 +654,11 @@ export interface BranchVsMainRaw {
   landedCommit?: string;
   /** HEAD's own subject line — names the work in the hand-off message, and finds its twin on main. */
   landedSubject?: string;
+  /**
+   * The ref the comparison was actually made against, named for the human reading the hand-off
+   * (`origin/main`, `origin/trunk`, …). Absent when nothing could be compared.
+   */
+  mainRef?: string;
 }
 
 /**
@@ -663,22 +668,32 @@ export interface BranchVsMainRaw {
  * publishing, (b) already landed on main under a squash sha, or (c) is behind and would revert work
  * if pushed — the three shapes that were all mis-advised as "just push it" on 2026-08-14.
  *
- * Fetches `main` fresh so the comparison is against the true remote tip, not a stale
- * `origin/main`. NEVER throws: any git failure (no remote, detached HEAD, offline) returns
+ * The trunk it measures against is the one the REMOTE calls default ({@link remoteDefaultBranch}),
+ * not the literal name `main`: a project whose default is `trunk`/`master` otherwise resolved no ref
+ * at all, fell through to "unknown", and got handed back the very generic "just push it" this exists
+ * to prevent — on exactly the already-landed branches where pushing is the wrong move.
+ *
+ * Fetches that branch fresh so the comparison is against the true remote tip, not a stale
+ * remote-tracking ref. NEVER throws: any git failure (no remote, detached HEAD, offline) returns
  * `compared: false` so the caller falls back to generic advice rather than a wrong diagnosis.
  */
 export async function readBranchVsMain(workspace: string, remote = "origin"): Promise<BranchVsMainRaw> {
   const unknown: BranchVsMainRaw = { compared: false, ahead: 0, behind: 0, aheadUnlanded: 0 };
   try {
-    // Prefer the freshly fetched remote tip; fall back to whatever local `main` ref exists so an
-    // offline box still gets a comparison instead of a wrong "just push it".
+    // Prefer the freshly fetched remote tip; fall back to whatever local ref exists so an offline
+    // box still gets a comparison instead of a wrong "just push it". `main` stays in the candidate
+    // list as the last resort for a repo whose remote can't name a default at all.
+    const trunk = (await remoteDefaultBranch(workspace, remote)) ?? "main";
     let mainRef: string | null = null;
-    if ((await runGit(["fetch", "--quiet", remote, "main"], workspace)).code === 0) {
+    let named: string | null = null;
+    if ((await runGit(["fetch", "--quiet", remote, trunk], workspace)).code === 0) {
       mainRef = "FETCH_HEAD";
+      named = `${remote}/${trunk}`;
     } else {
-      for (const cand of ["origin/main", "main"]) {
+      for (const cand of [`${remote}/${trunk}`, trunk, `${remote}/main`, "main"]) {
         if ((await runGit(["rev-parse", "--verify", "--quiet", `${cand}^{commit}`], workspace)).code === 0) {
           mainRef = cand;
+          named = cand.includes("/") ? cand : `${remote}/${cand}`;
           break;
         }
       }
@@ -720,7 +735,7 @@ export async function readBranchVsMain(workspace: string, remote = "origin"): Pr
         if (tip.code === 0 && tip.stdout.trim()) landedCommit = tip.stdout.trim();
       }
     }
-    return { compared: true, ahead, behind, aheadUnlanded, landedCommit, landedSubject };
+    return { compared: true, ahead, behind, aheadUnlanded, landedCommit, landedSubject, mainRef: named ?? undefined };
   } catch (err) {
     logger.warn("branch-vs-main comparison failed; publish hand-off falls back to generic advice", {
       workspace,

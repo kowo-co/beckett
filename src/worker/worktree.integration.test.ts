@@ -24,6 +24,7 @@ import {
   projectRemoteUrl,
   remoteDefaultBranch,
   resolveDefaultBaseRef,
+  readBranchVsMain,
   SCAFFOLDING_DIR,
 } from "./worktree.ts";
 
@@ -279,6 +280,27 @@ describe("worktree lifecycle (real git)", () => {
       expect((await run(["rev-parse", "HEAD"], ws)).stdout.trim()).toBe(trunkTip);
       expect(existsSync(join(ws, "sibling.txt"))).toBe(false); // never based on the sibling's branch
       expect((await run(["rev-parse", "--abbrev-ref", "HEAD"], ws)).stdout.trim()).toBe("beckett/run-mine");
+    }, 30_000);
+
+    test("the parked-publish comparison also measures against the default branch, not the literal `main`", async () => {
+      // The hand-off advice is only as good as the ref it compares to. Looking for `main` alone, this
+      // repo resolved NO ref, reported `compared: false`, and fell back to the blanket "push it by
+      // hand" — the exact wrong answer for a branch whose work is already on the default branch.
+      const project = await trunkProject();
+      const seed = join(root, "trunk-seed");
+      await run(["checkout", "-q", "-b", "beckett/run-mine"], project);
+
+      const level = await readBranchVsMain(project);
+      expect(level).toMatchObject({ compared: true, ahead: 0, behind: 0, mainRef: "origin/trunk" });
+
+      // Trunk moves on while the run sits parked; the branch now carries nothing trunk doesn't have.
+      writeFileSync(join(seed, "landed.txt"), "shipped meanwhile\n");
+      await run(["add", "-A"], seed);
+      await run(["commit", "-m", "shipped meanwhile"], seed);
+      await run(["push", "origin", "trunk"], seed);
+
+      const behind = await readBranchVsMain(project);
+      expect(behind).toMatchObject({ compared: true, ahead: 0, behind: 1, mainRef: "origin/trunk" });
     }, 30_000);
   });
 
