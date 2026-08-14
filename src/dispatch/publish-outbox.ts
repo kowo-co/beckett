@@ -8,6 +8,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { WorkItem } from "../run/work-item.ts";
+import type { BranchVsMainRaw } from "../worker/worktree.ts";
 import type { Logger } from "../types.ts";
 
 export const PUBLISH_RETRY_DELAYS_MS = [30_000, 2 * 60_000, 10 * 60_000] as const;
@@ -62,7 +63,94 @@ export function classifyPublishError(error: unknown): PublishFailureKind {
       message,
     )
   ) return "permanent";
+  // Structurally-deterministic failures a RETRY cannot possibly clear: the publish rebase hit a
+  // conflict it can't auto-resolve, or ran against a dirty tree. Retrying these four times fails
+  // four identical times and then goes quiet for a day (2026-08-14, `training-feed-403`: the
+  // publish tripped on "You have unstaged changes / your index contains uncommitted changes" and
+  // burned the whole ladder on a state no retry changes). The retry ladder is for TRANSIENT faults
+  // (a GitHub hiccup, a dropped connection) — a failure whose cause is a property of the local tree
+  // or the branch itself belongs to a human immediately, on attempt 1, with the real reason.
+  if (
+    /needs a human|can't auto-rebase|cannot rebase|unstaged changes|uncommitted changes|please commit or stash|index contains uncommitted|still conflicts/i.test(
+      message,
+    )
+  ) return "permanent";
   return "transient";
+}
+
+/**
+ * The three shapes a run's branch can be in against `origin/main` when a publish gives up — the
+ * decision that determines what the hand-off message must tell a human to DO. Computed from
+ * {@link BranchVsMainRaw} (real `git` measurements) so the advice is never a guess. Every stall
+ * cleaned up by hand on 2026-08-14 was mis-advised as case (a) ("just push it") when it was really
+ * (b) or (c), and following that advice would have opened a duplicate PR or reverted shipped work.
+ */
+export type BranchLandedState =
+  /** (a) HEAD carries commits `main` does not yet have → genuinely needs publishing; push IS right. */
+  | { kind: "ahead" }
+  /** (b) Every local commit is ALREADY on `main` (patch-id/subject match) → pushing duplicates it. */
+  | { kind: "landed"; commit: string; subject: string }
+  /** (c) HEAD is behind `main` with nothing new → pushing would REVERT the work main already carries. */
+  | { kind: "superseded"; behind: number }
+  /** The comparison could not be made (no remote, offline) → fall back to the generic push advice. */
+  | { kind: "unknown" };
+
+/**
+ * Interpret the raw HEAD-vs-`main` measurements into one of the three named shapes. Pure and
+ * table-tested — the whole point is that "already landed" is decided by patch-id (`git cherry`),
+ * never by re-running git in production and hoping.
+ */
+export function classifyBranchLanding(raw: BranchVsMainRaw): BranchLandedState {
+  if (!raw.compared) return { kind: "unknown" };
+  if (raw.ahead > 0 && raw.aheadUnlanded > 0) return { kind: "ahead" };
+  if (raw.ahead > 0) return { kind: "landed", commit: raw.landedCommit ?? "", subject: raw.landedSubject ?? "" };
+  // ahead === 0: nothing of ours is missing from main.
+  if (raw.behind > 0) return { kind: "superseded", behind: raw.behind };
+  // Identical to main — the work is literally on main.
+  return { kind: "landed", commit: raw.landedCommit ?? "", subject: raw.landedSubject ?? "" };
+}
+
+/** First 12 chars of a sha for a human-readable reference; whole string if already short. */
+function shortSha(sha: string): string {
+  return sha.length > 12 ? sha.slice(0, 12) : sha;
+}
+
+/** The generic hand-off used for case (a) and when the branch state can't be determined. */
+function pushHandoff(ref: { runId: string; branch: string }): string {
+  return (
+    `Publish it by hand (\`beckett gh push --repo <owner/name> --branch ${ref.branch}\`), then close it ` +
+    `out with \`beckett task courier ${ref.runId}\`.`
+  );
+}
+
+/**
+ * The copy-pasteable instruction a parked publish leaves for a human, chosen from the branch's real
+ * state against `origin/main`. This is BUG 2's fix: the parked error used to ALWAYS say "push it",
+ * which on 2026-08-14 would have opened a duplicate PR of already-landed work (b) or reverted a
+ * shipped feature (c). Each case names why, and gives the command that is actually safe.
+ */
+export function publishParkAdvice(state: BranchLandedState, ref: { runId: string; branch: string }): string {
+  switch (state.kind) {
+    case "landed": {
+      const named = state.commit ? ` as ${shortSha(state.commit)}` : "";
+      const subject = state.subject ? ` ("${state.subject}")` : "";
+      return (
+        `This branch's work is ALREADY on origin/main${named}${subject}, so pushing it would open a ` +
+        `DUPLICATE pull request of work that has already landed — do NOT push. Close the bookkeeping ` +
+        `out with \`beckett task courier ${ref.runId} --pr-url <the PR that merged it>\`.`
+      );
+    }
+    case "superseded":
+      return (
+        `This branch is ${state.behind} commit(s) BEHIND origin/main and carries nothing origin/main ` +
+        `does not already have, so publishing it would REVERT that work — do NOT push. Close the ` +
+        `bookkeeping out with \`beckett task courier ${ref.runId}\`.`
+      );
+    case "ahead":
+    case "unknown":
+    default:
+      return pushHandoff(ref);
+  }
 }
 
 /** Why a publish attempt landed where it did: a matched failure class, or the ladder running out. */
@@ -144,8 +232,13 @@ export function publishFixHint(error: string): string | null {
 export function publishFailureReason(
   plan: PublishRetryPlan,
   attempt: number,
-  /** The run this is about, so the hand-off commands are copy-pasteable rather than placeholders. */
-  ref?: { runId: string; branch: string },
+  /**
+   * The hand-off instruction to append when the run PARKS — computed by the caller from the
+   * branch's real state against `origin/main` ({@link publishParkAdvice}). Omitted → the generic
+   * "push it by hand" fallback, so this stays useful standalone (and for callers with no branch to
+   * check). Ignored while the plan is still retrying: a scheduled retry needs no hand-off yet.
+   */
+  advice?: string,
 ): string {
   const head =
     plan.action === "park"
@@ -154,12 +247,9 @@ export function publishFailureReason(
   const cause = plan.error.trim().replace(/[.\s]+$/, "");
   const hint = publishFixHint(plan.error);
   const detail = hint ? `${cause} — ${hint}` : `${cause}.`;
-  const courier =
-    plan.action === "park"
-      ? ` Publish it by hand (\`beckett gh push --repo <owner/name> --branch ${ref?.branch ?? "<branch>"}\`), ` +
-        `then close it out with \`beckett task courier ${ref?.runId ?? "<run-id>"}\`.`
-      : "";
-  return `${head}: ${detail}${courier}`;
+  if (plan.action !== "park") return `${head}: ${detail}`;
+  const handoff = advice?.trim() || pushHandoff({ runId: "<run-id>", branch: "<branch>" });
+  return `${head}: ${detail} ${handoff}`;
 }
 
 /** "30s" / "2m" / "10m" — the ladder's own delays are round numbers, so this stays simple. */

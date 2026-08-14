@@ -66,6 +66,7 @@ import {
   fetchRemote,
   hasDiffSince,
   headSha,
+  readBranchVsMain,
   readDiff,
   removeWorktree,
 } from "../worker/worktree.ts";
@@ -80,9 +81,11 @@ import { DispatchEventBus, type DispatchEventBusOptions, type DispatchOutcome } 
 import {
   PublishOutbox,
   PUBLISH_RETRY_DELAYS_MS,
+  classifyBranchLanding,
   planPublishRetry,
   publishFailureReason,
   publishFixHint,
+  publishParkAdvice,
   type PublishOperation,
   type PublishRetryPlan,
 } from "../dispatch/publish-outbox.ts";
@@ -109,6 +112,7 @@ export interface RunGitOps {
   createWorktree: typeof createWorktree;
   removeWorktree: typeof removeWorktree;
   fetchRemote: typeof fetchRemote;
+  readBranchVsMain: typeof readBranchVsMain;
 }
 
 /**
@@ -379,6 +383,7 @@ export class RunSupervisor {
       createWorktree,
       removeWorktree,
       fetchRemote,
+      readBranchVsMain,
       ...deps.gitOps,
     };
     this.stages = deps.stages ?? stageRegistry;
