@@ -15,12 +15,14 @@ Upload a file only via `await attachFile('input[type=file]', path)` (or a Locato
 only upload path. Two kinds of path work: a screenshot this run took (the paths a screenshot
 result lists under `attachments`), and pre-existing media under the approved roots —
 `~/.beckett/images` by default, plus anything `[quick].browser_attach_roots` in `config.toml`
-adds (`/` is an explicit broad-access escape hatch). Spell the path out as a literal string
-somewhere in the snippet (assigning it to a variable first is fine): the host validates every
-path your code names before the snippet runs, so a path assembled at runtime is never approved.
-Uploads are realpath-contained, a bounded regular file, and extension-validated
-(PNG/JPEG/GIF/WebP/MP4) — never assume arbitrary media exists. A refusal tells you the reason
-and the approved roots; read it rather than asking a human to widen configuration.
+adds (`/` is an explicit broad-access escape hatch). Media already sitting under an approved root
+resolves however you spell the path — literal, interpolated, or assembled entirely at runtime —
+because the host pre-stages the root's own reachable files, not just the paths your snippet
+happens to spell out literally. A path the host has never seen still fails: a file this script
+just wrote, or anything outside the roots. Uploads are realpath-contained, a bounded regular
+file, and extension-validated (PNG/JPEG/GIF/WebP/MP4) — never assume arbitrary media exists. A
+refusal tells you the reason, the approved roots, and up to ten paths that already resolved;
+read it rather than asking a human to widen configuration.
 
 When the task names a keychain entry, its credentials preload as a read-only `secrets` object in
 every script (task text lists the exact fields, e.g. `secrets.email`, `secrets.password`;
