@@ -303,7 +303,10 @@ export class RunStore {
     return structuredClone(filtered).sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
   }
 
-  /** Every run in a non-terminal state (queued/implementing/reviewing/publishing/parked). */
+  /**
+   * Every run in a non-terminal state (queued/implementing/reviewing/publishing/awaiting_input/
+   * unverified/parked).
+   */
   live(): Run[] {
     return this.list().filter((run) => LIVE_STATES.has(run.state));
   }
