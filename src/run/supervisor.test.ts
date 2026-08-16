@@ -205,13 +205,14 @@ function makeRun(over: Partial<Run> = {}): Run {
     workspace: over.workspace ?? null,
     branch: over.branch ?? `beckett/run-${slug}`,
     baseSha: over.baseSha ?? null,
-    sessionIds: {},
+    sessionIds: over.sessionIds ?? {},
     sessionName: over.sessionName ?? `beckett-run-${slug}`,
     reviewCycles: over.reviewCycles ?? 0,
     continuations: over.continuations ?? 0,
     prUrl: null,
-    error: null,
+    error: over.error ?? null,
     published: over.published === undefined ? null : over.published,
+    blocker: over.blocker === undefined ? null : over.blocker,
   };
 }
 
@@ -1277,6 +1278,117 @@ describe("continuation loop (overhaul B6)", () => {
     await settle();
     expect(store.get(run.id)!.state).toBe("reviewing");
     expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(1);
+  });
+});
+
+describe("typed blockers (overhaul B5)", () => {
+  test("every park records a typed blocker with actor human", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("error", "harness crashed");
+    await settle();
+    const parked = store.get(run.id)!;
+    expect(parked.state).toBe("parked");
+    expect(parked.blocker?.actor).toBe("human");
+    expect(parked.blocker?.class).toBe("transient");
+    expect(parked.error).toContain(parked.blocker!.remedy);
+  });
+
+  test("resume clears the blocker and re-staffs the stage that was parked", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("error", "harness crashed");
+    await settle();
+    expect(store.get(run.id)!.state).toBe("parked");
+
+    const outcome = await supervisor.resume(run.id);
+    await settle();
+    expect(outcome).toBe("resumed");
+    const resumed = store.get(run.id)!;
+    expect(resumed.blocker).toBeNull();
+    expect(resumed.state).toBe("implementing");
+    expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(2);
+  });
+
+  test("resume on a done run is not-parked and spawns nothing", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(store, makeRun({ state: "done" }));
+    const before = spawnCalls.length;
+    const outcome = await supervisor.resume(run.id);
+    expect(outcome).toBe("not-parked");
+    expect(spawnCalls.length).toBe(before);
+  });
+
+  test("resume with a note delivers it as steering to the new worker", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("error", "harness crashed");
+    await settle();
+
+    const outcome = await supervisor.resume(run.id, { note: "use the backup credential" });
+    await settle();
+    expect(outcome).toBe("resumed");
+    const rework = spawnCalls[spawnCalls.length - 1]!;
+    expect(rework.stage).toBe("implement");
+    expect(rework.steering?.join("\n")).toContain("use the backup credential");
+  });
+
+  test("a run parked from review resumes into review, not implement", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(
+      store,
+      makeRun({
+        state: "parked",
+        sessionIds: { implement: "sess-impl", review: "sess-review" },
+        error: "the reviewer died",
+        blocker: {
+          class: "transient",
+          actor: "human",
+          reversible: true,
+          remedy: "`beckett task resume …`",
+          detail: "the reviewer died",
+          defaultAnswer: null,
+          at: "2026-08-10T00:00:00.000Z",
+        },
+      }),
+    );
+    const outcome = await supervisor.resume(run.id);
+    await settle();
+    expect(outcome).toBe("resumed");
+    const resumed = store.get(run.id)!;
+    expect(resumed.state).toBe("reviewing");
+    expect(spawnCalls[spawnCalls.length - 1]!.stage).toBe("review");
+  });
+
+  test("resuming a publish-parked run refuses and names courier", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(
+      store,
+      makeRun({
+        state: "parked",
+        error: "could not be published",
+        blocker: {
+          class: "admin-permission",
+          actor: "human",
+          reversible: true,
+          remedy: "beckett task courier",
+          detail: "could not be published",
+          defaultAnswer: null,
+          at: "2026-08-10T00:00:00.000Z",
+        },
+      }),
+    );
+    const before = spawnCalls.length;
+    const outcome = await supervisor.resume(run.id);
+    expect(outcome).toBe("publish-blocked");
+    expect(spawnCalls.length).toBe(before);
+    expect(store.get(run.id)!.state).toBe("parked");
   });
 });
 

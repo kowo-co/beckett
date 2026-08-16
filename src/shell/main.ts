@@ -436,6 +436,25 @@ async function boot(): Promise<BootedSystem> {
           return { ok: true, data: { runId, delivery } };
         },
       },
+      {
+        name: "run.resume",
+        summary: "clear a parked run's blocker and re-staff the stage it was held from",
+        handle: async (req) => {
+          const runId = typeof req.args.runId === "string" ? req.args.runId.trim() : "";
+          if (!runId) return { ok: false, error: "run.resume needs a runId" };
+          const note = typeof req.args.note === "string" && req.args.note.trim() ? req.args.note.trim() : undefined;
+          const outcome = await runSupervisor.resume(runId, { note });
+          if (outcome === "unknown") return { ok: false, error: `no such run: ${runId}` };
+          if (outcome === "not-parked") return { ok: false, error: `run ${runId} is not parked — nothing to resume` };
+          if (outcome === "publish-blocked") {
+            return {
+              ok: false,
+              error: `run ${runId} parked mid-publish — use \`beckett task courier ${runId}\` instead of resume`,
+            };
+          }
+          return { ok: true, data: { runId, resumed: true } };
+        },
+      },
     ],
   });
 

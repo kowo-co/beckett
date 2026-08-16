@@ -6032,9 +6032,12 @@ export class Concierge {
       case "failed":
         return this.runUpdateTurn(run, `The run failed.${run.error ? `\n\n${run.error}` : ""}`);
       case "parked":
+        // `run.error` already carries the typed blocker's rendered remedy (`hold()` writes
+        // `renderBlocker(blocker)` there) — nothing more to append here (B5).
         return this.runUpdateTurn(
           run,
-          `This run is parked for a human — nothing will re-staff it automatically.` +
+          `This run is parked for a human — nothing will re-staff it until someone clears this — ` +
+            `\`beckett task resume ${run.id}\` when it is.` +
             `${run.error ? `\n\n${run.error}` : ""}`,
         );
       case "cancelled":

@@ -14,6 +14,7 @@
 
 export type { Casting } from "./cast.ts";
 import type { Casting } from "./cast.ts";
+import type { DoneBlockerClass } from "../types.ts";
 
 /** The two worker stages a run drives a Claude session through. */
 export type RunStage = "implement" | "review";
@@ -30,8 +31,10 @@ export type RunState =
   | "parked";
 
 /**
- * States the supervisor must NOT act on: the three genuinely terminal ones plus `parked`, which is
- * a run deliberately held for a human — re-staffing it is exactly what parking exists to stop.
+ * States the supervisor must NOT auto-restaff: the three genuinely terminal ones plus `parked`.
+ * `parked` is no longer a one-way door — `beckett task resume` and `beckett task steer` (B5) both
+ * exit it — but the WATCHDOG must never re-staff one on its own, which is exactly what belonging
+ * to this set stops.
  *
  * Deliberately WIDER than `RunStore.live()`'s complement: the store keeps parked runs in `live()`
  * so `beckett status` and the run dashboard still show a held run (it has not left the board). The
@@ -39,6 +42,39 @@ export type RunState =
  * whether a parked run gets a worker.
  */
 export const RUN_TERMINAL: ReadonlySet<RunState> = new Set<RunState>(["done", "failed", "cancelled", "parked"]);
+
+/** Truly finished — nothing, human or machine, will ever move these. */
+export const RUN_FINAL: ReadonlySet<RunState> = new Set<RunState>(["done", "failed", "cancelled"]);
+
+// ── B5: the typed blocker ───────────────────────────────────────────────────────────────────
+
+/**
+ * Mirrors `../types.ts#DoneBlockerClass` verbatim (that file cannot import from `src/run/`, so
+ * this one re-derives from it instead of the other way round).
+ */
+export type BlockerClass = DoneBlockerClass;
+
+/** Who can clear this. ONLY `"human"` may stop a run — see `./blocker.ts`'s actor table. */
+export type BlockerActor = "human" | "supervisor";
+
+/**
+ * Why a run stopped, typed. The `class` decides the `actor` (`./blocker.ts`) — a worker's own
+ * done-signal names only a class, never an actor, so it cannot talk the run into stopping.
+ */
+export interface Blocker {
+  class: BlockerClass;
+  actor: BlockerActor;
+  /** Can the remedy be undone? Informational; drives concierge phrasing, never control flow. */
+  reversible: boolean;
+  /** One line, imperative: what clears this. Rendered to the channel verbatim. */
+  remedy: string;
+  /** The long form — what used to be the whole free-text park reason. */
+  detail: string;
+  /** For class "question": what fires if nobody answers before the timeout. */
+  defaultAnswer: string | null;
+  /** ISO. */
+  at: string;
+}
 
 /**
  * What the supervisor tells the rest of the daemon about a run's lifecycle. Deliberately ONE kind:
@@ -112,4 +148,6 @@ export interface Run {
   error: string | null;
   /** How a `done` run got published — null until it does (see {@link PublishRecord}). */
   published: PublishRecord | null;
+  /** Non-null iff `state === "parked"` (B5). The typed reason a human is holding this run. */
+  blocker: Blocker | null;
 }

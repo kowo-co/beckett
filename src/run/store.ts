@@ -18,7 +18,7 @@ import { dirname } from "node:path";
 import { z } from "zod";
 import { log } from "../log.ts";
 import type { Logger } from "../types.ts";
-import type { Run, RunState } from "./types.ts";
+import type { BlockerClass, Run, RunState } from "./types.ts";
 
 const LOCK_STALE_MS = 30_000;
 const LOCK_ATTEMPTS = 200;
@@ -60,6 +60,28 @@ const HarnessSpecSchema = z.object({
 // stage name; a record schema mirrors that shape without hardcoding the stage set here.
 const CastingSchema = z.record(z.string(), HarnessSpecSchema.optional());
 
+// Mirrors `./types.ts#BlockerClass` verbatim — kept as a literal list here (not derived) because
+// zod enums need the literal tuple, same idiom as `HarnessSpecSchema.effort` above.
+const BLOCKER_CLASSES = [
+  "credential",
+  "admin-permission",
+  "product-decision",
+  "money",
+  "question",
+  "transient",
+  "continuation",
+] as const satisfies readonly BlockerClass[];
+
+const BlockerSchema = z.object({
+  class: z.enum(BLOCKER_CLASSES),
+  actor: z.enum(["human", "supervisor"]),
+  reversible: z.boolean(),
+  remedy: z.string(),
+  detail: z.string(),
+  defaultAnswer: z.string().nullable(),
+  at: z.string(),
+});
+
 const RunSchema = z.object({
   id: z.string().min(1),
   slug: z.string().min(1),
@@ -92,6 +114,9 @@ const RunSchema = z.object({
     .object({ via: z.enum(["outbox", "courier"]), prUrl: z.string().nullable() })
     .nullable()
     .default(null),
+  // Nullable + defaulted so an OLD persisted row (minted before blockers existed) still parses —
+  // and so a run with no blocker (every non-parked state) round-trips without one.
+  blocker: BlockerSchema.nullable().default(null),
 });
 
 const LedgerSchema = z.object({
@@ -182,6 +207,7 @@ export class RunStore {
         prUrl: null,
         error: null,
         published: null,
+        blocker: null,
       };
       ledger.runs.push(run);
       return structuredClone(run);

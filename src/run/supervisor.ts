@@ -96,8 +96,9 @@ import { specGateSpec } from "../hooks/registry.ts";
 import { parseSpecChecklist, renderSpecScaffold, specRunId, SPEC_FILE_REL, type ParsedSpecChecklist } from "./spec-file.ts";
 import { runAsWorkItem } from "./adapter.ts";
 import type { RunStore } from "./store.ts";
-import type { Run, RunStage, RunStateChange } from "./types.ts";
-import { RUN_TERMINAL } from "./types.ts";
+import type { Blocker, Run, RunStage, RunStateChange } from "./types.ts";
+import { RUN_FINAL, RUN_TERMINAL } from "./types.ts";
+import { blockerFromDoneSignal, makeBlocker, renderBlocker, stopsTheRun } from "./blocker.ts";
 
 // =======================================================================================
 // Collaborators
@@ -453,6 +454,11 @@ export class RunSupervisor {
       const runId = typeof args.runId === "string" ? args.runId : "";
       const reason = typeof args.reason === "string" && args.reason.trim() ? args.reason.trim() : undefined;
       if (runId) await this.cancel(runId, reason);
+    });
+    this.bus?.on("run.resume", async (args) => {
+      const runId = typeof args.runId === "string" ? args.runId : "";
+      const note = typeof args.note === "string" && args.note.trim() ? args.note.trim() : undefined;
+      if (runId) await this.resume(runId, { note });
     });
     await this.recoverFromCrash();
     // BEFORE the boot scan below, so a run whose stage this daemon owes is back in a staffable
@@ -843,10 +849,13 @@ export class RunSupervisor {
     const interrupted = this.restartInterrupted.get(run.id);
     if (interrupted === stage && !resumeSessionId) {
       this.restartInterrupted.delete(run.id);
-      await this.park(
+      await this.hold(
         current,
-        `a ${stage} worker was mid-run when the daemon restarted and no harness session survived to ` +
-          "resume from — parked rather than silently restarting the in-flight work from scratch",
+        this.transientBlocker(
+          current,
+          `a ${stage} worker was mid-run when the daemon restarted and no harness session survived to ` +
+            "resume from — parked rather than silently restarting the in-flight work from scratch",
+        ),
       );
       return;
     }
@@ -1086,14 +1095,14 @@ export class RunSupervisor {
     if (status !== "success") {
       await this.commitWip(run, handle);
       this.noteOwedResume(run, "implement", handle);
-      await this.park(run, this.workerDeathReason("implement", handle));
+      await this.hold(run, this.transientBlocker(run, this.workerDeathReason("implement", handle)));
       return;
     }
     const signal = parseDoneSignal(handle.result?.structured);
     if (signal && !signal.done) {
       await this.commitWip(run, handle);
       if (signal.blocker) {
-        await this.park(run, `${signal.blocker.detail}\n\n${summary}`);
+        await this.hold(run, blockerFromDoneSignal(signal.blocker, () => new Date(this.now())));
         return;
       }
       await this.continueImplement(run, summary);
@@ -1127,9 +1136,13 @@ export class RunSupervisor {
     await this.patchRun(run.id, { continuations: n, error: null });
     if (n >= cap) {
       const parked = this.store.get(run.id) ?? run;
-      await this.park(
+      await this.hold(
         parked,
-        `the implement worker ran out of turn — continuation cap ${n}/${cap} reached.\n\n${summary}`,
+        this.productDecisionBlocker(
+          parked,
+          `the implement worker ran out of turn — continuation cap ${n}/${cap} reached.\n\n${summary}`,
+          `read the summary and either continue by hand or \`beckett task resume ${parked.id} --note '…'\``,
+        ),
       );
       return;
     }
@@ -1167,12 +1180,19 @@ export class RunSupervisor {
     // (#247: those two used to share a branch, and the dead one quoted the session's text).
     if (status !== "success") {
       this.noteOwedResume(run, "review", handle);
-      await this.park(run, this.workerDeathReason("review", handle));
+      await this.hold(run, this.transientBlocker(run, this.workerDeathReason("review", handle)));
       return;
     }
     const signal = parseDoneSignal(handle.result?.structured);
     if (!signal) {
-      await this.park(run, `the reviewer finished without a schema-valid structured verdict.\n\n${summary}`);
+      await this.hold(
+        run,
+        this.transientBlocker(
+          run,
+          `the reviewer finished without a schema-valid structured verdict.\n\n${summary}`,
+          `\`beckett task resume ${run.id}\` to re-run review`,
+        ),
+      );
       return;
     }
     if (signal.done) {
@@ -1187,10 +1207,14 @@ export class RunSupervisor {
     this.trace(run, "review:verdict", "bounced", `review requested rework (cycle ${cycles}/${cap})`);
     if (cycles >= cap) {
       const parked = this.store.get(run.id) ?? run;
-      await this.park(
+      await this.hold(
         parked,
-        `review found issues, and this is rework cycle ${cycles}/${cap} — stopping automatic rework ` +
-          `and leaving it for a human.\n\n${summary}`,
+        this.productDecisionBlocker(
+          parked,
+          `review found issues, and this is rework cycle ${cycles}/${cap} — stopping automatic rework ` +
+            `and leaving it for a human.\n\n${summary}`,
+          `read the review notes and either fix by hand or \`beckett task resume ${parked.id} --note '…'\``,
+        ),
       );
       return;
     }
@@ -1252,10 +1276,13 @@ export class RunSupervisor {
       // the branch-aware hand-off advice (BUG 2).
       const hint = publishFixHint(outcome.error);
       const advice = await this.publishHandoffAdvice(publishing);
-      await this.park(
+      await this.hold(
         publishing,
-        `the work is complete but could not be published: ${outcome.error.trim().replace(/[.\s]+$/, "")}` +
-          `${hint ? ` — ${hint}` : "."} ${advice}`,
+        this.adminPermissionBlocker(
+          publishing,
+          `the work is complete but could not be published: ${outcome.error.trim().replace(/[.\s]+$/, "")}` +
+            `${hint ? ` — ${hint}` : "."} ${advice}`,
+        ),
       );
       return;
     }
@@ -1285,7 +1312,7 @@ export class RunSupervisor {
    * `Number.MAX_SAFE_INTEGER` and will never run again, so leaving the run `publishing` was a state
    * that claimed work was in progress when nothing was. `parked` is the held-for-a-human state the
    * rest of the supervisor already understands — it still shows on the board, `beckett task courier`
-   * still accepts it, and {@link park} emits the `held` event that reaches the run's channel.
+   * still accepts it, and {@link hold} emits the `held` event that reaches the run's channel.
    */
   private async recordPublishFailure(run: Run, plan: PublishRetryPlan, attempt: number): Promise<void> {
     if (plan.action === "park") {
@@ -1293,7 +1320,7 @@ export class RunSupervisor {
       // is what makes the hand-off advice correct instead of the blanket "just push it" that would
       // have duplicated or reverted shipped work on every 2026-08-14 stall (BUG 2).
       const advice = await this.publishHandoffAdvice(run);
-      await this.park(run, publishFailureReason(plan, attempt, advice));
+      await this.hold(run, this.adminPermissionBlocker(run, publishFailureReason(plan, attempt, advice)));
       return;
     }
     await this.patchRun(run.id, { error: publishFailureReason(plan, attempt) });
@@ -1459,10 +1486,13 @@ export class RunSupervisor {
           ? `The durable publish row gave up after attempt ${row.attempt} and was never going to retry`
           : "No publish error was ever recorded, so the attempt never returned at all";
       const advice = await this.publishHandoffAdvice(run);
-      await this.park(
+      await this.hold(
         run,
-        `the publish step never completed: this run sat in \`publishing\` for ${minutes} minute(s) with no ` +
-          `attempt scheduled to move it. ${last}. ${advice}`,
+        this.adminPermissionBlocker(
+          run,
+          `the publish step never completed: this run sat in \`publishing\` for ${minutes} minute(s) with no ` +
+            `attempt scheduled to move it. ${last}. ${advice}`,
+        ),
       );
       parked.push(run.id);
     }
@@ -1591,6 +1621,54 @@ export class RunSupervisor {
     await this.patchRun(runId, { state: "cancelled", error: reason });
     this.pump();
     return "cancelled";
+  }
+
+  // ── resuming a held run ──────────────────────────────────────────────────────────────────
+
+  /**
+   * The last stage this run had a live worker in, derived from `sessionIds` rather than persisted
+   * separately on the {@link Blocker} — a run that dies before ever spawning a session has nothing
+   * to derive from, so `"implement"` is the honest default (a run's first stage).
+   */
+  private lastStageOf(run: Run): RunStage {
+    const stages = Object.keys(run.sessionIds) as RunStage[];
+    return stages.length ? stages[stages.length - 1]! : "implement";
+  }
+
+  /**
+   * Clear a `parked` run's blocker and re-staff the stage it was held from — `beckett task resume`
+   * (B5) and a `beckett task steer` on a parked run (B5's other exit). Human-initiated ONLY:
+   * nothing in the supervisor itself calls this, so there is no path for a resume loop that does
+   * not run through a person typing the command.
+   *
+   * A run parked mid-publish (`blocker.class === "admin-permission"` from one of the three publish
+   * park sites) has no `implement`/`review` stage to re-spawn into — the outbox already gave the
+   * work up, and re-staffing here would silently duplicate whatever a human published by hand.
+   * That case is `"publish-blocked"`: the caller (the CLI) names `beckett task courier` instead.
+   */
+  async resume(
+    runId: string,
+    opts: { note?: string } = {},
+  ): Promise<"resumed" | "unknown" | "not-parked" | "publish-blocked"> {
+    const run = this.store.get(runId);
+    if (!run) {
+      this.logger.warn("run.resume for an unknown run", { runId });
+      return "unknown";
+    }
+    if (run.state !== "parked") return "not-parked";
+    if (run.blocker?.class === "admin-permission") return "publish-blocked";
+
+    const stage = this.lastStageOf(run);
+    this.trace(run, "resume", "started", opts.note ? `resumed with a note: ${opts.note}` : "resumed");
+    if (opts.note && opts.note.trim()) this.bufferSteer(run.id, opts.note.trim());
+    await this.patchRun(run.id, {
+      state: stage === "implement" ? "implementing" : "reviewing",
+      error: null,
+      blocker: null,
+    });
+    const fresh = this.store.get(run.id);
+    if (fresh) this.spawnGuarded(fresh, stage);
+    return "resumed";
   }
 
   /**
@@ -1801,9 +1879,12 @@ export class RunSupervisor {
         } else {
           this.trace(run, "watchdog", "held", "re-staff did not take — parked for a human");
           this.forgetWedgeClock(run.id);
-          await this.park(
+          await this.hold(
             run,
-            "a worker for this run was never established, and an automatic re-staff did not take.",
+            this.transientBlocker(
+              run,
+              "a worker for this run was never established, and an automatic re-staff did not take.",
+            ),
           );
           parked.push(run.id);
         }
@@ -2077,11 +2158,62 @@ export class RunSupervisor {
     this.logger.warn("run spawn failed — leaving it to the staffing watchdog", { run: run.id, reason });
   }
 
-  /** Park a run for a human: terminal-ish state, the reason recorded, one `held` event emitted. */
-  private async park(run: Run, reason: string): Promise<void> {
-    await this.patchRun(run.id, { state: "parked", error: reason });
+  /**
+   * Hold a run for a human: terminal-ish state, the typed {@link Blocker} recorded, one `held`
+   * event emitted. Every call site constructs the `Blocker` itself — the CLASS decides who can
+   * clear it (`./blocker.ts`'s actor table), never the caller. A blocker minted with a
+   * supervisor-only class reaching here is a bug in whoever built it: log it loudly rather than
+   * silently trusting a run to wedge forever.
+   */
+  private async hold(run: Run, blocker: Blocker): Promise<void> {
+    if (!stopsTheRun(blocker)) {
+      this.logger.error("a supervisor-actor blocker reached hold() — that is a missing transition, not a park", {
+        run: run.id,
+        class: blocker.class,
+      });
+    }
+    const reason = renderBlocker(blocker);
+    await this.patchRun(run.id, { state: "parked", error: reason, blocker });
     this.trace(run, "park", "held", reason);
-    this.logger.warn("run parked for a human", { run: run.id, reason });
+    this.logger.warn("run parked for a human", { run: run.id, reason, class: blocker.class });
+  }
+
+  /** `class: "transient"` blocker naming `beckett task resume <id>` as the default remedy. */
+  private transientBlocker(run: Run, detail: string, remedy?: string): Blocker {
+    return makeBlocker(
+      {
+        class: "transient",
+        actor: "human",
+        reversible: true,
+        remedy: remedy ?? `\`beckett task resume ${run.id}\``,
+        detail,
+        defaultAnswer: null,
+      },
+      () => new Date(this.now()),
+    );
+  }
+
+  /** `class: "admin-permission"` blocker — a publish stopped short of something only a human can grant. */
+  private adminPermissionBlocker(run: Run, detail: string): Blocker {
+    return makeBlocker(
+      {
+        class: "admin-permission",
+        actor: "human",
+        reversible: true,
+        remedy: `\`beckett task courier ${run.id}\` once it is published by hand, or resolve the permission and \`beckett task resume ${run.id}\``,
+        detail,
+        defaultAnswer: null,
+      },
+      () => new Date(this.now()),
+    );
+  }
+
+  /** `class: "product-decision"` blocker — a judgement call only the owner can make. */
+  private productDecisionBlocker(run: Run, detail: string, remedy: string): Blocker {
+    return makeBlocker(
+      { class: "product-decision", actor: "human", reversible: true, remedy, detail, defaultAnswer: null },
+      () => new Date(this.now()),
+    );
   }
 
   private async commitWip(run: Run, handle: WorkerHandle): Promise<string | null> {
