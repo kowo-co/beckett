@@ -217,6 +217,7 @@ function makeRun(over: Partial<Run> = {}): Run {
     error: over.error ?? null,
     published: over.published === undefined ? null : over.published,
     blocker: over.blocker === undefined ? null : over.blocker,
+    question: over.question === undefined ? null : over.question,
   };
 }
 
@@ -1701,6 +1702,192 @@ describe("death classification (overhaul B7)", () => {
     await supervisor.checkpointLiveRuns();
 
     expect(created[0]!.nudges).toHaveLength(0);
+  });
+});
+
+describe("elicitation (overhaul B8)", () => {
+  test("a question blocker puts the run in awaiting_input with the question stored, not parked", async () => {
+    const { supervisor, store } = newSupervisor({
+      config: cfg({ runs: { max_live: 3, review_cycles_max: 2, budget_usd_per_run: 0, question_wait_s: 3600 } }),
+    });
+    const run = seedRun(store, makeRun({ state: "implementing" }));
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish(
+      "success",
+      "need to know which auth provider",
+      doneSignal(false, "need to know which auth provider", {
+        class: "question",
+        detail: "Which OAuth provider should this integrate with?",
+        remedy: "answer the question",
+        defaultAnswer: "google",
+      }),
+    );
+    await settle();
+
+    const asked = store.get(run.id)!;
+    expect(asked.state).toBe("awaiting_input");
+    expect(asked.blocker).toBeNull();
+    expect(asked.question?.text).toBe("Which OAuth provider should this integrate with?");
+    expect(asked.question?.defaultAnswer).toBe("google");
+    expect(asked.question?.stage).toBe("implement");
+    expect(commitCalls.some((c) => c.message.includes("WIP"))).toBe(true);
+  });
+
+  test("an answer resumes the same stage with the answer as steering", async () => {
+    const { supervisor, store } = newSupervisor({
+      config: cfg({ runs: { max_live: 3, review_cycles_max: 2, budget_usd_per_run: 0, question_wait_s: 3600 } }),
+    });
+    const run = seedRun(store, makeRun({ state: "implementing" }));
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish(
+      "success",
+      "asking",
+      doneSignal(false, "asking", {
+        class: "question",
+        detail: "Which OAuth provider should this integrate with?",
+        remedy: "answer the question",
+        defaultAnswer: null,
+      }),
+    );
+    await settle();
+    expect(store.get(run.id)!.state).toBe("awaiting_input");
+
+    const outcome = await supervisor.resume(run.id, { answer: "use google" });
+    await settle();
+    expect(outcome).toBe("resumed");
+    const resumed = store.get(run.id)!;
+    expect(resumed.state).toBe("implementing");
+    expect(resumed.question).toBeNull();
+    expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(2);
+    const steer = spawnCalls[1]!.steering?.join("\n") ?? "";
+    expect(steer).toContain("Which OAuth provider should this integrate with?");
+    expect(steer).toContain("use google");
+  });
+
+  test("the question timeout fires the default answer and resumes", async () => {
+    const { supervisor, store } = newSupervisor({
+      config: cfg({ runs: { max_live: 3, review_cycles_max: 2, budget_usd_per_run: 0, question_wait_s: 0.15 } }),
+    });
+    const run = seedRun(store, makeRun({ state: "implementing" }));
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish(
+      "success",
+      "asking",
+      doneSignal(false, "asking", {
+        class: "question",
+        detail: "Which OAuth provider should this integrate with?",
+        remedy: "answer the question",
+        defaultAnswer: "google",
+      }),
+    );
+    await settle();
+    expect(store.get(run.id)!.state).toBe("awaiting_input");
+
+    await new Promise((r) => setTimeout(r, 250));
+    await settle();
+
+    const resumed = store.get(run.id)!;
+    expect(resumed.state).toBe("implementing");
+    expect(resumed.question).toBeNull();
+    expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(2);
+    const steer = spawnCalls[1]!.steering?.join("\n") ?? "";
+    expect(steer).toContain("google");
+  });
+
+  test("a question with no default parks with a question blocker when the clock runs out", async () => {
+    const { supervisor, store } = newSupervisor({
+      config: cfg({ runs: { max_live: 3, review_cycles_max: 2, budget_usd_per_run: 0, question_wait_s: 0.15 } }),
+    });
+    const run = seedRun(store, makeRun({ state: "implementing" }));
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish(
+      "success",
+      "asking",
+      doneSignal(false, "asking", {
+        class: "question",
+        detail: "Which OAuth provider should this integrate with?",
+        remedy: "answer the question",
+        defaultAnswer: null,
+      }),
+    );
+    await settle();
+    expect(store.get(run.id)!.state).toBe("awaiting_input");
+
+    await new Promise((r) => setTimeout(r, 250));
+    await settle();
+
+    const parked = store.get(run.id)!;
+    expect(parked.state).toBe("parked");
+    expect(parked.question).toBeNull();
+    expect(parked.blocker?.class).toBe("question");
+    expect(parked.blocker?.actor).toBe("human");
+    expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(1); // no resume spawn
+  });
+
+  test("a run left awaiting_input by a dead daemon re-arms its timer at boot", async () => {
+    const dir = scratch();
+    const storePath = join(dir, "runs.json");
+    const store = new RunStore(storePath);
+    const run = seedRun(
+      store,
+      makeRun({
+        state: "awaiting_input",
+        sessionIds: { implement: "sess-1" },
+        question: {
+          stage: "implement",
+          text: "Which OAuth provider should this integrate with?",
+          defaultAnswer: "google",
+          askedAt: "2026-08-10T00:00:00.000Z",
+          expiresAt: "2026-08-10T00:00:01.000Z", // long past by the time this test runs
+        },
+      }),
+    );
+    const { supervisor } = newSupervisor({ store });
+    await supervisor.start();
+    await tick();
+    await settle();
+    supervisor.stop();
+
+    const resumed = store.get(run.id)!;
+    expect(resumed.state).toBe("implementing");
+    expect(resumed.question).toBeNull();
+    expect(spawnCalls.some((c) => c.stage === "implement")).toBe(true);
+  });
+
+  test("cancelling an awaiting_input run clears its timer", async () => {
+    const { supervisor, store } = newSupervisor({
+      config: cfg({ runs: { max_live: 3, review_cycles_max: 2, budget_usd_per_run: 0, question_wait_s: 0.15 } }),
+    });
+    const run = seedRun(store, makeRun({ state: "implementing" }));
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish(
+      "success",
+      "asking",
+      doneSignal(false, "asking", {
+        class: "question",
+        detail: "Which OAuth provider should this integrate with?",
+        remedy: "answer the question",
+        defaultAnswer: "google",
+      }),
+    );
+    await settle();
+    expect(store.get(run.id)!.state).toBe("awaiting_input");
+
+    const outcome = await supervisor.cancel(run.id, "no longer needed");
+    await settle();
+    expect(outcome).toBe("cancelled");
+
+    // Wait past when the timer WOULD have fired, and confirm the cancel held.
+    await new Promise((r) => setTimeout(r, 250));
+    await settle();
+    const after = store.get(run.id)!;
+    expect(after.state).toBe("cancelled");
+    expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(1); // no resume spawn
   });
 });
 

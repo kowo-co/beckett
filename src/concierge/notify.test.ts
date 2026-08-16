@@ -75,6 +75,7 @@ function run(overrides: Partial<Run> = {}): Run {
     prUrl: null,
     error: null,
     blocker: null,
+    question: null,
     published: null,
     ...overrides,
   };

@@ -971,6 +971,9 @@ export interface Config {
     /** Auto-resumes a death BECKETT ITSELF caused (wall-clock cap) gets before the supervisor
      *  stops re-spawning it and parks it (B7, `./run/death.ts`). Default 2. */
     auto_resume_max: number;
+    /** Seconds an `awaiting_input` run waits for an answer before its own timer fires (B8,
+     *  `./run/supervisor.ts`). Default 1800. */
+    question_wait_s: number;
     /** Per-run USD ceiling; 0 falls back to `[budget] per_task_usd_cap`. Default 0. */
     budget_usd_per_run: number;
     /**

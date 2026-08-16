@@ -6040,6 +6040,17 @@ export class Concierge {
             `\`beckett task resume ${run.id}\` when it is.` +
             `${run.error ? `\n\n${run.error}` : ""}`,
         );
+      case "awaiting_input":
+        // B8: LIVE, not parked — a worker asked one question. `run.error` is deliberately not
+        // consulted here (unlike `parked`): the question text lives on `run.question`, not there.
+        return this.runUpdateTurn(
+          run,
+          `This run is waiting on one answer: ${run.question?.text ?? ""}\n` +
+            `Ask the person in-channel, then answer it with \`beckett task resume ${run.id} --answer "…"\`.` +
+            (run.question?.defaultAnswer
+              ? `\nIf nobody replies by ${run.question.expiresAt} I will proceed with: ${run.question.defaultAnswer}`
+              : ""),
+        );
       case "cancelled":
         // A cancellation is a machine state, not shipped/stuck/a question — the card shows it.
         if (this.taskHasCard(run.taskRef)) return null;

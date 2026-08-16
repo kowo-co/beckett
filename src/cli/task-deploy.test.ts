@@ -56,6 +56,7 @@ function fakeDeps(): TaskDeployDeps & { created: Run[]; busPings: Array<{ cmd: s
         prUrl: null,
         error: null,
         blocker: null,
+        question: null,
         published: null,
       };
       created.push(run);
@@ -289,6 +290,7 @@ test("deployRun: --dry prints the full Run JSON but writes nothing and pings no 
     prUrl: null,
     error: null,
     blocker: null,
+    question: null,
     published: null,
   });
   expect(deps.created).toEqual([]);

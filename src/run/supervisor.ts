@@ -38,7 +38,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import type { Config, Harness, Logger, WorkerEvent } from "../types.ts";
+import type { Config, DoneBlocker, Harness, Logger, WorkerEvent } from "../types.ts";
 import { pauseFilePath, readPause } from "../pause.ts";
 import type { HarnessSpec } from "./cast.ts";
 import { applySonnetFirst, DEFAULT_IMPLEMENT_MODEL, isOpusModel } from "./cast.ts";
@@ -99,7 +99,7 @@ import { specGateSpec } from "../hooks/registry.ts";
 import { parseSpecChecklist, renderSpecScaffold, specRunId, SPEC_FILE_REL, type ParsedSpecChecklist } from "./spec-file.ts";
 import { runAsWorkItem } from "./adapter.ts";
 import type { RunStore } from "./store.ts";
-import type { Blocker, Run, RunStage, RunStateChange } from "./types.ts";
+import type { Blocker, Run, RunQuestion, RunStage, RunStateChange } from "./types.ts";
 import { RUN_TERMINAL } from "./types.ts";
 import {
   planWorktreeSweep,
@@ -372,6 +372,13 @@ export class RunSupervisor {
   private readonly watchdogRestaffed = new Set<string>();
   /** Run ids already sent the wall-clock cap's one wrap-up steer (B7). Cleared on worker finish. */
   private readonly wrapUpWarned = new Set<string>();
+  /**
+   * `awaiting_input` answer timers (B8), keyed by run id. EPHEMERAL — a timer dies with the
+   * daemon; `start()` re-arms one for every live `awaiting_input` run from its persisted
+   * `question.expiresAt`, so a restart never leaves a question waiting forever. Cleared in
+   * exactly four places: an answer, the timeout itself, `cancel()`, and `stop()`.
+   */
+  private readonly askTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly budgetBlocked = new Set<string>();
   /**
    * The live activity blurb's whole state, per run: the tail of journal lines the worker produced,
@@ -493,12 +500,20 @@ export class RunSupervisor {
     this.bus?.on("run.resume", async (args) => {
       const runId = typeof args.runId === "string" ? args.runId : "";
       const note = typeof args.note === "string" && args.note.trim() ? args.note.trim() : undefined;
-      if (runId) await this.resume(runId, { note });
+      const answer = typeof args.answer === "string" ? args.answer : undefined;
+      if (runId) await this.resume(runId, { note, answer });
     });
     await this.recoverFromCrash();
     // BEFORE the boot scan below, so a run whose stage this daemon owes is back in a staffable
     // state by the time `admitRun` walks the ledger (#244).
     await this.requeueOwedStages();
+    // Every `awaiting_input` run's answer timer (B8) died with the previous daemon — re-arm it
+    // from the persisted `question.expiresAt` rather than restarting its clock, so a question
+    // asked just before a restart does not silently get a fresh full wait. Fires immediately (via
+    // a zero/negative delay) when the deadline already passed while the daemon was down.
+    for (const run of this.store.live()) {
+      if (run.state === "awaiting_input" && run.question) this.armAskTimer(run);
+    }
     await this.replayPublishes();
     await this.resumeInterruptedPublishes();
     for (const run of this.store.live()) this.admitRun(run);
@@ -522,6 +537,11 @@ export class RunSupervisor {
     this.checkpointTimer = undefined;
     this.watchdogTimer = undefined;
     this.publishDrainTimer = undefined;
+    // Every question timer dies with the process anyway, but clear them explicitly (not just for
+    // idempotency — a second `stop()` call, or a test that asserts on the map) so `askTimers` is
+    // never left pointing at a handle nothing will fire.
+    for (const timer of this.askTimers.values()) clearTimeout(timer);
+    this.askTimers.clear();
     this.started = false;
   }
 
@@ -1182,6 +1202,13 @@ export class RunSupervisor {
     if (signal && !signal.done) {
       await this.commitWip(run, handle);
       if (signal.blocker) {
+        // A "question" blocker is one fact, not a stop: the run goes LIVE into `awaiting_input`
+        // instead of parking, and the supervisor — not a human — owns getting it back out
+        // (answer, default, or an eventual park on silence) (B8).
+        if (signal.blocker.class === "question") {
+          await this.askRunQuestion(run, signal.blocker);
+          return;
+        }
         // Behaviour-preserving vs. the old free-text `park(run, ...)`: the worker's summary of
         // what it did before blocking used to ride along in `run.error` — keep it there, appended
         // after the typed detail, rather than dropping it now that `blocker.detail` is typed.
@@ -1238,6 +1265,100 @@ export class RunSupervisor {
     await this.patchRun(run.id, { state: "implementing" });
     const next = this.store.get(run.id);
     if (next) this.spawnGuarded(next, "implement");
+  }
+
+  /**
+   * A worker's done-signal named a `question` blocker (B8): one fact it cannot answer from where
+   * it sits, with an optional `defaultAnswer` for silence. LIVE, not parked — `finishImplement`
+   * already committed the WIP before calling this. Arms a `runs.question_wait_s` timer; the run
+   * leaves `awaiting_input` only via {@link answerRun} (a human's `--answer`, or the timer firing
+   * the default) or {@link hold} (the timer firing with no default).
+   */
+  private async askRunQuestion(run: Run, blocker: DoneBlocker): Promise<void> {
+    const waitS = this.config.runs?.question_wait_s ?? 1800;
+    const question: RunQuestion = {
+      stage: "implement",
+      text: blocker.detail,
+      defaultAnswer: blocker.defaultAnswer,
+      askedAt: new Date(this.now()).toISOString(),
+      expiresAt: new Date(this.now() + waitS * 1000).toISOString(),
+    };
+    await this.patchRun(run.id, { state: "awaiting_input", question, error: null });
+    this.trace(run, "implement:question", "held", question.text);
+    const fresh = this.store.get(run.id);
+    if (fresh) this.armAskTimer(fresh);
+  }
+
+  /** Arm (or re-arm, at boot) an `awaiting_input` run's answer timer from its persisted question. */
+  private armAskTimer(run: Run): void {
+    const question = run.question;
+    if (!question) return;
+    this.clearAskTimer(run.id);
+    const delayMs = Math.max(0, Date.parse(question.expiresAt) - this.now());
+    const timer = setTimeout(() => {
+      void this.onQuestionTimeout(run.id);
+    }, delayMs);
+    timer.unref?.();
+    this.askTimers.set(run.id, timer);
+  }
+
+  private clearAskTimer(runId: string): void {
+    const timer = this.askTimers.get(runId);
+    if (timer) clearTimeout(timer);
+    this.askTimers.delete(runId);
+  }
+
+  /**
+   * The `runs.question_wait_s` clock ran out with nobody answering. A `defaultAnswer` resumes the
+   * run exactly as `--answer` would; its absence hands the same question to `hold()` as a typed
+   * `class: "question"` blocker — still a human-actor stop, but only after silence, not by default.
+   */
+  private async onQuestionTimeout(runId: string): Promise<void> {
+    this.askTimers.delete(runId);
+    const run = this.store.get(runId);
+    // Already answered/cancelled/gone by the time this fired — nothing to do.
+    if (!run || run.state !== "awaiting_input") return;
+    const question = run.question;
+    if (question?.defaultAnswer !== null && question?.defaultAnswer !== undefined) {
+      this.trace(run, "restaff", "started", `question timed out — defaulting to: ${question.defaultAnswer}`);
+      await this.answerRun(run, question.defaultAnswer);
+      return;
+    }
+    const blocker = makeBlocker(
+      {
+        class: "question",
+        reversible: true,
+        remedy: `\`beckett task resume ${run.id} --answer "…"\``,
+        detail: question?.text ?? "the worker asked a question and nobody answered before the timeout",
+        defaultAnswer: null,
+        stage: question?.stage ?? null,
+      },
+      () => new Date(this.now()),
+    );
+    await this.patchRun(runId, { question: null });
+    const fresh = this.store.get(runId) ?? run;
+    await this.hold(fresh, blocker);
+  }
+
+  /**
+   * Answer an `awaiting_input` run's open question — a human's `--answer`, or the timeout firing
+   * its `defaultAnswer`. Clears the timer and the question, frames the answer as the re-spawned
+   * worker's first steering note, and resumes the stage the question was asked from.
+   */
+  private async answerRun(run: Run, answer: string): Promise<"resumed"> {
+    this.clearAskTimer(run.id);
+    const question = run.question;
+    const stage: RunStage = question?.stage ?? this.lastStageOf(run);
+    this.trace(run, "restaff", "started", `answered: ${answer}`);
+    this.bufferSteer(run.id, `Answer to your question ("${question?.text ?? ""}"): ${answer}`);
+    await this.patchRun(run.id, {
+      state: stage === "implement" ? "implementing" : "reviewing",
+      error: null,
+      question: null,
+    });
+    const fresh = this.store.get(run.id);
+    if (fresh) this.spawnGuarded(fresh, stage);
+    return "resumed";
   }
 
   /**
@@ -1740,6 +1861,7 @@ export class RunSupervisor {
     this.dropPending(runId);
     this.unstaffedSince.delete(runId);
     this.publishStallClock.delete(runId);
+    this.clearAskTimer(runId); // an awaiting_input run's answer timer must not outlive its cancel
     this.watchdogRestaffed.delete(runId);
     this.budgetBlocked.delete(runId);
     this.restartInterrupted.delete(runId);
@@ -1814,15 +1936,24 @@ export class RunSupervisor {
    * `publishOutbox.has(run.id)` for a pre-existing parked row minted before `blocker` existed
    * (`blocker: null` from the store's migration default) — that row still has an outbox row or a
    * completed publish record, and resuming it would duplicate the same work.
+   *
+   * `opts.answer` (B8) is the OTHER exit this verb drives: an `awaiting_input` run's open
+   * question, answered rather than a `parked` run's blocker cleared. The two never overlap —
+   * `awaiting_input` is not `parked` — so `answer` short-circuits straight to {@link answerRun}
+   * before any of the parked-run checks below run.
    */
   async resume(
     runId: string,
-    opts: { note?: string } = {},
-  ): Promise<"resumed" | "unknown" | "not-parked" | "publish-blocked"> {
+    opts: { note?: string; answer?: string } = {},
+  ): Promise<"resumed" | "unknown" | "not-parked" | "publish-blocked" | "not-awaiting"> {
     const run = this.store.get(runId);
     if (!run) {
       this.logger.warn("run.resume for an unknown run", { runId });
       return "unknown";
+    }
+    if (opts.answer !== undefined) {
+      if (run.state !== "awaiting_input") return "not-awaiting";
+      return this.answerRun(run, opts.answer);
     }
     if (run.state !== "parked") return "not-parked";
     if (

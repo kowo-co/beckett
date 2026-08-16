@@ -19,12 +19,18 @@ import type { DoneBlockerClass } from "../types.ts";
 /** The two worker stages a run drives a Claude session through. */
 export type RunStage = "implement" | "review";
 
-/** A run's lifecycle. Terminal states: done, failed, cancelled. `parked` is a held-but-alive state. */
+/**
+ * A run's lifecycle. Terminal states: done, failed, cancelled. `parked` is a held-but-alive
+ * state. `awaiting_input` (B8) is LIVE, not terminal: the supervisor owns it end to end (arms the
+ * answer timer, re-arms it at boot, resumes on an answer or the default, or hands off to
+ * `parked` on a silent timeout with no default) — a human only ever answers it, never restaffs it.
+ */
 export type RunState =
   | "queued"
   | "implementing"
   | "reviewing"
   | "publishing"
+  | "awaiting_input"
   | "done"
   | "failed"
   | "cancelled"
@@ -81,6 +87,23 @@ export interface Blocker {
   stage: RunStage | null;
   /** ISO. */
   at: string;
+}
+
+// ── B8: elicitation ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * The one open question a worker asked, live on the run (`state === "awaiting_input"`) rather
+ * than parked — the supervisor, not a human, owns getting the run out of this state. `stage` is
+ * always `"implement"` today (only `finishImplement`'s blocker branch mints one; a reviewer's
+ * done-signal has no blocker concept), kept as `RunStage` rather than hardcoded so a future
+ * reviewer-side question does not need a wider type.
+ */
+export interface RunQuestion {
+  stage: RunStage;
+  text: string;
+  defaultAnswer: string | null;
+  askedAt: string;
+  expiresAt: string;
 }
 
 /**
@@ -159,4 +182,6 @@ export interface Run {
   published: PublishRecord | null;
   /** Non-null iff `state === "parked"` (B5). The typed reason a human is holding this run. */
   blocker: Blocker | null;
+  /** Non-null iff `state === "awaiting_input"` (B8). The one open question, and its default. */
+  question: RunQuestion | null;
 }

@@ -377,6 +377,11 @@ export const configFragments = {
       // Independent of `continuation_max`/`review_cycles_max` — the worker didn't run out of turn
       // or fail review, beckett just stopped the clock on it (B7, `./death.ts`).
       auto_resume_max: posInt.default(2),
+      // How long an `awaiting_input` run waits for `beckett task resume <id> --answer "…"` before
+      // the timer fires its own default: the question's `defaultAnswer` when it has one, else a
+      // `class: "question"` blocker that parks the run for a human (B8, `./supervisor.ts`).
+      // Default 1800 (30 minutes).
+      question_wait_s: posInt.default(1800),
       // Per-run USD ceiling, summed from the spend ledger over rows at/after the run's createdAt.
       // 0 (the default) falls back to `[budget] per_task_usd_cap`, so an install that already
       // tuned the task cap keeps exactly that behavior.
