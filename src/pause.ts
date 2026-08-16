@@ -40,12 +40,24 @@ export function readPause(file: string): PauseState | null {
     const raw = readFileSync(file, "utf8");
     const parsed = JSON.parse(raw) as Partial<PauseState>;
     return {
-      pausedAt: typeof parsed.pausedAt === "string" ? parsed.pausedAt : statSync(file).mtime.toISOString(),
+      pausedAt: typeof parsed.pausedAt === "string" ? parsed.pausedAt : mtimeOrNow(file),
       reason: typeof parsed.reason === "string" ? parsed.reason : null,
       by: typeof parsed.by === "string" ? parsed.by : null,
     };
   } catch {
-    return { pausedAt: statSync(file).mtime.toISOString(), reason: null, by: null };
+    // A concurrent `clearPause` between the existsSync above and here (or the mtime read) means
+    // the file is genuinely gone — that reads as "not paused", not as a crash.
+    if (!existsSync(file)) return null;
+    return { pausedAt: mtimeOrNow(file), reason: null, by: null };
+  }
+}
+
+/** `mtime`, or now if the file vanished between the caller's check and this call. */
+function mtimeOrNow(file: string): string {
+  try {
+    return statSync(file).mtime.toISOString();
+  } catch {
+    return new Date().toISOString();
   }
 }
 
