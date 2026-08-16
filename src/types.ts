@@ -838,6 +838,7 @@ export interface Paths {
   pauseFile: string; // <beckettDir>/pause.json — chat-only hold; existence IS the flag (src/pause.ts)
   journalDir: string; // <beckettDir>/journal — private per-ticket worker progress journals
   proposalsDir: string; // <beckettDir>/proposals — the proposal queue (issue #37)
+  companyFile: string; // <beckettDir>/company.md — the CTO seat's company brief (src/company.ts)
   workspacesFile: string; // <beckettDir>/workspaces.json — user-opened thread → ticket routing
 }
 
