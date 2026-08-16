@@ -1168,10 +1168,45 @@ describe("proof gates done (overhaul B12)", () => {
     expect(parked.blocker?.class).toBe("transient");
     expect(parked.blocker?.actor).toBe("human");
     expect(parked.error).toContain("2 re-check");
-    // The rendered remedy must point at a command that actually works for this run — `resume()`
-    // dead-ends on a published run — not the transientBlocker default.
-    expect(parked.error).toContain(`beckett task courier ${run.id}`);
-    expect(parked.error).not.toContain(`beckett task resume ${run.id}`);
+    // A run the daemon itself published via the outbox is not eligible for `courier` (it would
+    // erase the real PR URL/landing mode) — and `resume` refuses it too (publish-blocked), so the
+    // remedy must name neither command, only the truth: confirm and accept by hand.
+    expect(parked.error).toContain("beckett already published this run");
+    expect(parked.error).not.toContain("beckett task resume");
+    expect(parked.error).not.toContain("beckett task courier");
+  });
+
+  test("a `pending` CI verdict never burns the recheck-cap budget — waiting resolves it, not a park", async () => {
+    let ci: "pending" | "success" = "pending";
+    const { supervisor, store } = newSupervisor({
+      config: cfg({ runs: { max_live: 3, review_cycles_max: 2, budget_usd_per_run: 0, proof_recheck_max: 20 } }),
+      publish: true,
+      verifyPr: async () => ({ resolves: true, ci }),
+    });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal(true));
+    await settle();
+    created[1]!.finish("success", "looks good", doneSignal(true));
+    await settle();
+    expect(store.get(run.id)!.state).toBe("unverified");
+
+    // 25 re-check passes with CI still pending — well past `proof_recheck_max` (20) — must never
+    // park: the cap is reserved for verdicts that will not change by waiting.
+    for (let i = 0; i < 25; i++) {
+      await supervisor.reconcileProofs();
+    }
+    const stillPending = store.get(run.id)!;
+    expect(stillPending.state).toBe("unverified");
+    expect(stillPending.proof?.attempts).toBe(0);
+    expect(stillPending.error).toContain("CI is still running");
+
+    ci = "success";
+    await supervisor.reconcileProofs();
+    const done = store.get(run.id)!;
+    expect(done.state).toBe("done");
+    expect(done.proof?.ci).toBe("success");
   });
 
   test("a production-shaped kind:pushed outcome with a /pull/ prUrl still lands as landingMode pr (not direct-push)", async () => {
@@ -1767,6 +1802,29 @@ describe("continuation loop (overhaul B6)", () => {
     expect(store.get(run.id)!.state).toBe("reviewing");
     expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(1);
   });
+
+  test("a done:false signal with a `continuation` blocker re-spawns implement instead of parking", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish(
+      "success",
+      "need another pass",
+      doneSignal(false, "need another pass", {
+        class: "continuation",
+        detail: "ran out of turn",
+        remedy: "",
+        defaultAnswer: null,
+      }),
+    );
+    await settle();
+    expect(store.get(run.id)!.state).toBe("implementing");
+    expect(store.get(run.id)!.continuations).toBe(1);
+    expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(2);
+    // Never reaches the generic hold() for a supervisor-actor class.
+    expect(store.get(run.id)!.blocker).toBeNull();
+  });
 });
 
 describe("typed blockers (overhaul B5)", () => {
@@ -2022,6 +2080,60 @@ describe("death classification (overhaul B7)", () => {
     expect(parked.blocker?.class).toBe("credential");
     expect(parked.blocker?.actor).toBe("human");
     expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(1);
+  });
+
+  test("an external death does not owe the run a resume — a boot must not re-staff into the same wall", async () => {
+    const dir = scratch();
+    const statePath = join(dir, "run-state.json");
+    const { supervisor, store } = newSupervisor({ runtimeStatePath: statePath });
+    const run = seedRun(store, makeRun({ state: "implementing" }));
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("error", "", null, { errorClass: "auth", errorMessage: "no auth" });
+    await settle();
+    expect(store.get(run.id)!.state).toBe("parked");
+
+    const state = JSON.parse(readFileSync(statePath, "utf8")) as { owedResumes?: Record<string, unknown> };
+    expect(state.owedResumes ?? {}).toEqual({});
+  });
+
+  test("a run that auto-resumes and later parks for an unrelated reason is not boot-requeued by a stale owed row", async () => {
+    const dir = scratch();
+    const statePath = join(dir, "run-state.json");
+    const storePath = join(dir, "runs.json");
+    const { supervisor, store } = newSupervisor({
+      runtimeStatePath: statePath,
+      store: new RunStore(storePath),
+      config: cfg({ runs: { max_live: 3, review_cycles_max: 1, budget_usd_per_run: 0, auto_resume_max: 2 } }),
+    });
+    const run = seedRun(store, makeRun({ state: "implementing" }));
+    await supervisor.admit(run.id);
+    await tick();
+    // A self-inflicted death: the debt is recorded, then paid off by the in-process auto-resume.
+    created[0]!.finish("error", "", null, { timedOut: true, errorClass: "timeout" });
+    await settle();
+    expect(store.get(run.id)!.state).toBe("implementing");
+    expect(store.get(run.id)!.autoResumes).toBe(1);
+    // Implement finishes clean → review, which fails once and hits `review_cycles_max` — a park
+    // that has nothing to do with the earlier death.
+    created[1]!.finish("success", "implemented", doneSignal(true));
+    await settle();
+    created[2]!.finish("success", "still wrong", doneSignal(false, "still wrong"));
+    await settle();
+    const parked = store.get(run.id)!;
+    expect(parked.state).toBe("parked");
+    expect(parked.error).toContain("rework cycle 1/1");
+
+    const state = JSON.parse(readFileSync(statePath, "utf8")) as { owedResumes?: Record<string, unknown> };
+    expect(state.owedResumes ?? {}).toEqual({});
+
+    // Boot: nothing owed, so nothing gets re-staffed — the review-cap park stands.
+    const next = newSupervisor({ runtimeStatePath: statePath, store: new RunStore(storePath) });
+    await next.supervisor.start();
+    await settle();
+    next.supervisor.stop();
+    expect(next.store.get(run.id)!.state).toBe("parked");
+    expect(spawnCalls.filter((c) => c.stage === "review" || c.stage === "implement")).toHaveLength(3);
   });
 
   test("a live worker within the wrap-up lead gets exactly one wrap-up steer", async () => {
@@ -2357,6 +2469,27 @@ describe("crash resume", () => {
  * 20:51:44.345Z killed a live reviewer (.371Z) and the run parked (.404Z) carrying the WORKER'S
  * GREETING as its error, with nothing to pick the stage back up.
  */
+describe("start() lowers shuttingDown — a restarted supervisor is not permanently in shutdown mode", () => {
+  test("a worker death after a stop()/start() cycle is classified fresh, not as a shutdown kill", async () => {
+    const { supervisor, store } = newSupervisor();
+    supervisor.stop(); // raises shuttingDown with nothing live — the shape of an in-process restart
+    await supervisor.start();
+
+    const run = seedRun(store, makeRun({ state: "implementing" }));
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("error", "", null, { errorClass: "auth", errorMessage: "no auth" });
+    await settle();
+
+    const parked = store.get(run.id)!;
+    expect(parked.state).toBe("parked");
+    // A shutdown-classified death would auto-resume (self-inflicted) instead of parking with a
+    // typed credential blocker, and its cause would say "killed during daemon shutdown".
+    expect(parked.blocker?.class).toBe("credential");
+    expect(parked.error).not.toContain("daemon shutdown");
+  });
+});
+
 describe("a worker killed by the daemon's own shutdown", () => {
   /** Verbatim from the parked run: the model's OPENING SENTENCE, which is not an error. */
   const GREETING = "the reviewer exited with an error.\n\nI'll start by inspecting the actual diff and repo state.";
@@ -2547,6 +2680,48 @@ describe("a worker killed by the daemon's own shutdown", () => {
     supervisor.stop();
     expect(spawnCalls).toHaveLength(0);
     expect(reloaded.get(run.id)!.state).toBe("done");
+  });
+
+  test("a boot requeue clears the stale typed blocker it just parked — `blocker` is non-null iff state parked", async () => {
+    const dir = scratch();
+    const statePath = join(dir, "run-state.json");
+    const storePath = join(dir, "runs.json");
+    const store = new RunStore(storePath);
+    const run = seedRun(
+      store,
+      makeRun({
+        state: "parked",
+        blocker: {
+          class: "credential",
+          actor: "human",
+          reversible: true,
+          detail: "no auth",
+          remedy: "fix the credential",
+          defaultAnswer: null,
+          stage: "review",
+          at: "2026-08-10T00:00:00.000Z",
+        },
+      }),
+    );
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        version: 1,
+        liveLedger: {},
+        pendingSteers: {},
+        owedResumes: { [run.id]: { stage: "review", cause: "killed during daemon shutdown", at: 1 } },
+      }),
+    );
+    const { supervisor, store: reloaded } = newSupervisor({
+      runtimeStatePath: statePath,
+      store: new RunStore(storePath),
+    });
+    await supervisor.start();
+    await settle();
+    supervisor.stop();
+    const updated = reloaded.get(run.id)!;
+    expect(updated.state).toBe("reviewing");
+    expect(updated.blocker).toBeNull();
   });
 
   test("the deploy drain guard sees the live worker the restart would kill (#243)", async () => {
@@ -3006,6 +3181,31 @@ describe("cancel", () => {
     expect(store.get(parked.id)!.state).toBe("cancelled");
   });
 
+  test("cancelling a parked run clears its typed blocker — `blocker` is non-null iff state parked", async () => {
+    const { supervisor, store } = newSupervisor();
+    const parked = seedRun(
+      store,
+      makeRun({
+        slug: "held-with-blocker",
+        state: "parked",
+        blocker: {
+          class: "credential",
+          actor: "human",
+          reversible: true,
+          detail: "no auth",
+          remedy: "fix the credential",
+          defaultAnswer: null,
+          stage: "implement",
+          at: "2026-08-10T00:00:00.000Z",
+        },
+      }),
+    );
+    expect(await supervisor.cancel(parked.id)).toBe("cancelled");
+    const cancelled = store.get(parked.id)!;
+    expect(cancelled.state).toBe("cancelled");
+    expect(cancelled.blocker).toBeNull();
+  });
+
   test("cancelling frees the live-run slot so a queued run is pumped in", async () => {
     const { supervisor, store } = newSupervisor({
       config: cfg({ runs: { max_live: 1, review_cycles_max: 2, budget_usd_per_run: 0 } }),
@@ -3092,6 +3292,24 @@ describe("courier handoff (#228)", () => {
     const run = seedRun(store, makeRun({ state: "done" }));
     expect(await supervisor.courier(run.id)).toBe("already-terminal");
     expect(await supervisor.courier("run-20260810-nope")).toBe("unknown");
+  });
+
+  test("courier() refuses a run the daemon itself already published via the outbox", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(
+      store,
+      makeRun({
+        state: "parked",
+        published: { via: "outbox", prUrl: "https://github.com/o/gateway/pull/7" },
+        landingMode: "pr",
+      }),
+    );
+    expect(await supervisor.courier(run.id)).toBe("already-terminal");
+    // Never overwritten: the real PR URL and mode beckett itself drove survive.
+    const untouched = store.get(run.id)!;
+    expect(untouched.published).toEqual({ via: "outbox", prUrl: "https://github.com/o/gateway/pull/7" });
+    expect(untouched.landingMode).toBe("pr");
+    expect(untouched.state).toBe("parked");
   });
 
   test("backfillCourierPrUrl fills the URL and re-traces done:courier for a still-open card", async () => {
