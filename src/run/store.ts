@@ -79,6 +79,9 @@ const BlockerSchema = z.object({
   remedy: z.string(),
   detail: z.string(),
   defaultAnswer: z.string().nullable(),
+  // Nullable + defaulted for the same reason as `Run.blocker` below: an old persisted row (minted
+  // before this field existed) still parses, and `resume()` falls back to `lastStageOf`.
+  stage: z.enum(["implement", "review"]).nullable().default(null),
   at: z.string(),
 });
 

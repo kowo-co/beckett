@@ -780,6 +780,9 @@ describe("stage flow", () => {
     await settle();
     expect(store.get(run.id)!.state).toBe("parked");
     expect(store.get(run.id)!.error).toContain("needs a GitHub token with repo scope");
+    // The worker's summary of what it did before blocking rides along too — behaviour-preserving
+    // vs. the old free-text `park(run, "${detail}\n\n${summary}")`.
+    expect(store.get(run.id)!.error).toContain("stuck on auth");
     expect(commitCalls.some((c) => c.message.includes("WIP"))).toBe(true);
   });
 });
@@ -1354,6 +1357,7 @@ describe("typed blockers (overhaul B5)", () => {
           remedy: "`beckett task resume …`",
           detail: "the reviewer died",
           defaultAnswer: null,
+          stage: "review",
           at: "2026-08-10T00:00:00.000Z",
         },
       }),
@@ -1364,6 +1368,73 @@ describe("typed blockers (overhaul B5)", () => {
     const resumed = store.get(run.id)!;
     expect(resumed.state).toBe("reviewing");
     expect(spawnCalls[spawnCalls.length - 1]!.stage).toBe("review");
+  });
+
+  test("a run parked mid-rework-implement resumes into implement, not review", async () => {
+    // Regression for the bug the old `lastStageOf`-only derivation had: `sessionIds`'s key ORDER
+    // is insertion order, and re-assigning an existing key (the second `implement` spawn below)
+    // keeps its original position — so after implement → review → rework-implement, the keys are
+    // still `["implement", "review"]` and a naive "last key" read would say "review" even though
+    // the run was held mid-implement. `hold()` now stamps the stage itself, so this must resume
+    // into "implement".
+    const { supervisor, store } = newSupervisor({
+      config: cfg({ runs: { max_live: 3, review_cycles_max: 2, budget_usd_per_run: 0 } }),
+    });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal(true));
+    await settle();
+    created[1]!.finish("success", "missing error handling", doneSignal(false, "missing error handling"));
+    await settle();
+    expect(store.get(run.id)!.state).toBe("implementing");
+
+    // The rework implement worker dies before it can finish.
+    created[2]!.finish("error", "harness crashed");
+    await settle();
+    const parked = store.get(run.id)!;
+    expect(parked.state).toBe("parked");
+    expect(parked.blocker?.stage).toBe("implement");
+    expect(Object.keys(parked.sessionIds)).toEqual(["implement", "review"]); // the key-order trap
+
+    const outcome = await supervisor.resume(run.id);
+    await settle();
+    expect(outcome).toBe("resumed");
+    const resumed = store.get(run.id)!;
+    expect(resumed.state).toBe("implementing");
+    expect(spawnCalls[spawnCalls.length - 1]!.stage).toBe("implement");
+  });
+
+  test("resuming a run parked from a pre-existing outbox row is publish-blocked even with no blocker recorded", async () => {
+    // Migration case: a run parked BEFORE this PR shipped has `blocker: null` (the store's
+    // default). If it still has a live outbox row, resuming it must not re-spawn implement/review
+    // on a branch whose publish is already in flight.
+    const dir = scratch();
+    const outboxPath = join(dir, "run-publish-outbox.jsonl");
+    const run = makeRun({ state: "parked", error: "publish stalled" });
+    mkdirSync(dirname(outboxPath), { recursive: true });
+    writeFileSync(
+      outboxPath,
+      JSON.stringify({
+        id: "op1",
+        item: { id: run.id, identifier: run.slug },
+        slug: run.slug,
+        repoRoot: "/tmp/nonexistent",
+        messagePrefix: "beckett",
+        summary: "",
+        purpose: "done",
+        attempt: 1,
+        nextAttemptAt: Number.MAX_SAFE_INTEGER,
+        createdAt: new Date().toISOString(),
+      }) + "\n",
+      "utf8",
+    );
+    const { supervisor, store } = newSupervisor({ publishOutboxPath: outboxPath });
+    seedRun(store, run);
+    const before = spawnCalls.length;
+    const outcome = await supervisor.resume(run.id);
+    expect(outcome).toBe("publish-blocked");
+    expect(spawnCalls.length).toBe(before);
   });
 
   test("resuming a publish-parked run refuses and names courier", async () => {
@@ -1380,6 +1451,7 @@ describe("typed blockers (overhaul B5)", () => {
           remedy: "beckett task courier",
           detail: "could not be published",
           defaultAnswer: null,
+          stage: null,
           at: "2026-08-10T00:00:00.000Z",
         },
       }),

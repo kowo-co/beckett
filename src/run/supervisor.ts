@@ -97,7 +97,7 @@ import { parseSpecChecklist, renderSpecScaffold, specRunId, SPEC_FILE_REL, type 
 import { runAsWorkItem } from "./adapter.ts";
 import type { RunStore } from "./store.ts";
 import type { Blocker, Run, RunStage, RunStateChange } from "./types.ts";
-import { RUN_FINAL, RUN_TERMINAL } from "./types.ts";
+import { RUN_TERMINAL } from "./types.ts";
 import { blockerFromDoneSignal, makeBlocker, renderBlocker, stopsTheRun } from "./blocker.ts";
 
 // =======================================================================================
@@ -1102,7 +1102,11 @@ export class RunSupervisor {
     if (signal && !signal.done) {
       await this.commitWip(run, handle);
       if (signal.blocker) {
-        await this.hold(run, blockerFromDoneSignal(signal.blocker, () => new Date(this.now())));
+        // Behaviour-preserving vs. the old free-text `park(run, ...)`: the worker's summary of
+        // what it did before blocking used to ride along in `run.error` — keep it there, appended
+        // after the typed detail, rather than dropping it now that `blocker.detail` is typed.
+        const b = blockerFromDoneSignal(signal.blocker, () => new Date(this.now()));
+        await this.hold(run, summary ? { ...b, detail: `${b.detail}\n\n${summary}` } : b);
         return;
       }
       await this.continueImplement(run, summary);
@@ -1641,10 +1645,14 @@ export class RunSupervisor {
    * nothing in the supervisor itself calls this, so there is no path for a resume loop that does
    * not run through a person typing the command.
    *
-   * A run parked mid-publish (`blocker.class === "admin-permission"` from one of the three publish
-   * park sites) has no `implement`/`review` stage to re-spawn into — the outbox already gave the
-   * work up, and re-staffing here would silently duplicate whatever a human published by hand.
-   * That case is `"publish-blocked"`: the caller (the CLI) names `beckett task courier` instead.
+   * A run parked mid-publish has no `implement`/`review` stage to re-spawn into — the outbox
+   * already gave the work up, and re-staffing here would silently duplicate whatever a human
+   * published by hand. That case is `"publish-blocked"`: the caller (the CLI) names
+   * `beckett task courier` instead. Detected two ways: `blocker.class === "admin-permission"`
+   * for every run parked by THIS PR's publish sites, and `run.published !== null` /
+   * `publishOutbox.has(run.id)` for a pre-existing parked row minted before `blocker` existed
+   * (`blocker: null` from the store's migration default) — that row still has an outbox row or a
+   * completed publish record, and resuming it would duplicate the same work.
    */
   async resume(
     runId: string,
@@ -1656,10 +1664,16 @@ export class RunSupervisor {
       return "unknown";
     }
     if (run.state !== "parked") return "not-parked";
-    if (run.blocker?.class === "admin-permission") return "publish-blocked";
+    if (
+      run.blocker?.class === "admin-permission" ||
+      run.published !== null ||
+      this.publishOutbox?.has(run.id)
+    ) {
+      return "publish-blocked";
+    }
 
-    const stage = this.lastStageOf(run);
-    this.trace(run, "resume", "started", opts.note ? `resumed with a note: ${opts.note}` : "resumed");
+    const stage = run.blocker?.stage ?? this.lastStageOf(run);
+    this.trace(run, "restaff", "started", opts.note ? `resumed with a note: ${opts.note}` : "resumed");
     if (opts.note && opts.note.trim()) this.bufferSteer(run.id, opts.note.trim());
     await this.patchRun(run.id, {
       state: stage === "implement" ? "implementing" : "reviewing",
@@ -2172,10 +2186,17 @@ export class RunSupervisor {
         class: blocker.class,
       });
     }
-    const reason = renderBlocker(blocker);
-    await this.patchRun(run.id, { state: "parked", error: reason, blocker });
+    // Stamp the stage HERE, from the pre-park state, rather than leaving `resume()` to guess it
+    // later from `sessionIds` — that object's key ORDER does not track "most recently held" once
+    // a review->rework loop re-assigns an existing key (`patchRun`'s `{ ...fresh.sessionIds,
+    // [stage]: id }` keeps an existing key's original position).
+    const stage: RunStage | null =
+      run.state === "reviewing" ? "review" : run.state === "implementing" ? "implement" : null;
+    const held: Blocker = { ...blocker, stage };
+    const reason = renderBlocker(held);
+    await this.patchRun(run.id, { state: "parked", error: reason, blocker: held });
     this.trace(run, "park", "held", reason);
-    this.logger.warn("run parked for a human", { run: run.id, reason, class: blocker.class });
+    this.logger.warn("run parked for a human", { run: run.id, reason, class: held.class });
   }
 
   /** `class: "transient"` blocker naming `beckett task resume <id>` as the default remedy. */
@@ -2183,11 +2204,11 @@ export class RunSupervisor {
     return makeBlocker(
       {
         class: "transient",
-        actor: "human",
         reversible: true,
         remedy: remedy ?? `\`beckett task resume ${run.id}\``,
         detail,
         defaultAnswer: null,
+        stage: null,
       },
       () => new Date(this.now()),
     );
@@ -2198,11 +2219,11 @@ export class RunSupervisor {
     return makeBlocker(
       {
         class: "admin-permission",
-        actor: "human",
         reversible: true,
         remedy: `\`beckett task courier ${run.id}\` once it is published by hand, or resolve the permission and \`beckett task resume ${run.id}\``,
         detail,
         defaultAnswer: null,
+        stage: null,
       },
       () => new Date(this.now()),
     );
@@ -2211,7 +2232,7 @@ export class RunSupervisor {
   /** `class: "product-decision"` blocker — a judgement call only the owner can make. */
   private productDecisionBlocker(run: Run, detail: string, remedy: string): Blocker {
     return makeBlocker(
-      { class: "product-decision", actor: "human", reversible: true, remedy, detail, defaultAnswer: null },
+      { class: "product-decision", reversible: true, remedy, detail, defaultAnswer: null, stage: null },
       () => new Date(this.now()),
     );
   }

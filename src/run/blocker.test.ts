@@ -16,13 +16,13 @@ describe("blockerFromDoneSignal", () => {
     };
     expect(blockerFromDoneSignal(credential, NOW).actor).toBe("human");
 
-    const transient: DoneBlocker = {
-      class: "transient",
-      detail: "the harness hiccupped",
-      remedy: "retry",
+    const continuation: DoneBlocker = {
+      class: "continuation",
+      detail: "ran out of turn",
+      remedy: "continue",
       defaultAnswer: null,
     };
-    expect(blockerFromDoneSignal(transient, NOW).actor).toBe("supervisor");
+    expect(blockerFromDoneSignal(continuation, NOW).actor).toBe("supervisor");
   });
 
   test("every class maps to exactly the actor the table says, not the caller's preference", () => {
@@ -32,7 +32,11 @@ describe("blockerFromDoneSignal", () => {
       ["product-decision", "human"],
       ["money", "human"],
       ["question", "human"],
-      ["transient", "supervisor"],
+      // "transient" maps to "human" (not "supervisor") for now: nothing in this PR gives the
+      // supervisor a real auto-resume transition, so a worker-emitted transient blocker must
+      // still stop the run rather than tripping hold()'s missing-transition guard on every
+      // routine harness crash. See ./blocker.ts's ACTOR_BY_CLASS comment.
+      ["transient", "human"],
       ["continuation", "supervisor"],
     ];
     for (const [cls, actor] of cases) {
@@ -43,25 +47,32 @@ describe("blockerFromDoneSignal", () => {
       expect(blocker.actor).toBe(actor);
     }
   });
+
+  test("a worker-emitted transient blocker does not trip hold()'s missing-transition log", () => {
+    // Regression: ACTOR_BY_CLASS used to map "transient" -> "supervisor", so every harness-exit
+    // done-signal (src/drivers/pi.ts's exitFinishStructuredOutput, always class "transient")
+    // produced a blocker that `stopsTheRun` said should NOT stop the run — hold()'s own guard
+    // logs an error whenever that happens, so a routine crash logged a false "missing transition."
+    const transient = blockerFromDoneSignal(
+      { class: "transient", detail: "the harness hiccupped", remedy: "retry", defaultAnswer: null },
+      NOW,
+    );
+    expect(stopsTheRun(transient)).toBe(true);
+  });
 });
 
 describe("stopsTheRun", () => {
-  test("transient and continuation never stop the run", () => {
-    const transient = makeBlocker(
-      { class: "transient", actor: "supervisor", reversible: true, remedy: "retry", detail: "d", defaultAnswer: null },
-      NOW,
-    );
+  test("continuation never stops the run", () => {
     const continuation = makeBlocker(
-      { class: "continuation", actor: "supervisor", reversible: true, remedy: "continue", detail: "d", defaultAnswer: null },
+      { class: "continuation", reversible: true, remedy: "continue", detail: "d", defaultAnswer: null, stage: null },
       NOW,
     );
-    expect(stopsTheRun(transient)).toBe(false);
     expect(stopsTheRun(continuation)).toBe(false);
   });
 
   test("a human-actor blocker stops the run", () => {
     const credential = makeBlocker(
-      { class: "credential", actor: "human", reversible: true, remedy: "provide it", detail: "d", defaultAnswer: null },
+      { class: "credential", reversible: true, remedy: "provide it", detail: "d", defaultAnswer: null, stage: null },
       NOW,
     );
     expect(stopsTheRun(credential)).toBe(true);
@@ -73,11 +84,11 @@ describe("renderBlocker", () => {
     const blocker = makeBlocker(
       {
         class: "credential",
-        actor: "human",
         reversible: true,
         remedy: "provide a credential",
         detail: "needs a GitHub token with repo scope",
         defaultAnswer: null,
+        stage: null,
       },
       NOW,
     );

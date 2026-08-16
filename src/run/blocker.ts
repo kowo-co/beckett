@@ -26,13 +26,25 @@ const ACTOR_BY_CLASS: Record<BlockerClass, BlockerActor> = {
   "product-decision": "human",
   money: "human",
   question: "human",
-  transient: "supervisor",
+  // "human" for now (not "supervisor") because nothing in this PR gives the supervisor a real
+  // auto-resume transition for a transient failure — every harness-exit done-signal comes through
+  // here with class "transient" (`src/drivers/pi.ts`), and an actor the run cannot itself clear
+  // would trip `hold()`'s missing-transition guard on every routine crash. Flips to "supervisor"
+  // once Task 3 gives it somewhere real to go.
+  transient: "human",
   continuation: "supervisor",
 };
 
-/** Mint a {@link Blocker}, stamping `at` from `now` (injectable for tests). */
-export function makeBlocker(input: Omit<Blocker, "at">, now: () => Date = () => new Date()): Blocker {
-  return { ...input, at: now().toISOString() };
+/**
+ * Mint a {@link Blocker}. `actor` is NOT part of the input — it is looked up from
+ * {@link ACTOR_BY_CLASS} by `class`, so no call site (worker-driven or supervisor-driven) can
+ * pass its own opinion of who should clear it. `at` is stamped from `now` (injectable for tests).
+ */
+export function makeBlocker(
+  input: Omit<Blocker, "at" | "actor">,
+  now: () => Date = () => new Date(),
+): Blocker {
+  return { ...input, actor: ACTOR_BY_CLASS[input.class], at: now().toISOString() };
 }
 
 /** Only a human-actor blocker stops a run. Everything else is the supervisor's own business. */
@@ -49,11 +61,11 @@ export function blockerFromDoneSignal(s: DoneBlocker, now: () => Date = () => ne
   return makeBlocker(
     {
       class: s.class,
-      actor: ACTOR_BY_CLASS[s.class],
       reversible: true,
       remedy: s.remedy,
       detail: s.detail,
       defaultAnswer: s.defaultAnswer,
+      stage: null,
     },
     now,
   );

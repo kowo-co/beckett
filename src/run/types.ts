@@ -72,6 +72,13 @@ export interface Blocker {
   detail: string;
   /** For class "question": what fires if nobody answers before the timeout. */
   defaultAnswer: string | null;
+  /**
+   * The stage the run was held FROM, stamped by `hold()` itself — not derived after the fact from
+   * `sessionIds`, whose key order does not track "most recently held" once a rework loop
+   * re-assigns an existing key. `null` for a run that never spawned a session, or an old
+   * persisted row from before this field existed; `resume()` falls back to `lastStageOf` then.
+   */
+  stage: RunStage | null;
   /** ISO. */
   at: string;
 }
