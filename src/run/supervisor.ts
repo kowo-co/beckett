@@ -87,6 +87,7 @@ import {
   publishFailureReason,
   publishFixHint,
   publishParkAdvice,
+  publishPrAdvice,
   type PublishOperation,
   type PublishRetryPlan,
 } from "../dispatch/publish-outbox.ts";
@@ -1279,7 +1280,10 @@ export class RunSupervisor {
       // to, so park immediately — with the same actionable text a laddered failure gets, including
       // the branch-aware hand-off advice (BUG 2).
       const hint = publishFixHint(outcome.error);
-      const advice = await this.publishHandoffAdvice(publishing);
+      const prUrlInError = outcome.error.match(/https?:\/\/\S+\/pull\/\d+/)?.[0];
+      const advice = prUrlInError
+        ? publishPrAdvice(prUrlInError, publishing.id)
+        : await this.publishHandoffAdvice(publishing);
       await this.hold(
         publishing,
         this.adminPermissionBlocker(
@@ -1324,10 +1328,10 @@ export class RunSupervisor {
       // is what makes the hand-off advice correct instead of the blanket "just push it" that would
       // have duplicated or reverted shipped work on every 2026-08-14 stall (BUG 2).
       const advice = await this.publishHandoffAdvice(run);
-      await this.hold(run, this.adminPermissionBlocker(run, publishFailureReason(plan, attempt, advice)));
+      await this.hold(run, this.adminPermissionBlocker(run, publishFailureReason(plan, attempt, advice, run.id)));
       return;
     }
-    await this.patchRun(run.id, { error: publishFailureReason(plan, attempt) });
+    await this.patchRun(run.id, { error: publishFailureReason(plan, attempt, undefined, run.id) });
   }
 
   /**
@@ -1367,11 +1371,13 @@ export class RunSupervisor {
     // returns is measured from HERE rather than from whenever the run entered `publishing`.
     this.publishStallClock.set(run.id, Date.now());
     try {
-      // #246: the squashed publish commit is the ONLY place the review summary/mechanism writeup can
-      // land once a direct push carries no PR body — so its message must carry both the run's title
-      // (the subject a `git log`/commit-URL reader sees first) and the review summary (the body). No
-      // invented commitMessage when there's no summary (e.g. a crash-recovery re-attempt whose
-      // reviewer summary didn't survive) — `description: run.title` already covers the squash
+      // #246: the PR body is now the primary carrier of the review summary/mechanism writeup (it's
+      // appended there from this same commitMessage — see GitHubCli.ensurePublished), and the
+      // squashed publish commit is the secondary one, still needed for a branchless-repo direct push
+      // that carries no PR at all. So this message must carry both the run's title (the subject a
+      // `git log`/commit-URL reader sees first) and the review summary (the body). No invented
+      // commitMessage when there's no summary (e.g. a crash-recovery re-attempt whose reviewer
+      // summary didn't survive) — `description: run.title` already covers the squash
       // fallback title downstream (`GitHubCli.ensurePublished`'s `p.commitMessage ?? title`).
       const result = await this.publishRepo({
         slug: runProjectSlug(run),
@@ -1847,12 +1853,13 @@ export class RunSupervisor {
       // on every poll tick — but the run engine has no poller, so without this the 1m/5m/30m retry
       // schedule would only ever run at daemon boot and a transiently-failed publish would sit in
       // `publishing` (skipped below via `publishOutbox.has`) until the next restart. An outbox fault
-      // must never block staffing recovery, hence the local catch.
-      try {
-        await this.replayPublishes();
-      } catch (err) {
+      // must never block staffing recovery, hence the local catch — and since a due row can now
+      // wait up to PUBLISH_CI_TIMEOUT_MS on CI (publish-via-PR), the drain is DETACHED from this
+      // tick: the watchdog must keep detecting stalls and restaffing while GitHub thinks.
+      // `PublishOutbox.drain` is single-flight in-process, so an overlapping tick is a no-op.
+      void this.replayPublishes().catch((err) => {
         this.logger.warn("publish outbox drain failed (staffing pass continues)", { error: String(err) });
-      }
+      });
       // …then end any `publishing` run nothing is going to move. The loop below CANNOT do it:
       // `stageFor()` returns null for `publishing`, so a run wedged there is invisible to the
       // staffing watchdog by design — which is exactly how one sat there silently for half an hour.

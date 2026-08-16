@@ -42,6 +42,44 @@ const forkView = (upstream: string): RunResult => ok(JSON.stringify({ isFork: tr
  *  we're forking from (a mirror, e.g. `0xbeckett/nothing` cloned for `--project nothing`). */
 const notAForkView = (): RunResult => ok(JSON.stringify({ isFork: false }));
 
+/** `gh pr list --head <branch> --state open` response: no open PR yet. */
+const noOpenPr = (): RunResult => ok("[]\n");
+/** `gh pr create` response: the URL gh prints on stdout (the PR-open path parses it back out). */
+const prCreated = (n: number, repo = "0xbeckett/beckett"): RunResult => ok(`https://github.com/${repo}/pull/${n}\n`);
+/**
+ * `gh pr view --json …mergeable…` response — the landing engine's one read of a PR's verdict.
+ * Defaults to a clean, checks-green PR so `gateMerge` returns `{ kind: "ready" }` and the caller can
+ * override just the field that matters for its scenario.
+ */
+function prView(
+  n: number,
+  opts: {
+    repo?: string;
+    state?: string;
+    isDraft?: boolean;
+    mergeable?: string;
+    mergeStateStatus?: string;
+    headRefName?: string;
+    baseRefName?: string;
+    statusCheckRollup?: Array<{ status?: string; conclusion?: string }>;
+  } = {},
+): RunResult {
+  return ok(
+    JSON.stringify({
+      number: n,
+      url: `https://github.com/${opts.repo ?? "0xbeckett/beckett"}/pull/${n}`,
+      title: "t",
+      state: opts.state ?? "OPEN",
+      isDraft: opts.isDraft ?? false,
+      mergeable: opts.mergeable ?? "MERGEABLE",
+      mergeStateStatus: opts.mergeStateStatus ?? "CLEAN",
+      headRefName: opts.headRefName ?? "beckett/x",
+      baseRefName: opts.baseRefName ?? "main",
+      statusCheckRollup: opts.statusCheckRollup ?? [{ status: "COMPLETED", conclusion: "SUCCESS" }],
+    }),
+  );
+}
+
 /** A real git runner for the squash-landing regression fixture below. */
 async function realRun(cmd: string[], opts?: { cwd?: string; env?: Record<string, string | undefined> }): Promise<RunResult> {
   const env = Object.fromEntries(Object.entries(opts?.env ?? process.env).filter(([, value]) => value !== undefined)) as Record<string, string>;
@@ -63,7 +101,7 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 /** Build a GitHubCli whose subprocess runner is `route`, recording every argv it sees. */
 function cli(
   route: (joined: string, cmd: string[]) => RunResult | undefined,
-  target: { account?: string; owner?: string } = {},
+  target: { account?: string; owner?: string; now?: () => number; sleep?: (ms: number) => Promise<void> } = {},
 ) {
   const calls: string[] = [];
   const envs: Array<Record<string, string | undefined> | undefined> = [];
@@ -81,6 +119,8 @@ function cli(
     resolveRepoDir: () => "/src",
     logger: noopLog,
     run: run as never,
+    now: target.now,
+    sleep: target.sleep,
   });
   return { gh, calls, envs };
 }
@@ -166,75 +206,180 @@ test("third-party forks and PR heads stay under the authenticated account, not t
   expect(create).not.toContain("acme-labs:");
 });
 
-test("case 2 — repo we already own: integrate remote (fetch+rebase) then push HEAD→default branch", async () => {
+test("case 2 — owned repo: push the run branch, open the PR, merge it with squash", async () => {
   const { gh, calls } = cli((j) => {
     if (j.startsWith("git remote get-url origin")) return fail("no origin");
     if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}'); // exists
     if (j.includes("api --method PATCH")) return ok(); // setPublic
     if (j.includes("--json defaultBranchRef")) return ok("main");
     if (j.startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
-    if (j.startsWith("git fetch")) return ok(); // remote tip present
-    if (j.startsWith("git rebase")) return ok(); // clean rebase
     if (j.startsWith("git push")) return ok();
+    if (j.startsWith("gh pr list")) return noOpenPr();
+    if (j.startsWith("gh pr create")) return prCreated(42);
+    if (j.startsWith("gh pr view 42")) return prView(42);
+    if (j.startsWith("gh pr merge 42")) return ok();
     return undefined;
   });
   const r = await gh.ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "OPS-25" });
-  expect(r.kind).toBe("pushed"); // owned repos ship straight to main
+  expect(r.kind).toBe("pushed"); // PublishResult is unchanged: a merged PR still reports "pushed"
+  expect(r.prUrl).toBe("https://github.com/0xbeckett/beckett/pull/42");
   const pushes = calls.filter((c) => c.startsWith("git push"));
-  // The run's OWN branch is pushed FIRST — durability, unconditional, before trunk is even fetched.
+  // The run's OWN branch is pushed FIRST — durability, unconditional — then the PR/CI/merge motion.
   expect(pushes[0]).toContain("HEAD:refs/heads/beckett/ops-25");
-  expect(calls.indexOf(pushes[0]!)).toBeLessThan(calls.findIndex((c) => c.startsWith("git fetch")));
-  // Fetched + rebased the remote tip (fixes the OPS-25/27 non-fast-forward reject), then pushed main.
-  expect(calls.some((c) => c.startsWith("git fetch"))).toBe(true);
-  expect(calls.some((c) => c.startsWith("git rebase FETCH_HEAD"))).toBe(true);
-  expect(pushes[1]).toContain("HEAD:refs/heads/main");
-  expect(calls.some((c) => c.startsWith("gh pr create"))).toBe(false); // owned repo → no PR
+  const prCreateIdx = calls.findIndex((c) => c.startsWith("gh pr create"));
+  expect(calls.indexOf(pushes[0]!)).toBeLessThan(prCreateIdx);
+  expect(calls.some((c) => c.startsWith("gh pr list"))).toBe(true);
+  expect(calls.some((c) => c.startsWith("gh pr view 42"))).toBe(true);
+  expect(calls.some((c) => c.startsWith("gh pr merge 42") && c.includes("--squash") && c.includes("--delete-branch"))).toBe(true);
+  // No local rebase/apply anywhere — GitHub does the integration, not the sandbox.
+  expect(calls.some((c) => c.startsWith("git fetch"))).toBe(false);
+  expect(calls.some((c) => c.startsWith("git rebase"))).toBe(false);
+  expect(calls.some((c) => c.startsWith("git apply"))).toBe(false);
 });
 
-test("case 2 pushes the run branch BEFORE it touches trunk", async () => {
-  const { gh, calls } = cli((j) => {
+test("the merge never runs inside the run's worktree", async () => {
+  const mergeCwds: Array<string | undefined> = [];
+  const gh = new (await import("./index.ts")).GitHubCli({
+    pat: "tok",
+    account: "0xbeckett",
+    apiBase: "https://api.github.com",
+    resolveRepoDir: () => "/src",
+    logger: noopLog,
+    run: (async (cmd: string[], opts?: { cwd?: string; env?: Record<string, string | undefined> }) => {
+      const j = cmd.join(" ");
+      if (j.startsWith("gh pr merge")) mergeCwds.push(opts?.cwd);
+      if (j.startsWith("git remote get-url origin")) return fail("no origin");
+      if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
+      if (j.includes("api --method PATCH")) return ok();
+      if (j.includes("--json defaultBranchRef")) return ok("main");
+      if (j.startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
+      if (j.startsWith("git push")) return ok();
+      if (j.startsWith("gh pr list")) return noOpenPr();
+      if (j.startsWith("gh pr create")) return prCreated(7);
+      if (j.startsWith("gh pr view 7")) return prView(7);
+      if (j.startsWith("gh pr merge 7")) return ok();
+      return fail(`unrouted: ${j}`);
+    }) as never,
+  });
+  await gh.ensurePublished({ slug: "beckett", sourceDir: "/src/run-worktree", ticket: "OPS-25" });
+  expect(mergeCwds.length).toBe(1);
+  expect(mergeCwds[0]).not.toBe("/src/run-worktree");
+  expect(mergeCwds[0]).not.toBe("/src");
+});
+
+test("an open PR is reused on a retry and a MERGED PR short-circuits to success", async () => {
+  let prListed = 0;
+  let prCreatedCount = 0;
+  let merged = 0;
+  const route = (j: string) => {
     if (j.startsWith("git remote get-url origin")) return fail("no origin");
     if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
     if (j.includes("api --method PATCH")) return ok();
     if (j.includes("--json defaultBranchRef")) return ok("main");
     if (j.startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
-    if (j.startsWith("git fetch")) return ok();
-    if (j.startsWith("git rebase")) return ok();
     if (j.startsWith("git push")) return ok();
+    if (j.startsWith("gh pr list")) {
+      prListed++;
+      return prListed === 1 ? noOpenPr() : ok(JSON.stringify([{ number: 9, url: "https://github.com/0xbeckett/beckett/pull/9" }]));
+    }
+    if (j.startsWith("gh pr create")) {
+      prCreatedCount++;
+      return prCreated(9);
+    }
+    if (j.startsWith("gh pr view 9")) return prListed === 1 ? prView(9) : prView(9, { state: "MERGED" });
+    if (j.startsWith("gh pr merge 9")) {
+      merged++;
+      return ok();
+    }
     return undefined;
-  });
-  await gh.ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "run-x" });
-  const branchPushIdx = calls.findIndex((c) => c.startsWith("git push") && c.includes("refs/heads/beckett/run-x"));
-  const firstFetchIdx = calls.findIndex((c) => c.startsWith("git fetch"));
-  const firstRebaseIdx = calls.findIndex((c) => c.startsWith("git rebase"));
-  expect(branchPushIdx).toBeGreaterThanOrEqual(0);
-  expect(branchPushIdx).toBeLessThan(firstFetchIdx);
-  expect(branchPushIdx).toBeLessThan(firstRebaseIdx);
+  };
+  const { gh } = cli(route);
+  const first = await gh.ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "OPS-25" });
+  expect(first.prUrl).toBe("https://github.com/0xbeckett/beckett/pull/9");
+  expect(prCreatedCount).toBe(1);
+  expect(merged).toBe(1);
+  // Retry: findOpenPR now reports the SAME PR already open — reuse it, no second `pr create`.
+  // (A truly idempotent re-run also reports it MERGED — either way, no second merge call.)
+  const second = await gh.ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "OPS-25" });
+  expect(second.prUrl).toBe("https://github.com/0xbeckett/beckett/pull/9");
+  expect(prCreatedCount).toBe(1); // still just the one `pr create`
+  expect(merged).toBe(1); // MERGED short-circuits — no second `pr merge`
 });
 
-test("the run branch is pushed even when the trunk push then fails", async () => {
+test("a CONFLICTING PR fails the publish with the PR url and never touches the local checkout", async () => {
   const { gh, calls } = cli((j) => {
     if (j.startsWith("git remote get-url origin")) return fail("no origin");
     if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
     if (j.includes("api --method PATCH")) return ok();
     if (j.includes("--json defaultBranchRef")) return ok("main");
     if (j.startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
-    if (j.startsWith("git fetch")) return ok();
-    if (j.startsWith("git rebase")) return ok(); // clean rebase, so the real push is what fails
-    // The run-branch (durability) push succeeds; the trunk push to `main` fails.
-    if (j.startsWith("git push") && j.includes("refs/heads/beckett/run-x")) return ok();
-    if (j.startsWith("git push") && j.includes("refs/heads/main")) return fail("remote rejected the push", 1);
+    if (j.startsWith("git push")) return ok();
+    if (j.startsWith("gh pr list")) return noOpenPr();
+    if (j.startsWith("gh pr create")) return prCreated(11);
+    if (j.startsWith("gh pr view 11")) return prView(11, { mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" });
     return undefined;
   });
-  await expect(gh.ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "run-x" })).rejects.toThrow(
-    /remote rejected the push/,
+  const failure = await gh
+    .ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "OPS-25" })
+    .then(() => null, (err: Error) => err.message);
+  expect(failure).toMatch(/^publish blocked:/);
+  expect(failure).toContain("https://github.com/0xbeckett/beckett/pull/11");
+  expect(calls.some((c) => c.startsWith("gh pr merge"))).toBe(false);
+  expect(calls.some((c) => c.startsWith("git checkout"))).toBe(false);
+  expect(calls.some((c) => c.startsWith("git apply"))).toBe(false);
+});
+
+test("CI still pending at the budget hands the wait back to the retry ladder", async () => {
+  // A fake clock that jumps well past PUBLISH_CI_TIMEOUT_MS (5min) on the SECOND read — the first
+  // read establishes `startedAt`, so `landBranch`'s loop sees "still pending" once, then "over budget".
+  let clock = 0;
+  const now = () => clock;
+  const sleep = async () => {
+    clock += 6 * 60_000;
+  };
+  const { gh } = cli(
+    (j) => {
+      if (j.startsWith("git remote get-url origin")) return fail("no origin");
+      if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
+      if (j.includes("api --method PATCH")) return ok();
+      if (j.includes("--json defaultBranchRef")) return ok("main");
+      if (j.startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
+      if (j.startsWith("git push")) return ok();
+      if (j.startsWith("gh pr list")) return noOpenPr();
+      if (j.startsWith("gh pr create")) return prCreated(13);
+      if (j.startsWith("gh pr view 13")) return prView(13, { statusCheckRollup: [{ status: "IN_PROGRESS" }] });
+      return undefined;
+    },
+    { now, sleep },
   );
-  // The branch push happened...
-  expect(calls.some((c) => c.startsWith("git push") && c.includes("refs/heads/beckett/run-x"))).toBe(true);
-  // ...and the thrown error is the trunk push's own failure, not swallowed by the branch push.
-  const pushes = calls.filter((c) => c.startsWith("git push"));
-  expect(pushes.length).toBe(2);
-  expect(pushes[1]).toContain("refs/heads/main");
+  const failure = await gh
+    .ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "OPS-25" })
+    .then(() => null, (err: Error) => err.message);
+  expect(failure).toContain("still waiting on CI");
+  expect(failure).toContain("https://github.com/0xbeckett/beckett/pull/13");
+  expect(failure).toMatch(/^publish: still waiting on CI/);
+});
+
+test("a non-main integration target opens the PR against THAT branch and never names main", async () => {
+  const { gh, calls } = cli((j) => {
+    if (j.startsWith("git remote get-url origin")) return fail("no origin");
+    if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
+    if (j.includes("api --method PATCH")) return ok();
+    if (j.includes("--json defaultBranchRef")) return ok("main"); // must never be consulted
+    if (j.startsWith("gh api repos/0xbeckett/beckett/branches/v5-daemon")) return ok("v5-daemon");
+    if (j.startsWith("git push")) return ok();
+    if (j.startsWith("gh pr list")) return noOpenPr();
+    if (j.startsWith("gh pr create")) return prCreated(21);
+    if (j.startsWith("gh pr view 21")) return prView(21, { baseRefName: "v5-daemon" });
+    if (j.startsWith("gh pr merge 21")) return ok();
+    return undefined;
+  });
+  await gh.ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "OPS-180", targetBranch: "v5-daemon" });
+  expect(calls.some((c) => c.includes("--json defaultBranchRef"))).toBe(false);
+  expect(calls.some((c) => c.startsWith("gh api repos/0xbeckett/beckett/branches/v5-daemon"))).toBe(true);
+  const create = calls.find((c) => c.startsWith("gh pr create"))!;
+  expect(create).toContain("--base v5-daemon");
+  expect(calls.some((c) => c.includes("refs/heads/main"))).toBe(false);
 });
 
 test("a default branch that is itself a beckett/run-* branch is refused, and nothing is pushed", async () => {
@@ -250,23 +395,6 @@ test("a default branch that is itself a beckett/run-* branch is refused, and not
     gh.ensurePublished({ slug: "babble", sourceDir: "/src", ticket: "OPS-25" }),
   ).rejects.toThrow(/needs a human/);
   expect(calls.some((c) => c.startsWith("git push"))).toBe(false);
-});
-
-test("an integration target branch is used as the trunk without consulting the repo default (OPS-185)", async () => {
-  const { gh, calls } = cli((j) => {
-    if (j.startsWith("git remote get-url origin")) return fail("no origin");
-    if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
-    if (j.includes("api --method PATCH")) return ok();
-    if (j.includes("--json defaultBranchRef")) return ok("main"); // must never be consulted
-    if (j.startsWith("gh api repos/0xbeckett/beckett/branches/v5-daemon")) return ok("v5-daemon");
-    if (j.startsWith("git fetch")) return ok();
-    if (j.startsWith("git rebase")) return ok();
-    if (j.startsWith("git push")) return ok();
-    return undefined;
-  });
-  await gh.ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "OPS-180", targetBranch: "v5-daemon" });
-  expect(calls.some((c) => c.includes("--json defaultBranchRef"))).toBe(false);
-  expect(calls.some((c) => c.startsWith("gh api repos/0xbeckett/beckett/branches/v5-daemon"))).toBe(true);
 });
 
 // Review finding (must, 2026-08-15): on a branchless repo (`trunk.exists === false`), pushing the
@@ -293,44 +421,56 @@ test("case 2 — when the trunk does not exist yet, the trunk is pushed BEFORE t
 // already at an earlier tip on the remote — a plain non-force push then rejects non-fast-forward.
 // That must read as "durability already satisfied", not a hard failure that wedges the retry ladder
 // before the trunk push is ever reattempted.
-test("a non-fast-forward reject on the durability push is swallowed, and the trunk push still happens", async () => {
+test("a non-fast-forward reject on the durability push is swallowed, and the PR/merge motion still happens", async () => {
+  // The durability push (`pushRunBranch`) and `landBranch`'s own re-push of the SAME branch both
+  // target `refs/heads/beckett/run-x`; only the FIRST (the durability push) is made to reject here —
+  // by the time `landBranch` re-pushes the identical, already-current tip, a real remote would report
+  // "Everything up-to-date" (no reject at all), which this fixture models as a plain success.
+  let branchPushes = 0;
   const { gh, calls } = cli((j) => {
     if (j.startsWith("git remote get-url origin")) return fail("no origin");
     if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
     if (j.includes("api --method PATCH")) return ok();
     if (j.includes("--json defaultBranchRef")) return ok("main");
     if (j.startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
-    if (j.startsWith("git fetch")) return ok();
-    if (j.startsWith("git rebase")) return ok();
-    if (j.startsWith("git push") && j.includes("refs/heads/beckett/run-x")) {
-      return fail("! [rejected] refs/heads/beckett/run-x -> refs/heads/beckett/run-x (non-fast-forward)", 1);
+    if (j.startsWith("git push")) {
+      branchPushes++;
+      if (branchPushes === 1) {
+        return fail("! [rejected] refs/heads/beckett/run-x -> refs/heads/beckett/run-x (non-fast-forward)", 1);
+      }
+      return ok();
     }
-    if (j.startsWith("git push") && j.includes("refs/heads/main")) return ok();
+    if (j.startsWith("gh pr list")) return noOpenPr();
+    if (j.startsWith("gh pr create")) return prCreated(55);
+    if (j.startsWith("gh pr view 55")) return prView(55);
+    if (j.startsWith("gh pr merge 55")) return ok();
     return undefined;
   });
   const r = await gh.ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "run-x" });
   expect(r.kind).toBe("pushed");
-  const pushes = calls.filter((c) => c.startsWith("git push"));
-  expect(pushes.length).toBe(2);
-  expect(pushes[1]).toContain("refs/heads/main");
+  expect(r.prUrl).toBe("https://github.com/0xbeckett/beckett/pull/55");
+  expect(branchPushes).toBeGreaterThanOrEqual(2);
+  expect(calls.some((c) => c.startsWith("gh pr merge 55"))).toBe(true);
 });
 
-test("#246 — a run's raw checkpoint commits squash into ONE before push, and prUrl is a real commit URL (never the bare repo root)", async () => {
+test("#246 — a run's raw checkpoint commits squash into ONE before the branch push, and the PR carries the review write-up", async () => {
   const { gh, calls } = cli((j) => {
     if (j.startsWith("git remote get-url origin")) return fail("no origin");
     if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}'); // exists
     if (j.includes("api --method PATCH")) return ok(); // setPublic
     if (j.includes("--json defaultBranchRef")) return ok("main");
+    if (j.startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
     if (j.startsWith("git rev-parse --verify --quiet HEAD")) return ok("tipsha0000000");
     if (j.startsWith("git rev-parse --verify --quiet wk_base")) return ok("basesha0000000");
     if (j.startsWith("git merge-base --is-ancestor")) return ok(); // base IS an ancestor of the checkpoints
     if (j.startsWith("git rev-list --count")) return ok("5"); // five raw checkpoint commits, like f9383c0..07d1480
     if (j.startsWith("git reset --soft basesha0000000")) return ok();
     if (j.startsWith("git -c commit.gpgsign=false commit")) return ok();
-    if (j.startsWith("git fetch")) return ok(); // remote tip present
-    if (j.startsWith("git rebase")) return ok(); // clean rebase (the squashed commit applies cleanly)
     if (j.startsWith("git push")) return ok();
-    if (j === "git rev-parse HEAD") return ok("landedsha0000000"); // the sha actually pushed
+    if (j.startsWith("gh pr list")) return noOpenPr();
+    if (j.startsWith("gh pr create")) return prCreated(88);
+    if (j.startsWith("gh pr view 88")) return prView(88);
+    if (j.startsWith("gh pr merge 88")) return ok();
     return undefined;
   });
   const r = await gh.ensurePublished({
@@ -341,52 +481,17 @@ test("#246 — a run's raw checkpoint commits squash into ONE before push, and p
     commitMessage: "run title\n\nreview summary / mechanism writeup",
   });
   expect(r.kind).toBe("pushed");
-  // Squashed BEFORE the fetch/rebase/push — the raw checkpoint history never even reaches them.
+  // Squashed BEFORE the branch push — the raw checkpoint history never even reaches the remote.
   expect(calls.some((c) => c.startsWith("git reset --soft basesha0000000"))).toBe(true);
   const commit = calls.find((c) => c.startsWith("git -c commit.gpgsign=false commit"))!;
   expect(commit).toContain("run title");
-  expect(commit).toContain("review summary / mechanism writeup");
   // Exactly one squash commit landed — not five raw "checkpoint (wk_...)" commits.
   expect(calls.filter((c) => c.startsWith("git -c commit.gpgsign=false commit")).length).toBe(1);
-  // prUrl is a REAL, non-root URL (the commit), matching what the Discord publish announcement renders.
-  expect(r.prUrl).toBeDefined();
-  expect(r.prUrl).toContain("/commit/landedsha0000000");
-  expect(r.prUrl).not.toBe(`${"https://github.com"}/0xbeckett/beckett`);
-});
-
-test("case 2 — a non-main target branch publishes to THAT branch and never touches main (OPS-185)", async () => {
-  const { gh, calls } = cli((j) => {
-    if (j.startsWith("git remote get-url origin")) return fail("no origin");
-    if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}'); // exists
-    if (j.includes("api --method PATCH")) return ok(); // setPublic
-    if (j.includes("--json defaultBranchRef")) return ok("main"); // MUST NOT be consulted for a non-main target
-    if (j.startsWith("gh api repos/0xbeckett/beckett/branches/v5-daemon")) return ok("v5-daemon"); // integration branch exists
-    if (j.startsWith("git fetch")) return ok(); // integration branch tip present
-    if (j.startsWith("git rebase")) return ok(); // clean rebase onto v5-daemon
-    if (j.startsWith("git push")) return ok();
-    return undefined;
-  });
-  const r = await gh.ensurePublished({
-    slug: "beckett",
-    sourceDir: "/src",
-    ticket: "OPS-180",
-    targetBranch: "v5-daemon",
-  });
-  expect(r.kind).toBe("pushed");
-  // The run's own branch is pushed first (durability), THEN the integration branch is integrated.
-  const pushes = calls.filter((c) => c.startsWith("git push"));
-  expect(pushes[0]).toContain("HEAD:refs/heads/beckett/ops-180");
-  const fetch = calls.find((c) => c.startsWith("git fetch"))!;
-  expect(fetch).toContain("v5-daemon");
-  expect(calls.some((c) => c.startsWith("git rebase FETCH_HEAD"))).toBe(true);
-  expect(pushes[1]).toContain("HEAD:refs/heads/v5-daemon");
-  // The load-bearing guarantee: NOTHING in the whole publish references `main`. No push, no fetch,
-  // no rebase advances the default branch, so origin/main is provably untouched. The repo default
-  // is never even queried — the target is authoritative.
-  expect(calls.some((c) => c.includes("refs/heads/main"))).toBe(false);
-  expect(calls.some((c) => c.startsWith("git fetch") && /\bmain\b/.test(c))).toBe(false);
-  expect(calls.some((c) => c.includes("--json defaultBranchRef"))).toBe(false);
-  expect(calls.some((c) => c.startsWith("gh pr create"))).toBe(false); // funnel is a push, not a PR
+  // The review write-up now lives in the PR body (#246's squash commit was the only carrier before).
+  const create = calls.find((c) => c.startsWith("gh pr create"))!;
+  expect(create).toContain("review summary / mechanism writeup");
+  // prUrl is the merged PR's URL, matching what the Discord publish announcement renders.
+  expect(r.prUrl).toBe("https://github.com/0xbeckett/beckett/pull/88");
 });
 
 test("case 2 — an explicit `main` target keeps the default-branch publish byte-for-byte", async () => {
@@ -398,9 +503,11 @@ test("case 2 — an explicit `main` target keeps the default-branch publish byte
     if (j.includes("api --method PATCH")) return ok();
     if (j.includes("--json defaultBranchRef")) return ok("main");
     if (j.startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
-    if (j.startsWith("git fetch")) return ok();
-    if (j.startsWith("git rebase")) return ok();
     if (j.startsWith("git push")) return ok();
+    if (j.startsWith("gh pr list")) return noOpenPr();
+    if (j.startsWith("gh pr create")) return prCreated(66);
+    if (j.startsWith("gh pr view 66")) return prView(66);
+    if (j.startsWith("gh pr merge 66")) return ok();
     return undefined;
   });
   const r = await gh.ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "OPS-25", targetBranch: "main" });
@@ -408,98 +515,15 @@ test("case 2 — an explicit `main` target keeps the default-branch publish byte
   expect(calls.some((c) => c.includes("--json defaultBranchRef"))).toBe(true); // default branch resolved as usual
   const pushes = calls.filter((c) => c.startsWith("git push"));
   expect(pushes[0]).toContain("HEAD:refs/heads/beckett/ops-25");
-  expect(pushes[1]).toContain("HEAD:refs/heads/main");
-});
-
-test("case 2 — a rebase CONFLICT aborts and throws (dispatcher then holds the ticket, no force-push)", async () => {
-  const { gh, calls } = cli((j) => {
-    if (j.startsWith("git remote get-url origin")) return fail("no origin");
-    if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
-    if (j.includes("api --method PATCH")) return ok();
-    if (j.includes("--json defaultBranchRef")) return ok("main");
-    if (j.startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
-    if (j.startsWith("git fetch")) return ok();
-    if (j.startsWith("git rebase --abort")) return ok();
-    if (j.startsWith("git rebase")) return fail("CONFLICT (content): merge conflict in x");
-    if (j.startsWith("git push")) return ok();
-    return undefined;
-  });
-  await expect(gh.ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "OPS-25" })).rejects.toThrow(
-    /needs a human/,
-  );
-  expect(calls.some((c) => c.startsWith("git rebase --abort"))).toBe(true);
-  // The run's own branch (durability) DID get pushed before the conflict — that's the point of
-  // pushing it first — but nothing ever force-pushed over the conflict on trunk.
-  const pushes = calls.filter((c) => c.startsWith("git push"));
-  expect(pushes.length).toBe(1);
-  expect(pushes[0]).toContain("HEAD:refs/heads/beckett/ops-25");
-  expect(calls.some((c) => c.startsWith("git push") && c.includes("refs/heads/main"))).toBe(false);
-});
-
-test("a residual squash-apply conflict names only the remaining files, not the rebase transcript", async () => {
-  const { gh, calls } = cli((j) => {
-    if (j.startsWith("git remote get-url origin")) return fail("no origin");
-    if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
-    if (j.includes("api --method PATCH")) return ok();
-    if (j.includes("--json defaultBranchRef")) return ok("main");
-    if (j.startsWith("git fetch")) return ok();
-    if (j.startsWith("git rebase --abort")) return ok();
-    if (j.startsWith("git rebase")) return fail("could not apply ancient checkpoint transcript");
-    if (j.startsWith("git rev-parse") && j.includes("HEAD")) return ok("tip");
-    if (j.startsWith("git rev-parse")) return ok("base");
-    if (j.startsWith("git merge-base")) return ok();
-    if (j.startsWith("git diff --quiet")) return fail(); // nonempty worker delta
-    if (j.startsWith("git diff --name-status")) return ok(); // no deletions
-    if (j.startsWith("git branch --show-current")) return ok("beckett/24-3");
-    if (j.startsWith("git checkout -B")) return ok();
-    if (j.startsWith("git diff --binary")) return ok("diff --git a/a b/a\n");
-    if (j.startsWith("git apply --3way")) return fail("conflict internals that a courier does not need");
-    if (j.startsWith("git diff --name-only --diff-filter=U")) return ok("snapshot.test.ts\ngenerated-cli.txt\n");
-    if (j.startsWith("git push")) return ok();
-    return undefined;
-  });
-  let error: Error | undefined;
-  try {
-    await gh.ensurePublished({ slug: "beckett", sourceDir: "/src", baseSha: "base" });
-  } catch (err) {
-    error = err as Error;
-  }
-  expect(error?.message).toContain("snapshot.test.ts, generated-cli.txt");
-  expect(error?.message).not.toContain("ancient checkpoint transcript");
-  expect(calls.some((call) => call.startsWith("git rebase --abort"))).toBe(true);
-});
-
-test("unsafe squash-apply metadata keeps the existing human hold instead of guessing", async () => {
-  const { gh, calls } = cli((j) => {
-    if (j.startsWith("git remote get-url origin")) return fail("no origin");
-    if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
-    if (j.includes("api --method PATCH")) return ok();
-    if (j.includes("--json defaultBranchRef")) return ok("main");
-    if (j.startsWith("git fetch")) return ok();
-    if (j.startsWith("git rebase --abort")) return ok();
-    if (j.startsWith("git rebase")) return fail("original rebase failure");
-    if (j.startsWith("git rev-parse") && j.includes("HEAD")) return ok("tip");
-    if (j.startsWith("git rev-parse")) return ok("base");
-    if (j.startsWith("git merge-base")) return ok();
-    if (j.startsWith("git diff --quiet")) return fail();
-    if (j.startsWith("git diff --name-status")) return ok("D\tnever-touched.txt\n");
-    if (j.startsWith("git log --format=%H")) return ok(); // no deletion commit in the worker range
-    if (j.startsWith("git push")) return ok();
-    return undefined;
-  });
-  await expect(gh.ensurePublished({ slug: "beckett", sourceDir: "/src", baseSha: "base" })).rejects.toThrow(
-    /original rebase failure/,
-  );
-  expect(calls.some((call) => call.startsWith("git apply --3way"))).toBe(false);
 });
 
 /**
- * Acceptance gate for Task 2 (push-the-branch-first): a REAL remote, a REAL trunk-side conflict that
- * makes the trunk push fail, and proof that the run's own branch is durable on the remote anyway —
- * the whole point of pushing it first. No fakes: a fake `git push` can't prove anything left the
- * machine.
+ * Acceptance gate for Task 2+3 (push-the-branch-first / publish-opens-a-pr): a REAL remote and a
+ * REAL branch push, with the PR/merge motion faked to report CONFLICTING — proof that the run's own
+ * work is durable on the remote (and trunk stays untouched) even when GitHub can't integrate it. No
+ * local rebase/apply runs at all; the integration verdict comes ONLY from the (faked) `gh pr view`.
  */
-test("a real trunk-push failure still leaves beckett/run-<id> on the remote (Task 2 acceptance gate)", async () => {
+test("a CONFLICTING publish still leaves beckett/run-<id> on the remote and trunk untouched (acceptance gate)", async () => {
   const root = await mkdtemp(join(tmpdir(), "beckett-publish-push-first-"));
   try {
     const remoteParent = join(root, "0xbeckett");
@@ -527,7 +551,7 @@ test("a real trunk-push failure still leaves beckett/run-<id> on the remote (Tas
     await git(worker, "commit", "-m", "run checkpoint");
     const runTip = await git(worker, "rev-parse", "HEAD");
 
-    // Main moves on with a CONFLICTING edit to the same line, so the rebase genuinely fails.
+    // Main moves on with a conflicting edit to the same line — GitHub will report CONFLICTING.
     await git(root, "clone", "-b", "main", `file://${remote}`, other);
     await git(other, "config", "user.email", "test@example.com");
     await git(other, "config", "user.name", "Test");
@@ -544,119 +568,46 @@ test("a real trunk-push failure still leaves beckett/run-<id> on the remote (Tas
       resolveRepoDir: () => worker,
       logger: noopLog,
       run: (async (cmd: string[], opts?: { cwd?: string; env?: Record<string, string | undefined> }) => {
-        calls.push(cmd.join(" "));
+        const j = cmd.join(" ");
+        calls.push(j);
         if (cmd[0] === "git") return realRun(cmd, opts);
-        if (cmd.join(" ").startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
-        if (cmd.join(" ").includes("api --method PATCH")) return ok();
-        if (cmd.join(" ").includes("--json defaultBranchRef")) return ok("main");
-        if (cmd.join(" ").startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
-        return fail(`unrouted: ${cmd.join(" ")}`);
+        if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
+        if (j.includes("api --method PATCH")) return ok();
+        if (j.includes("--json defaultBranchRef")) return ok("main");
+        if (j.startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
+        if (j.startsWith("gh pr list")) return noOpenPr();
+        if (j.startsWith("gh pr create")) return prCreated(19);
+        if (j.startsWith("gh pr view 19")) return prView(19, { mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" });
+        return fail(`unrouted: ${j}`);
       }) as never,
     });
     (gh as unknown as { gitHost: () => string }).gitHost = () => `file://${root}`;
 
-    await expect(
-      gh.ensurePublished({ slug: "beckett", sourceDir: worker, ticket: "run-20260815-conflict" }),
-    ).rejects.toThrow(/needs a human/);
+    const failure = await gh
+      .ensurePublished({ slug: "beckett", sourceDir: worker, ticket: "run-20260815-conflict" })
+      .then(() => null, (err: Error) => err.message);
+    expect(failure).toMatch(/^publish blocked:/);
+    expect(failure).toContain("https://github.com/0xbeckett/beckett/pull/19");
 
-    // The trunk (main) never moved past the seed's push — the conflict really blocked it.
+    // The trunk (main) never moved past the seed's push — nothing local ever touched it.
     expect(await git(root, "--git-dir", remote, "log", "-1", "--format=%s", "main")).toBe(
       "landed meanwhile, conflicts with the run",
     );
     // ...but the run's OWN branch is durable on the remote, at the run's own tip.
     const remoteBranchTip = await git(root, "--git-dir", remote, "rev-parse", "beckett/run-20260815-conflict");
     expect(remoteBranchTip).toBe(runTip);
+    expect(calls.some((c) => c.startsWith("git rebase") || c.startsWith("git apply"))).toBe(false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 }, 30_000);
 
-test("a dependent cut from pre-squash predecessor history squash-applies only its own delta", async () => {
-  const root = await mkdtemp(join(tmpdir(), "beckett-publish-squash-"));
-  try {
-    const remoteParent = join(root, "0xbeckett");
-    const remote = join(remoteParent, "beckett.git");
-    const seed = join(root, "seed");
-    const worker = join(root, "worker");
-    const land = join(root, "land");
-    await mkdir(remoteParent, { recursive: true });
-    await git(root, "init", "--bare", remote);
-    await git(root, "init", "--initial-branch=main", seed);
-    await git(seed, "config", "user.email", "test@example.com");
-    await git(seed, "config", "user.name", "Test");
-    await writeFile(join(seed, "README.md"), "root\n");
-    await git(seed, "add", ".");
-    await git(seed, "commit", "-m", "root");
-    await git(seed, "remote", "add", "origin", `file://${remote}`);
-    await git(seed, "push", "origin", "main");
-
-    await git(root, "clone", "-b", "main", `file://${remote}`, worker);
-    await git(worker, "config", "user.email", "test@example.com");
-    await git(worker, "config", "user.name", "Test");
-    // These are the predecessor's local checkpoints. The dependent starts at its tip.
-    await writeFile(join(worker, "shared.txt"), "checkpoint one\n");
-    await git(worker, "add", ".");
-    await git(worker, "commit", "-m", "predecessor checkpoint one");
-    await writeFile(join(worker, "shared.txt"), "predecessor final\n");
-    await git(worker, "add", ".");
-    await git(worker, "commit", "-m", "predecessor checkpoint two");
-    const predecessorTip = await git(worker, "rev-parse", "HEAD");
-    await writeFile(join(worker, "dependent.txt"), "the dependent's only change\n");
-    await git(worker, "add", ".");
-    await git(worker, "commit", "-m", "dependent checkpoint");
-
-    // Main receives equivalent predecessor content as one squash commit, not the checkpoints.
-    await git(root, "clone", "-b", "main", `file://${remote}`, land);
-    await git(land, "config", "user.email", "test@example.com");
-    await git(land, "config", "user.name", "Test");
-    await writeFile(join(land, "shared.txt"), "predecessor final\n");
-    await git(land, "add", ".");
-    await git(land, "commit", "-m", "squashed predecessor");
-    await git(land, "push", "origin", "main");
-
-    const calls: string[] = [];
-    const gh = new GitHubCli({
-      pat: "tok",
-      account: "0xbeckett",
-      apiBase: "https://api.github.com",
-      resolveRepoDir: () => worker,
-      logger: noopLog,
-      run: (async (cmd: string[], opts?: { cwd?: string; env?: Record<string, string | undefined> }) => {
-        calls.push(cmd.join(" "));
-        if (cmd[0] === "git") return realRun(cmd, opts);
-        if (cmd.join(" ").startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
-        if (cmd.join(" ").includes("api --method PATCH")) return ok();
-        if (cmd.join(" ").includes("--json defaultBranchRef")) return ok("main");
-        return fail(`unrouted: ${cmd.join(" ")}`);
-      }) as never,
-    });
-    // The client normally derives an HTTPS host. The test keeps all real git transport local.
-    (gh as unknown as { gitHost: () => string }).gitHost = () => `file://${root}`;
-
-    const result = await gh.ensurePublished({
-      slug: "beckett",
-      sourceDir: worker,
-      description: "ticket title (not the worker summary)",
-      ticket: "24.3",
-      baseSha: predecessorTip,
-      commitMessage: "dependent worker summary",
-    });
-
-    expect(result.kind).toBe("pushed");
-    expect(calls.some((call) => call.startsWith("git rebase --abort"))).toBe(true);
-    expect(calls.some((call) => call.startsWith("git apply --3way"))).toBe(true);
-    expect(await git(root, "--git-dir", remote, "show", "main:dependent.txt")).toBe("the dependent's only change");
-    expect(await git(root, "--git-dir", remote, "log", "-1", "--format=%s", "main")).toBe("dependent worker summary");
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-}, 30_000); // real-git: many shell-outs; needs headroom over the 5s default under full-suite parallel load
-
 /**
- * A publish checkout carrying loose, uncommitted work, against a remote whose `main` moved on — so
- * the publish must genuinely rebase, and `git rebase` genuinely refuses on the dirty tree. `checkout`
- * picks WHOSE dirt it is: a run's own `git worktree add` checkout (ours to commit), or a shared
- * project clone (a human's, never ours to commit).
+ * A publish checkout carrying loose, uncommitted work, against a remote whose `main` moved on.
+ * `checkout` picks WHOSE dirt it is: a run's own `git worktree add` checkout (ours to commit), or a
+ * shared project clone (a human's, never ours to commit). The PR/merge motion is faked to succeed
+ * (PR #1) — these fixtures exist to prove what gets COMMITTED and PUSHED, not to exercise GitHub's
+ * integration verdict.
  */
 async function dirtyPublishFixture(root: string, checkout: "run-worktree" | "shared-clone") {
   const remoteParent = join(root, "0xbeckett");
@@ -696,7 +647,7 @@ async function dirtyPublishFixture(root: string, checkout: "run-worktree" | "sha
   await mkdir(join(worker, ".beckett"), { recursive: true });
   await writeFile(join(worker, ".beckett", "notes.md"), "internal scaffolding\n");
 
-  // Main moved on while the run worked, so the publish must actually rebase (not fast-forward).
+  // Main moved on while the run worked (proves the run's OWN branch, not main, is what publish touches).
   await git(root, "clone", "-b", "main", `file://${remote}`, other);
   await git(other, "config", "user.email", "test@example.com");
   await git(other, "config", "user.name", "Test");
@@ -713,12 +664,18 @@ async function dirtyPublishFixture(root: string, checkout: "run-worktree" | "sha
     resolveRepoDir: () => worker,
     logger: noopLog,
     run: (async (cmd: string[], opts?: { cwd?: string; env?: Record<string, string | undefined> }) => {
-      calls.push(cmd.join(" "));
+      const j = cmd.join(" ");
+      calls.push(j);
       if (cmd[0] === "git") return realRun(cmd, opts);
-      if (cmd.join(" ").startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
-      if (cmd.join(" ").includes("api --method PATCH")) return ok();
-      if (cmd.join(" ").includes("--json defaultBranchRef")) return ok("main");
-      return fail(`unrouted: ${cmd.join(" ")}`);
+      if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
+      if (j.includes("api --method PATCH")) return ok();
+      if (j.includes("--json defaultBranchRef")) return ok("main");
+      if (j.startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
+      if (j.startsWith("gh pr list")) return noOpenPr();
+      if (j.startsWith("gh pr create")) return prCreated(1);
+      if (j.startsWith("gh pr view 1")) return prView(1);
+      if (j.startsWith("gh pr merge 1")) return ok();
+      return fail(`unrouted: ${j}`);
     }) as never,
   });
   (gh as unknown as { gitHost: () => string }).gitHost = () => `file://${root}`;
@@ -727,13 +684,12 @@ async function dirtyPublishFixture(root: string, checkout: "run-worktree" | "sha
 
 /**
  * 2026-08-14: a run's publish tripped on "cannot rebase: You have unstaged changes. error:
- * additionally, your index contains uncommitted changes." and then burned its whole retry ladder on
- * a state no retry could ever clear. The dirty tree is OUR OWN doing — it's the run's private
- * worktree — so the publish path commits that loose work before it rebases, rather than handing a
- * human an error we caused ourselves. Real git: the rebase has to genuinely refuse for this to mean
- * anything.
+ * additionally, your index contains uncommitted changes." — a stall no retry could ever clear,
+ * because the dirty state was our own doing (the run's private worktree). The publish path commits
+ * that loose work up front so it actually ships, rather than leaving it stranded uncommitted. Real
+ * git: the branch that lands on the remote must actually carry the committed content.
  */
-test("a dirty publish checkout is committed BEFORE the rebase, instead of failing it (2026-08-14)", async () => {
+test("a dirty publish checkout is committed, and the committed work is what reaches the remote branch (2026-08-14)", async () => {
   const root = await mkdtemp(join(tmpdir(), "beckett-publish-dirty-"));
   try {
     const { remote, worker, gh, calls } = await dirtyPublishFixture(root, "run-worktree");
@@ -746,42 +702,48 @@ test("a dirty publish checkout is committed BEFORE the rebase, instead of failin
       commitMessage: "the run's summary",
     });
 
-    // The rebase ran and stuck — no abort, no "needs a human" park over a mess we made ourselves.
     expect(result.kind).toBe("pushed");
-    expect(calls.some((call) => call.startsWith("git rebase FETCH_HEAD"))).toBe(true);
-    expect(calls.some((call) => call.startsWith("git rebase --abort"))).toBe(false);
-    // Every bit of the loose work shipped — committing it, not stashing it, is what delivers the run.
-    expect(await git(root, "--git-dir", remote, "show", "main:feature.ts")).toBe("export const v = 2;");
-    expect(await git(root, "--git-dir", remote, "show", "main:late.ts")).toBe("export const late = true;");
-    expect(await git(root, "--git-dir", remote, "show", "main:elsewhere.md")).toBe("landed meanwhile");
+    expect(result.prUrl).toBe("https://github.com/0xbeckett/beckett/pull/1");
+    // No local rebase/apply ever runs — GitHub does the integration.
+    expect(calls.some((call) => call.startsWith("git rebase") || call.startsWith("git apply"))).toBe(false);
+    // Every bit of the loose work shipped on the run's OWN branch — committing it, not stashing it,
+    // is what delivers the run. Main itself is never touched (the merge is GitHub's, faked here).
+    expect(await git(root, "--git-dir", remote, "show", "beckett/ops-dirty:feature.ts")).toBe("export const v = 2;");
+    expect(await git(root, "--git-dir", remote, "show", "beckett/ops-dirty:late.ts")).toBe("export const late = true;");
     // …and the internal scaffolding still never leaves the machine.
-    expect((await realRun(["git", "--git-dir", remote, "cat-file", "-e", "main:.beckett/notes.md"])).code).not.toBe(0);
+    expect(
+      (await realRun(["git", "--git-dir", remote, "cat-file", "-e", "beckett/ops-dirty:.beckett/notes.md"])).code,
+    ).not.toBe(0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 }, 30_000); // real-git: many shell-outs; needs headroom over the 5s default under full-suite parallel load
 
 /**
- * The other side of that fix, and the reason it is gated rather than unconditional: `sourceDir` is
- * `run.workspace ?? resolveRepoRoot(run)`, so a run with no recorded workspace publishes from the
- * SHARED project checkout — a directory a human also edits in. Auto-committing there would sweep
- * someone's in-progress work into the run's commit and push it. Only a checkout we created (a linked
- * `git worktree`) is ours to tidy; anywhere else the dirty tree stays untouched and the publish fails
- * loudly, which `classifyPublishError` already treats as terminal (park on attempt 1, real reason).
+ * The other side of that fix: `sourceDir` is `run.workspace ?? resolveRepoRoot(run)`, so a run with
+ * no recorded workspace publishes from the SHARED project checkout — a directory a human also edits
+ * in. Auto-committing there would sweep someone's in-progress work into the run's commit and push it.
+ * Only a checkout we created (a linked `git worktree`) is ours to tidy; a shared clone's loose edits
+ * stay untouched, and (since `git push` only ever sends committed history) never reach the remote —
+ * the publish still succeeds on whatever WAS already committed.
  */
 test("loose work in a SHARED checkout is never committed by a publish — it isn't ours", async () => {
   const root = await mkdtemp(join(tmpdir(), "beckett-publish-shared-"));
   try {
     const { remote, worker, gh } = await dirtyPublishFixture(root, "shared-clone");
 
-    await expect(
-      gh.ensurePublished({ slug: "beckett", sourceDir: worker, description: "run title", ticket: "OPS-dirty" }),
-    ).rejects.toThrow(/unstaged changes|uncommitted changes|cannot rebase/i);
+    const result = await gh.ensurePublished({
+      slug: "beckett",
+      sourceDir: worker,
+      description: "run title",
+      ticket: "OPS-dirty",
+    });
+    expect(result.kind).toBe("pushed");
 
     // The human's loose edits are still exactly where they left them — uncommitted and unpushed.
     expect(await git(worker, "status", "--porcelain")).toContain("feature.ts");
     expect(await git(worker, "show", "HEAD:feature.ts")).toBe("export const v = 1;");
-    expect((await realRun(["git", "--git-dir", remote, "cat-file", "-e", "main:late.ts"])).code).not.toBe(0);
+    expect((await realRun(["git", "--git-dir", remote, "cat-file", "-e", "beckett/ops-dirty:late.ts"])).code).not.toBe(0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -831,12 +793,18 @@ test("publish strips a tracked, run-stamped spec.md and pushes its deletion", as
       resolveRepoDir: () => worker,
       logger: noopLog,
       run: (async (cmd: string[], opts?: { cwd?: string; env?: Record<string, string | undefined> }) => {
-        calls.push(cmd.join(" "));
+        const j = cmd.join(" ");
+        calls.push(j);
         if (cmd[0] === "git") return realRun(cmd, opts);
-        if (cmd.join(" ").startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
-        if (cmd.join(" ").includes("api --method PATCH")) return ok();
-        if (cmd.join(" ").includes("--json defaultBranchRef")) return ok("main");
-        return fail(`unrouted: ${cmd.join(" ")}`);
+        if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
+        if (j.includes("api --method PATCH")) return ok();
+        if (j.includes("--json defaultBranchRef")) return ok("main");
+        if (j.startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
+        if (j.startsWith("gh pr list")) return noOpenPr();
+        if (j.startsWith("gh pr create")) return prCreated(1);
+        if (j.startsWith("gh pr view 1")) return prView(1);
+        if (j.startsWith("gh pr merge 1")) return ok();
+        return fail(`unrouted: ${j}`);
       }) as never,
     });
     (gh as unknown as { gitHost: () => string }).gitHost = () => `file://${root}`;
@@ -844,8 +812,10 @@ test("publish strips a tracked, run-stamped spec.md and pushes its deletion", as
     const result = await gh.ensurePublished({ slug: "beckett", sourceDir: worker, description: "run title", ticket: "run-x" });
 
     expect(result.kind).toBe("pushed");
-    expect(await git(root, "--git-dir", remote, "show", "main:feature.ts")).toBe("export const v = 1;");
-    expect((await realRun(["git", "--git-dir", remote, "cat-file", "-e", "main:spec.md"])).code).not.toBe(0);
+    // Main is untouched (the merge is GitHub's own, faked here) — the strip's deletion must land on
+    // the run's OWN pushed branch, the thing that's actually reviewed and merged.
+    expect(await git(root, "--git-dir", remote, "show", "beckett/run-x:feature.ts")).toBe("export const v = 1;");
+    expect((await realRun(["git", "--git-dir", remote, "cat-file", "-e", "beckett/run-x:spec.md"])).code).not.toBe(0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -865,9 +835,11 @@ test("a tracked spec.md with no run stamp is left alone", async () => {
     if (j.startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
     if (j.startsWith("git ls-files")) return ok("spec.md\n");
     if (j.startsWith("git show :spec.md")) return ok("# A customer's own notes\nNo stamp here.\n");
-    if (j.startsWith("git fetch")) return ok();
-    if (j.startsWith("git rebase")) return ok();
     if (j.startsWith("git push")) return ok();
+    if (j.startsWith("gh pr list")) return noOpenPr();
+    if (j.startsWith("gh pr create")) return prCreated(3);
+    if (j.startsWith("gh pr view 3")) return prView(3);
+    if (j.startsWith("gh pr merge 3")) return ok();
     return undefined;
   });
   const r = await gh.ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "OPS-25" });
@@ -875,7 +847,6 @@ test("a tracked spec.md with no run stamp is left alone", async () => {
   expect(calls.some((c) => c.startsWith("git rm"))).toBe(false);
   const pushes = calls.filter((c) => c.startsWith("git push"));
   expect(pushes[0]).toContain("HEAD:refs/heads/beckett/ops-25");
-  expect(pushes[1]).toContain("HEAD:refs/heads/main");
 });
 
 /**
