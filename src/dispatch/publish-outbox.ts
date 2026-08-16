@@ -58,6 +58,9 @@ export function publishErrorMessage(error: unknown): string {
  */
 export function classifyPublishError(error: unknown): PublishFailureKind {
   const message = publishErrorMessage(error);
+  // The publish path's own transient prefixes are authoritative — do not let a PR number that
+  // happens to be 401/403/404 in the URL/`PR #n` reference re-classify them as permanent.
+  if (/^publish: (?:still waiting on CI|GitHub did not settle this attempt)\b/.test(message)) return "transient";
   if (
     /\b(?:401|403|404)\b|unauthori[sz]ed|forbidden|repository not found|could not resolve to a repository|cross[- ]fork|fork.{0,80}(?:pat|token|pull request)|resource not accessible by integration/i.test(
       message,
@@ -257,13 +260,16 @@ export function publishFixHint(error: string): string | null {
       "`git remote add origin https://github.com/<owner>/<name>.git` in the project checkout — then re-run the publish."
     );
   }
-  if (/\b(?:401|403)\b|unauthori[sz]ed|forbidden|resource not accessible by integration|permission denied/i.test(error)) {
+  // Strip URLs and `PR #n` references before matching status codes — a PR numbered 401/403/404
+  // must not be mistaken for the status code it happens to share digits with.
+  const scrubbed = error.replace(/https?:\/\/\S+/g, "").replace(/\bPR #\d+/g, "");
+  if (/\b(?:401|403)\b|unauthori[sz]ed|forbidden|resource not accessible by integration|permission denied/i.test(scrubbed)) {
     return (
       "the GitHub credential cannot write there. Check it with `beckett gh preflight --repo <owner/name>` " +
       "and make sure the App is installed on that repo."
     );
   }
-  if (/\b404\b|repository not found|could not resolve to a repository|name already exists/i.test(error)) {
+  if (/\b404\b|repository not found|could not resolve to a repository|name already exists/i.test(scrubbed)) {
     return (
       "the target repo is missing or invisible to the credential. Confirm it with " +
       "`beckett gh raw -- repo view <owner/name>`, create it if it is genuinely absent, then re-run the publish."
