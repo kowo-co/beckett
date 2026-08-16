@@ -1853,12 +1853,13 @@ export class RunSupervisor {
       // on every poll tick — but the run engine has no poller, so without this the 1m/5m/30m retry
       // schedule would only ever run at daemon boot and a transiently-failed publish would sit in
       // `publishing` (skipped below via `publishOutbox.has`) until the next restart. An outbox fault
-      // must never block staffing recovery, hence the local catch.
-      try {
-        await this.replayPublishes();
-      } catch (err) {
+      // must never block staffing recovery, hence the local catch — and since a due row can now
+      // wait up to PUBLISH_CI_TIMEOUT_MS on CI (publish-via-PR), the drain is DETACHED from this
+      // tick: the watchdog must keep detecting stalls and restaffing while GitHub thinks.
+      // `PublishOutbox.drain` is single-flight in-process, so an overlapping tick is a no-op.
+      void this.replayPublishes().catch((err) => {
         this.logger.warn("publish outbox drain failed (staffing pass continues)", { error: String(err) });
-      }
+      });
       // …then end any `publishing` run nothing is going to move. The loop below CANNOT do it:
       // `stageFor()` returns null for `publishing`, so a run wedged there is invisible to the
       // staffing watchdog by design — which is exactly how one sat there silently for half an hour.
