@@ -190,6 +190,7 @@ function fakeBrowserAgent(overrides: Partial<BrowserAgent> = {}): BrowserAgent {
     recordEval: () => {},
     inspect: async () => null,
     evalSecrets: async () => null,
+    saveSecret: async (_runId, field, _value) => ({ field, entry: "huggingface", ok: true }),
     recover: async () => {},
     stats: () => ({ running: 0, waiting: 1, queued: 0, runs: [] }),
     stopAll: async () => {},
@@ -878,7 +879,8 @@ test("browser.eval injects keychain secrets below the model and scrubs echoed va
   });
   expect(evals[0]).toStartWith("const secrets = Object.freeze({");
   expect(evals[0]).toContain("hunter2-secret");
-  expect(evals[0]).toEndWith("await page.fill('#pass', secrets.password)");
+  expect(evals[0]).toContain("await page.fill('#pass', secrets.password)");
+  expect(evals[0]).toEndWith("return { __beckettEnvelope: 1, result: __beckettResult, saves: __beckettSaves };");
   // Nothing that flows back to the model transcript may carry a secret value.
   expect(result.ok).toBe(true);
   expect(JSON.stringify(result)).not.toContain("hunter2-secret");
@@ -908,6 +910,124 @@ test("browser.eval failures are scrubbed of secret values too", async () => {
   });
   expect(result.ok).toBe(false);
   expect(result.error).toBe("locator not found after typing [redacted]");
+});
+
+test("browser.eval exposes secrets.save and stores what a script returns", async () => {
+  const { concierge } = harness({ replyViaCli: false, turnText: "" });
+  concierge.setBrowserRuntime({
+    async acquire() {},
+    async evaluate() {
+      return {
+        value: {
+          __beckettEnvelope: 1,
+          result: "ok",
+          saves: [{ field: "hf_token", value: "hf_live_x" }],
+        },
+        pages: [],
+        events: [],
+        screenshots: [],
+        elapsedMs: 1,
+        truncated: false,
+      };
+    },
+    async capture() { return ""; },
+    async checkpoint() { return { urls: [], activeIndex: 0 }; },
+    async restore() {},
+    async release() { return []; },
+    hasLease() { return true; },
+    stats() { return { ready: true, profileDir: "t", activeRunId: "r1", pages: 1, launches: 1, evaluations: 0, averageEvalMs: 0 }; },
+    async stop() {},
+  } as BrowserRuntime);
+  const saveSecretCalls: Array<{ runId: string; field: string; value: string }> = [];
+  concierge.setBrowserAgent(fakeBrowserAgent({
+    evalSecrets: async () => ({}),
+    saveSecret: async (runId, field, value) => {
+      saveSecretCalls.push({ runId, field, value });
+      return { field, entry: "huggingface", ok: true };
+    },
+  }));
+  const result = await concierge.onBusRequest({
+    cmd: "browser.eval",
+    args: { runId: "r1", controlToken: "token", code: "return secrets.save('hf_token', mintedToken())" },
+  });
+  expect(saveSecretCalls).toEqual([{ runId: "r1", field: "hf_token", value: "hf_live_x" }]);
+  expect(result.ok).toBe(true);
+  expect((result.data as { value: string }).value).toBe("ok");
+  expect((result.data as { secretsSaved: unknown }).secretsSaved).toEqual([
+    { field: "hf_token", entry: "huggingface", ok: true },
+  ]);
+  expect(JSON.stringify(result)).not.toContain("hf_live_x");
+});
+
+test("a failed save is reported without failing the eval", async () => {
+  const { concierge } = harness({ replyViaCli: false, turnText: "" });
+  concierge.setBrowserRuntime({
+    async acquire() {},
+    async evaluate() {
+      return {
+        value: {
+          __beckettEnvelope: 1,
+          result: "ok",
+          saves: [{ field: "hf_token", value: "hf_live_x" }],
+        },
+        pages: [],
+        events: [],
+        screenshots: [],
+        elapsedMs: 1,
+        truncated: false,
+      };
+    },
+    async capture() { return ""; },
+    async checkpoint() { return { urls: [], activeIndex: 0 }; },
+    async restore() {},
+    async release() { return []; },
+    hasLease() { return true; },
+    stats() { return { ready: true, profileDir: "t", activeRunId: "r1", pages: 1, launches: 1, evaluations: 0, averageEvalMs: 0 }; },
+    async stop() {},
+  } as BrowserRuntime);
+  concierge.setBrowserAgent(fakeBrowserAgent({
+    evalSecrets: async () => ({}),
+    saveSecret: async (_runId, field) => ({ field, entry: "huggingface", ok: false, error: "jingle refused the write (exit 1)" }),
+  }));
+  const result = await concierge.onBusRequest({
+    cmd: "browser.eval",
+    args: { runId: "r1", controlToken: "token", code: "return secrets.save('hf_token', mintedToken())" },
+  });
+  expect(result.ok).toBe(true);
+  expect((result.data as { secretsSaved: unknown }).secretsSaved).toEqual([
+    { field: "hf_token", entry: "huggingface", ok: false, error: "jingle refused the write (exit 1)" },
+  ]);
+  expect(JSON.stringify(result)).not.toContain("hf_live_x");
+});
+
+test("a run with no secrets is handed its own source untouched", async () => {
+  const { concierge } = harness({ replyViaCli: false, turnText: "" });
+  const evals: string[] = [];
+  concierge.setBrowserRuntime({
+    async acquire() {},
+    async evaluate(_runId: string, code: string) {
+      evals.push(code);
+      return { value: "plain result", pages: [], events: [], screenshots: [], elapsedMs: 1, truncated: false };
+    },
+    async capture() { return ""; },
+    async checkpoint() { return { urls: [], activeIndex: 0 }; },
+    async restore() {},
+    async release() { return []; },
+    hasLease() { return true; },
+    stats() { return { ready: true, profileDir: "t", activeRunId: "r1", pages: 1, launches: 1, evaluations: 0, averageEvalMs: 0 }; },
+    async stop() {},
+  } as BrowserRuntime);
+  concierge.setBrowserAgent(fakeBrowserAgent({
+    evalSecrets: async () => null,
+  }));
+  const code = "return await page.locator('#x').textContent();";
+  const result = await concierge.onBusRequest({
+    cmd: "browser.eval",
+    args: { runId: "r1", controlToken: "token", code },
+  });
+  expect(evals[0]).toBe(code);
+  expect(result.ok).toBe(true);
+  expect((result.data as { value: string }).value).toBe("plain result");
 });
 
 test("browser summaries redact labelled credentials before Discord delivery", () => {

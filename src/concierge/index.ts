@@ -91,6 +91,7 @@ import {
   type BrowserAgentQuestion,
   type BrowserAgentRun,
 } from "../browser/agent.ts";
+import { readSecretEnvelope, wrapEvalWithSecretSink, type SecretSaveReceipt } from "../browser/secret-sink.ts";
 import { BROWSER_QUESTION_SUFFIX } from "../browser/question-message.ts";
 import {
   createAmbientCoordinator,
@@ -5005,21 +5006,33 @@ export class Concierge {
                 : undefined;
               // Keychain injection (issue #58): the browser agent's runs reference credentials as
               // `secrets.<field>`; the values are resolved here — below the model's transcript —
-              // prefixed onto the script, and scrubbed from everything that flows back up.
+              // prefixed onto the script, and scrubbed from everything that flows back up. The
+              // preamble also exposes `secrets.save` (secret-sink.ts): the write door a script
+              // uses to hand a minted credential back to jingle without it ever reaching the
+              // model transcript.
               let secretValues: string[] = [];
               let injected = code;
               try {
                 const secrets = this.browserAgent ? await this.browserAgent.evalSecrets(runId) : null;
-                if (secrets && Object.keys(secrets).length > 0) {
+                if (secrets !== null) {
                   secretValues = Object.values(secrets);
-                  injected = `const secrets = Object.freeze(${JSON.stringify(secrets)});\n${code}`;
+                  injected = wrapEvalWithSecretSink(code, secrets);
                 }
               } catch (error) {
                 return { ok: false, error: `keychain secrets are unavailable for this run: ${(error as Error).message}` };
               }
               try {
                 const data = await this.browserRuntime.evaluate(runId, injected, controlToken, { note, timeoutMs });
-                const payload = secretValues.length > 0 ? redactSecretValues(data, secretValues) : data;
+                const { result, saves } = readSecretEnvelope(data.value);
+                const receipts: SecretSaveReceipt[] = [];
+                for (const save of saves) {
+                  receipts.push(await this.browserAgent!.saveSecret(runId, save.field, save.value));
+                  secretValues.push(save.value);
+                }
+                const payload = redactSecretValues(
+                  { ...data, value: result, ...(receipts.length ? { secretsSaved: receipts } : {}) },
+                  secretValues,
+                );
                 const activePage = payload.pages.find((page) => page.active) ?? payload.pages[0];
                 this.browserAgent?.recordEval(runId, {
                   ok: true,

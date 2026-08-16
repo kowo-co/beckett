@@ -52,6 +52,7 @@ import type { QuickRunner } from "../quick/index.ts";
 import type { BrowserRuntime } from "../browser/runtime.ts";
 import type { BrowserAgent } from "../browser/agent.ts";
 import { defaultKeychainReader } from "../secret/keychain-read.ts";
+import { defaultKeychainStore } from "../secret/keychain.ts";
 import { GitHubCli, githubAuth, githubConfigured, loadIdentity } from "../agency/index.ts";
 import { resolveProjectOwner } from "../github/owner.ts";
 import { LiveAgentRegistry } from "../agent/registry.ts";
@@ -461,6 +462,7 @@ async function boot(): Promise<BootedSystem> {
   // over the already-constructed concierge, which is why this registers here and not earlier.
   const browserExtension = createBrowserExtension({
     keychain: defaultKeychainReader,
+    keychainStore: defaultKeychainStore,
     onQuestion: (run, question) => concierge.notifyBrowserQuestion(run, question),
     onOutcome: (run) => concierge.notifyBrowserOutcome(run),
   })({ config, paths, logger });

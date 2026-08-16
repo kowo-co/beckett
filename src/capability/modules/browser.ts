@@ -36,6 +36,7 @@ import {
   type BrowserAgentRun,
 } from "../../browser/agent.ts";
 import type { KeychainReader } from "../../secret/keychain-read.ts";
+import type { KeychainStore } from "../../secret/keychain.ts";
 
 /**
  * What the daemon injects beyond {@link ExtensionContext}: the keychain reader and the
@@ -44,6 +45,8 @@ import type { KeychainReader } from "../../secret/keychain-read.ts";
 export interface BrowserExtensionDeps {
   /** Jingle keychain reader for `--creds` runs; absent → credentialed dispatches refuse. */
   keychain?: KeychainReader;
+  /** Jingle write door for `secrets.save`; absent → saves refuse with "not wired". */
+  keychainStore?: KeychainStore;
   /** Surface one blocking question to the origin channel; resolves to the Discord anchor id. */
   onQuestion: (run: BrowserAgentRun, question: BrowserAgentQuestion) => Promise<string>;
   /** Report a terminal run to the concierge (update turn). Throwing keeps the run undelivered. */
@@ -350,6 +353,7 @@ export const createBrowserExtension =
               logger: ctx.logger.child("browser-agent"),
               browser: runtime,
               ...(deps.keychain ? { keychain: deps.keychain } : {}),
+              ...(deps.keychainStore ? { keychainStore: deps.keychainStore } : {}),
               onQuestion: deps.onQuestion,
               onOutcome: deps.onOutcome,
             });

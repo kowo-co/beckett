@@ -107,6 +107,9 @@ function fakeAgent(calls: string[], stats: Partial<BrowserAgentStats> = {}): Bro
     async evalSecrets() {
       return null;
     },
+    async saveSecret(_runId, field) {
+      return { field, entry: "", ok: false, error: "not wired in this fake" };
+    },
     async recover() {
       calls.push("agent.recover");
     },
@@ -165,6 +168,9 @@ function concurrentAgent(calls: string[], cap: number): BrowserAgent {
       };
     },
     async evalSecrets() { return null; },
+    async saveSecret(_runId, field) {
+      return { field, entry: "", ok: false, error: "not wired in this fake" };
+    },
     async recover() {},
     stats: () => {
       const values = [...runs.entries()].map(([runId, run]) => ({
