@@ -68,6 +68,7 @@ import { pendingActionId } from "../ids.ts";
 import { log as rootLog } from "../log.ts";
 import { childEnv } from "../env.ts";
 import { SCAFFOLDING_DIR } from "../worker/worktree.ts";
+import { specRunId } from "../run/spec-file.ts";
 import { resolveGitHubTarget } from "../github/owner.ts";
 import { GitHubAppAuth, loadGitHubAppCredentials } from "../github/app.ts";
 
@@ -452,6 +453,9 @@ export interface IssueCommentResult {
  * `mergePR` behind {@link Agency.perform}.
  */
 export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCardReader, GitHubActivityReader {
+  /** Paths the harness authors that must never reach a remote. */
+  private static readonly HARNESS_PATHS: readonly string[] = [SCAFFOLDING_DIR, "spec.md"];
+
   private readonly runner: (
     cmd: string[],
     opts?: { cwd?: string; env?: Record<string, string | undefined> },
@@ -587,27 +591,70 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
   }
 
   /**
-   * Belt-and-suspenders before any push (OPS-61): Beckett's internal scaffolding (`.beckett/` — the
-   * done-signal schema, scope-guard settings, worker state) must never reach a remote or a PR diff.
-   * It is excluded + hook-stripped at the commit boundary, but if a prior code path somehow committed
-   * it we strip it here with a cleanup commit so the pushed branch is clean. Almost always a no-op.
-   * Uses `this.runner` so an injected fake keeps unit tests off real git.
+   * Belt-and-suspenders before any push (OPS-61): Beckett's internal harness state — `.beckett/`
+   * (the done-signal schema, scope-guard settings, worker state) and a run-stamped root `spec.md`
+   * (the legacy pre-v7 location, `../run/spec-file.ts`'s `SPEC_FILE_REL` moved it under `.beckett/`)
+   * — must never reach a remote or a PR diff. `.beckett/` is excluded + hook-stripped at the commit
+   * boundary, but if a prior code path somehow committed either path we strip it here with a
+   * cleanup commit so the pushed branch is clean. A tracked `spec.md` with NO run stamp is left
+   * alone — it may be the customer's own file, never ours to delete. Almost always a no-op. Uses
+   * `this.runner` so an injected fake keeps unit tests off real git. Was `stripTrackedScaffolding`
+   * (`.beckett/`-only); generalized to cover the legacy spec.md path too.
    */
-  private async stripTrackedScaffolding(cwd: string): Promise<void> {
-    const tracked = await this.runner(["git", "ls-files", "--", SCAFFOLDING_DIR], { cwd, env: this.gitEnv() });
-    if (tracked.code !== 0 || tracked.stdout.trim() === "") return; // nothing tracked → clean already
-    this.opts.logger.warn("scaffolding was tracked in the branch — stripping before push", { cwd });
-    const rm = await this.runner(["git", "rm", "-r", "--cached", "--quiet", "--", SCAFFOLDING_DIR], { cwd, env: this.gitEnv() });
+  private async stripHarnessState(cwd: string): Promise<void> {
+    const tracked = await this.runner(["git", "ls-files", "--", ...GitHubCli.HARNESS_PATHS], { cwd, env: this.gitEnv() });
+    if (tracked.code !== 0) return;
+    const paths = tracked.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+    const toStrip = new Set<string>();
+    for (const path of paths) {
+      if (path === "spec.md") {
+        // Only a run-stamped spec.md is ours to strip — an unstamped/customer-authored one is not.
+        // Read the INDEX blob (`:path`), not HEAD:path — `ls-files` reports the index, and a
+        // staged-but-uncommitted spec.md would otherwise fail `HEAD:path` and slip through unstripped.
+        const content = await this.runner(["git", "show", `:${path}`], { cwd, env: this.gitEnv() });
+        if (content.code === 0 && specRunId(content.stdout) !== undefined) toStrip.add(path);
+      } else {
+        toStrip.add(SCAFFOLDING_DIR);
+      }
+    }
+    if (toStrip.size === 0) return; // nothing tracked that's ours to strip → clean already
+    this.opts.logger.warn("harness state was tracked in the branch — stripping before push", { cwd, paths: [...toStrip] });
+    const rm = await this.runner(["git", "rm", "-r", "--cached", "--quiet", "--", ...toStrip], { cwd, env: this.gitEnv() });
     if (rm.code !== 0) {
-      throw new Error(`refusing to push: could not strip ${SCAFFOLDING_DIR} (${rm.code}): ${rm.stderr.trim()}`);
+      throw new Error(`refusing to push: could not strip ${[...toStrip].join(", ")} (${rm.code}): ${rm.stderr.trim()}`);
     }
     const commit = await this.runner(
-      ["git", "-c", "commit.gpgsign=false", "commit", "--no-verify", "-m", "beckett: strip internal scaffolding"],
+      ["git", "-c", "commit.gpgsign=false", "commit", "--no-verify", "-m", "beckett: strip internal harness state"],
       { cwd, env: this.gitEnv() },
     );
     if (commit.code !== 0) {
-      throw new Error(`refusing to push: could not commit ${SCAFFOLDING_DIR} strip (${commit.code}): ${commit.stderr.trim()}`);
+      throw new Error(`refusing to push: could not commit harness-state strip (${commit.code}): ${commit.stderr.trim()}`);
     }
+  }
+
+  /**
+   * Throw if any harness path ({@link GitHubCli.HARNESS_PATHS}) is still tracked after
+   * {@link stripHarnessState} ran. Publish-path only — called from `ensurePublished`, never from
+   * {@link gitPush} (the release lane's `beckett gh push --branch main` must keep working
+   * unconditionally). `"needs a human"` in the message makes `classifyPublishError` treat this as
+   * permanent — deliberate: a strip that didn't take is a bug, not something a retry will fix.
+   */
+  private async assertNoHarnessState(cwd: string): Promise<void> {
+    const tracked = await this.runner(["git", "ls-files", "--", ...GitHubCli.HARNESS_PATHS], { cwd, env: this.gitEnv() });
+    if (tracked.code !== 0) return;
+    const paths = tracked.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+    const offending: string[] = [];
+    for (const path of paths) {
+      if (path === "spec.md") {
+        // Same index-vs-HEAD reasoning as stripHarnessState above.
+        const content = await this.runner(["git", "show", `:${path}`], { cwd, env: this.gitEnv() });
+        if (content.code === 0 && specRunId(content.stdout) !== undefined) offending.push(path);
+      } else {
+        offending.push(path);
+      }
+    }
+    if (offending.length === 0) return;
+    throw new Error(`refusing to publish: harness state is still tracked (${offending.join(", ")}) — needs a human`);
   }
 
   /**
@@ -628,7 +675,7 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
     // Re-resolve for THIS remote: the publish flow pushes the same checkout to a fork and an
     // upstream, which under App auth are two different installations (and two different tokens).
     await this.ensureCreds("push branch", { repo });
-    if (localRef === "HEAD" || !/^[0-9a-f]{7,40}$/i.test(localRef)) await this.stripTrackedScaffolding(cwd);
+    if (localRef === "HEAD" || !/^[0-9a-f]{7,40}$/i.test(localRef)) await this.stripHarnessState(cwd);
     const url = `${this.gitHost()}/${repo}.git`;
     const r = await this.runner(
       ["git", "push", ...(opts?.force ? ["--force"] : []), url, `${localRef}:refs/heads/${remoteBranch}`],
@@ -869,8 +916,11 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
   }): Promise<PublishResult> {
     await this.ensureCreds("publish repo");
     // Clean the source tree once up front (OPS-61) so NO publish path — including the brand-new-repo
-    // `gh repo create --push`, which bypasses gitPush — can leak Beckett's internal scaffolding.
-    await this.stripTrackedScaffolding(p.sourceDir);
+    // `gh repo create --push`, which bypasses gitPush — can leak Beckett's internal harness state.
+    // Then assert it actually took: a strip that silently failed to remove a tracked harness path
+    // must never publish quietly (publish-path only — never called from gitPush).
+    await this.stripHarnessState(p.sourceDir);
+    await this.assertNoHarnessState(p.sourceDir);
     const ref = (p.ticket ?? p.slug).toLowerCase().replace(/[^a-z0-9._-]+/g, "-");
     const branch = `beckett/${ref}`;
     const title = p.description?.trim() || `beckett: ${p.slug}`;
@@ -1063,7 +1113,7 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
    * behavior (the rebase reports the dirty tree) rather than shipping someone else's changes.
    *
    * Internal scaffolding is kept OUT of the index (`:(exclude)`) exactly as
-   * {@link stripTrackedScaffolding} keeps it out of the push — leaving it untracked, which a rebase
+   * {@link stripHarnessState} keeps it out of the push — leaving it untracked, which a rebase
    * does not mind. Best-effort throughout: a `git status` we can't read, or an add/commit that
    * fails, leaves the working tree exactly as it was and lets the rebase report the real problem.
    *

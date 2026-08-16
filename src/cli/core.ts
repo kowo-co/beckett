@@ -47,7 +47,7 @@ import { runTaskAsk } from "./task-ask.ts";
 import { supportsNameFlag } from "../drivers/claude.ts";
 import { RunStore } from "../run/store.ts";
 import { RUN_TERMINAL } from "../run/types.ts";
-import { parseSpecChecklist } from "../run/spec-file.ts";
+import { parseSpecChecklist, SPEC_FILE_REL } from "../run/spec-file.ts";
 import { formatDispatchTrace, readDispatchEvents } from "../dispatch/events.ts";
 import {
   commitVersion,
@@ -227,14 +227,15 @@ function runStore(): RunStore {
 }
 
 /**
- * Read `<workspace>/spec.md`'s checklist progress for `task show` on a Run, through the SAME
- * `../run/spec-file.ts` codec the spec-gate Stop hook and the run cards read with — so what the
- * CLI reports and what the gate enforces can never disagree (the codec scopes to the `## Checklist`
- * section, where a hand-rolled box count would also pick up checkboxes a worker left in `## Notes`).
+ * Read `<workspace>/${SPEC_FILE_REL}`'s checklist progress for `task show` on a Run, through the
+ * SAME `../run/spec-file.ts` codec the spec-gate Stop hook and the run cards read with — so what
+ * the CLI reports and what the gate enforces can never disagree (the codec scopes to the
+ * `## Checklist` section, where a hand-rolled box count would also pick up checkboxes a worker
+ * left in `## Notes`).
  */
 function readRunChecklist(workspace: string | null): { total: number; done: number; hasPlaceholder: boolean } | null {
   if (!workspace) return null;
-  const specPath = join(workspace, "spec.md");
+  const specPath = join(workspace, SPEC_FILE_REL);
   if (!existsSync(specPath)) return null;
   let text: string;
   try {
