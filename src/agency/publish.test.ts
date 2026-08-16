@@ -645,7 +645,7 @@ test("a tracked spec.md with no run stamp is left alone", async () => {
     if (j.includes("api --method PATCH")) return ok();
     if (j.includes("--json defaultBranchRef")) return ok("main");
     if (j.startsWith("git ls-files")) return ok("spec.md\n");
-    if (j.startsWith("git show HEAD:spec.md")) return ok("# A customer's own notes\nNo stamp here.\n");
+    if (j.startsWith("git show :spec.md")) return ok("# A customer's own notes\nNo stamp here.\n");
     if (j.startsWith("git fetch")) return ok();
     if (j.startsWith("git rebase")) return ok();
     if (j.startsWith("git push")) return ok();

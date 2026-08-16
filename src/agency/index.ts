@@ -609,7 +609,9 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
     for (const path of paths) {
       if (path === "spec.md") {
         // Only a run-stamped spec.md is ours to strip — an unstamped/customer-authored one is not.
-        const content = await this.runner(["git", "show", `HEAD:${path}`], { cwd, env: this.gitEnv() });
+        // Read the INDEX blob (`:path`), not HEAD:path — `ls-files` reports the index, and a
+        // staged-but-uncommitted spec.md would otherwise fail `HEAD:path` and slip through unstripped.
+        const content = await this.runner(["git", "show", `:${path}`], { cwd, env: this.gitEnv() });
         if (content.code === 0 && specRunId(content.stdout) !== undefined) toStrip.add(path);
       } else {
         toStrip.add(SCAFFOLDING_DIR);
@@ -644,7 +646,8 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
     const offending: string[] = [];
     for (const path of paths) {
       if (path === "spec.md") {
-        const content = await this.runner(["git", "show", `HEAD:${path}`], { cwd, env: this.gitEnv() });
+        // Same index-vs-HEAD reasoning as stripHarnessState above.
+        const content = await this.runner(["git", "show", `:${path}`], { cwd, env: this.gitEnv() });
         if (content.code === 0 && specRunId(content.stdout) !== undefined) offending.push(path);
       } else {
         offending.push(path);
