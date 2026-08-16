@@ -16,8 +16,10 @@ import { createMemory } from "../memory/index.ts";
 import { SELF_AUDIENCE } from "../memory/search.ts";
 import { localDate } from "./model.ts";
 import { isAttempt, readSpendLedger } from "../spend.ts";
+import { listProposals } from "../proposal/store.ts";
 import {
   FREE_TIME_DENIED_PERMISSIONS,
+  FREE_TIME_PROPOSALS_MAX,
   buildFreeTimePrompt,
   composeFreeTimeEntry,
   freeTimeDeferReason,
@@ -25,6 +27,7 @@ import {
   listFreeTimeEntries,
   parseFreeTimeWriteback,
   planFreeTimeMemories,
+  planFreeTimeProposals,
   renderFreeTimeSeed,
   runFreeTime,
   trimShare,
@@ -94,6 +97,7 @@ test("a writeback with only some keys keeps the rest empty — an empty session 
     abandoned: [],
     want_next_time: [],
     memories: [],
+    proposals: [],
     share: "",
   });
 });
@@ -172,6 +176,8 @@ test("a seeded prompt carries last time forward; a cold one says so instead of f
     budget: 80_000,
     memoriesMax: 5,
     canShare: true,
+    company: "",
+    proposalsMax: 2,
   };
   const warm = buildFreeTimePrompt({ ...base, seed });
   expect(warm).toContain("Last time:");
@@ -194,6 +200,52 @@ test("the empty seed renders as the empty string, not as a heading with nothing 
   expect(renderFreeTimeSeed([])).toBe("");
 });
 
+test("the prompt hands the session the company brief, and says so plainly when there isn't one", () => {
+  const base = {
+    date: "2026-08-09",
+    scratchDir: "/tmp/ft/2026-08-09-abcd1234",
+    seed: "",
+    maxTurns: 60,
+    budget: 80_000,
+    memoriesMax: 5,
+    canShare: true,
+    proposalsMax: 2,
+  };
+  const withBrief = buildFreeTimePrompt({ ...base, company: "## What Kowo is\n\nWe make babble." });
+  expect(withBrief).toContain("You hold the CTO seat at Kowo");
+  expect(withBrief).toContain("Kowo, as jason last wrote it down:");
+  expect(withBrief).toContain("We make babble.");
+  expect(withBrief).not.toContain("There is no company brief on disk yet");
+
+  const withoutBrief = buildFreeTimePrompt({ ...base, company: "" });
+  expect(withoutBrief).toContain("You hold the CTO seat at Kowo");
+  expect(withoutBrief).toContain("There is no company brief on disk yet");
+  expect(withoutBrief).not.toContain("Kowo, as jason last wrote it down:");
+});
+
+// ── proposal planning ──────────────────────────────────────────────────────────────────
+
+test("the cap drops by position and a repeat of an open claim is not filed twice", () => {
+  const entries = [
+    { kind: "product-idea" as const, claim: "Ship a babble export tool", why: "users ask weekly", smallest_experiment: "" },
+    { kind: "product-idea" as const, claim: "  ship a babble export tool!!  ", why: "same idea, different punctuation", smallest_experiment: "" },
+    { kind: "product-idea" as const, claim: "Kill the dormant widget", why: "no commits since spring", smallest_experiment: "check the repo dates" },
+    { kind: "product-idea" as const, claim: "A third idea nobody needs", why: "over the cap", smallest_experiment: "" },
+  ];
+  const plan = planFreeTimeProposals(entries, { max: FREE_TIME_PROPOSALS_MAX, existingClaims: [] });
+  expect(plan.keep.map((p) => p.claim)).toEqual(["Ship a babble export tool", "Kill the dormant widget"]);
+  expect(plan.dropped.join("; ")).toContain("ship a babble export tool!!");
+  expect(plan.dropped.join("; ")).toContain("duplicate");
+  expect(plan.dropped.join("; ")).toContain("A third idea nobody needs (over the 2-per-session cap)");
+
+  const againstOpen = planFreeTimeProposals(
+    [{ kind: "product-idea" as const, claim: "Ship a Babble Export Tool.", why: "still worth it", smallest_experiment: "" }],
+    { max: 2, existingClaims: ["Ship a babble export tool"] },
+  );
+  expect(againstOpen.keep).toEqual([]);
+  expect(againstOpen.dropped.join("; ")).toContain("duplicate");
+});
+
 // ── the receipt / journal entry ────────────────────────────────────────────────────────
 
 test("the entry carries the receipt in its meta header and never invents a section", () => {
@@ -210,6 +262,8 @@ test("the entry carries the receipt in its meta header and never invents a secti
     wantNextTime: ["the concierge queue"],
     memoriesWritten: ["free-time-2026-08-09-retry"],
     memoriesDropped: ["x (unusable slug)"],
+    proposalsFiled: ["prop-2026-08-09-idea"],
+    proposalsDropped: ["y (empty why)"],
     shared: "read my own retry code",
     outputTokens: 90_000,
     budget: 80_000,
@@ -225,6 +279,8 @@ test("the entry carries the receipt in its meta header and never invents a secti
   expect(entry).toContain("truncated: true");
   expect(entry).toContain("memories: free-time-2026-08-09-retry");
   expect(entry).toContain("memories_dropped: x (unusable slug)");
+  expect(entry).toContain("proposals: prop-2026-08-09-idea");
+  expect(entry).toContain("proposals_dropped: y (empty why)");
   expect(entry).toContain("- read the dispatcher");
   // An empty list is a dash, not an omission: "learned nothing" is a real answer.
   expect(entry).toContain("## learned\n—");
@@ -236,6 +292,10 @@ test("share text is squeezed to one readable line, and silence stays silence", (
   const long = trimShare("x".repeat(900));
   expect(long.length).toBe(500);
   expect(long.endsWith("…")).toBe(true);
+});
+
+test("the session cannot file one itself", () => {
+  expect(FREE_TIME_DENIED_PERMISSIONS).toContain("Bash(beckett proposals:*)");
 });
 
 // ── one whole run, with the harness and the share injected ─────────────────────────────
@@ -288,6 +348,99 @@ test("a run writes the writeback into a dated entry, posts ONE share, and never 
   const entries = listFreeTimeEntries(join(w.paths.beckettDir, "free-time"));
   expect(entries).toHaveLength(1);
   expect(readFileSync(entries[0]!.path, "utf8")).toContain("- poked at the scheduler");
+});
+
+test("an empty proposals list is the normal answer", async () => {
+  const w = world();
+  const outcome = await runFreeTime({
+    config: w.config,
+    paths: w.paths,
+    logger: quiet,
+    now: () => NOW,
+    memory: null,
+    callHarness: async (_prompt, opts) => {
+      // No `proposals` key at all — the old shape, which must still parse and file nothing.
+      writeFileSync(join(opts.cwd, "writeback.json"), JSON.stringify({ did: ["read some code"] }));
+      return { text: "", outputTokens: 5 };
+    },
+  });
+  expect(outcome.proposalsFiled).toEqual([]);
+  expect(outcome.proposalsDropped).toEqual([]);
+  expect(listProposals(w.paths.proposalsDir, { all: true })).toEqual([]);
+  expect(readFileSync(outcome.entryPath!, "utf8")).toContain("proposals: (none)");
+});
+
+test("a product idea in the writeback is filed by the runner, not by the session", async () => {
+  const w = world();
+  const outcome = await runFreeTime({
+    config: w.config,
+    paths: w.paths,
+    logger: quiet,
+    now: () => NOW,
+    memory: null,
+    callHarness: async (_prompt, opts) => {
+      writeFileSync(
+        join(opts.cwd, "writeback.json"),
+        JSON.stringify({
+          did: ["read the babble repo"],
+          proposals: [
+            {
+              kind: "product-idea",
+              claim: "Ship a babble export tool",
+              why: "three users asked this month",
+              smallest_experiment: "a CLI flag, one day of work",
+            },
+          ],
+        }),
+      );
+      return { text: "", outputTokens: 5 };
+    },
+  });
+
+  expect(outcome.proposalsFiled).toHaveLength(1);
+  const filedId = outcome.proposalsFiled[0]!;
+  expect(filedId).toMatch(/^prop-\d{4}-\d{2}-\d{2}-/);
+
+  const records = listProposals(w.paths.proposalsDir, { all: true });
+  expect(records).toHaveLength(1);
+  expect(records[0]).toMatchObject({
+    id: filedId,
+    kind: "product-idea",
+    claim: "Ship a babble export tool",
+    origin: `free-time:${outcome.id}`,
+  });
+  expect(records[0]!.rationale).toContain("three users asked this month");
+  expect(records[0]!.rationale).toContain("smallest experiment: a CLI flag, one day of work");
+});
+
+test("a proposal that will not write costs a dropped line, never the session", async () => {
+  const w = world();
+  // The proposals dir's parent is a FILE, so even the mkdir ahead of the write fails.
+  const blocker = join(w.dir, "not-a-dir");
+  writeFileSync(blocker, "nope");
+  const outcome = await runFreeTime({
+    config: w.config,
+    paths: { ...w.paths, proposalsDir: join(blocker, "proposals") },
+    logger: quiet,
+    now: () => NOW,
+    memory: null,
+    callHarness: async (_prompt, opts) => {
+      writeFileSync(
+        join(opts.cwd, "writeback.json"),
+        JSON.stringify({
+          did: ["thought about the portfolio"],
+          proposals: [{ kind: "product-idea", claim: "Kill the dormant widget", why: "no commits since spring" }],
+        }),
+      );
+      return { text: "", outputTokens: 5 };
+    },
+  });
+
+  expect(outcome.ran).toBe(true);
+  expect(outcome.did).toEqual(["thought about the portfolio"]);
+  expect(outcome.proposalsFiled).toEqual([]);
+  expect(outcome.proposalsDropped.join("; ")).toContain("Kill the dormant widget");
+  expect(outcome.entryPath).not.toBeNull();
 });
 
 test("a written memory lands create-only in the free-time namespace, and seeds the next session", async () => {

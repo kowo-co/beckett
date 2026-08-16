@@ -81,6 +81,42 @@ its own namespace or any other. Every refusal is counted with its reason in the 
 Whatever happens, a dated entry gets written. A session that died mid-thought leaves the record of
 having died mid-thought, which is more useful than a clean absence.
 
+### The CTO seat's slice
+
+Part of every session belongs to the company, not to Beckett's own bugs
+([the CTO seat](../src/concierge/playbooks/the-cto-seat.md)). Before the prompt is built the runner reads
+`~/.beckett/company.md` (`src/company.ts`) and hands it in verbatim, capped at 4,000 tail-trimmed
+characters so a long brief cannot eat the session's budget; when the file is still unanswered or
+missing, the prompt says so plainly instead of asking the session to guess.
+
+The writeback gains one more key, `proposals` — at most `FREE_TIME_PROPOSALS_MAX` (2) product
+ideas, usually empty:
+
+```json
+"proposals": [
+  { "kind": "product-idea", "claim": "one line", "why": "the argument, with what you actually saw",
+    "smallest_experiment": "the cheapest thing that would tell us if it is real" }
+]
+```
+
+Exactly like the share, the session cannot file one itself — `Bash(beckett proposals:*)` is on the
+same deny list as the share's own channel tools. It only ever writes JSON; the **runner** plans and
+files after the session has exited, through `planFreeTimeProposals` and `createProposal`:
+
+- Entries with an empty claim or empty why, or a claim over the proposal store's 240-char limit,
+  are dropped with the reason.
+- Claims are deduped case-and-punctuation-insensitively, both within the batch and against the
+  proposals already open in the queue (`listProposals`) — an idea raised last week and still
+  undecided is not re-filed just because the session thought of it again.
+- The survivors are capped at `FREE_TIME_PROPOSALS_MAX` by position, then filed one at a time,
+  each in its own `try`/`catch`: a proposal that fails to write becomes a `proposalsDropped` entry,
+  never a failed session.
+
+The entry's meta header carries `proposals:` and, when anything was refused, `proposals_dropped:`
+— the same shape as `memories:` / `memories_dropped:`, so "nothing was proposed" and "one idea was
+refused" never look the same on disk. Accepting a filed `product-idea` buys a one-page scoping run,
+never a build ([`src/proposal/decide.ts`](../src/proposal/decide.ts)).
+
 ## What it must never get
 
 | Never | Why |

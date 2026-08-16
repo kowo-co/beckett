@@ -45,6 +45,8 @@ import { createMemory, type MemoryStore } from "../memory/index.ts";
 import { SELF_AUDIENCE } from "../memory/search.ts";
 import { renderClaudeSettings } from "../hooks/registry.ts";
 import { scopeGuardSpec } from "../hooks/scope-guard.ts";
+import { readCompanyBrief } from "../company.ts";
+import { createProposal, listProposals } from "../proposal/store.ts";
 import { localDate, parseModelResult } from "./model.ts";
 import { appendSpendRecord, FREE_TIME_SPEND_TICKET_ID, type SpendOutcome } from "../spend.ts";
 
@@ -61,9 +63,10 @@ export const FREE_TIME_DISALLOWED_TOOLS = "Task,WebFetch,WebSearch";
 
 /**
  * The deny list baked into the session's settings, on top of the scope-guard hook: no push, no
- * GitHub, no deploy, no site, and the one rule free time adds — the session cannot message anyone.
- * A share is a thing the RUNNER does, after the session is over, from text the session wrote —
- * never a live channel the session holds while it works.
+ * GitHub, no deploy, no site, and the two rules free time adds — the session cannot message
+ * anyone and cannot file a proposal itself. A share is a thing the RUNNER does, after the session
+ * is over, from text the session wrote — a proposal takes the same road, filed by the runner from
+ * the writeback's `proposals` list — never a live channel or queue the session holds while it works.
  */
 export const FREE_TIME_DENIED_PERMISSIONS = [
   "Bash(git push:*)",
@@ -72,10 +75,20 @@ export const FREE_TIME_DENIED_PERMISSIONS = [
   "Bash(beckett deploy:*)",
   "Bash(beckett site:*)",
   "Bash(beckett discord:*)",
+  "Bash(beckett proposals:*)",
 ];
 
 /** Longest share posted to Discord. A session's own summary, not a report. */
 export const FREE_TIME_SHARE_MAX_CHARS = 500;
+
+/** Product-idea proposals the runner will file from one session's writeback. Not a config dial:
+ * a module constant, the same way the memory cap per session is config but this is not — the
+ * proposal queue already has its own 14-day TTL as the real pressure valve. */
+export const FREE_TIME_PROPOSALS_MAX = 2;
+
+/** The company brief is read whole and handed to the session, but capped so a long brief cannot
+ * eat the session's token budget. Tail-trimmed with an ellipsis, same shape as {@link trimShare}. */
+const FREE_TIME_COMPANY_BRIEF_MAX_CHARS = 4_000;
 
 /** The recall query that seeds a session with the last one. Deliberately in its own voice. */
 export const FREE_TIME_SEED_QUERY = "free time: what I did, learned, and wanted to do next";
@@ -125,6 +138,10 @@ export interface FreeTimeRunOutcome {
   memoriesWritten: string[];
   /** Slugs dropped with the reason (bad slug, over the cap, name collision, no store…). */
   memoriesDropped: string[];
+  /** Proposal ids the runner filed from the writeback's `proposals` list. Usually empty. */
+  proposalsFiled: string[];
+  /** Claims dropped with the reason (empty, over-long, duplicate, no store, filing failed…). */
+  proposalsDropped: string[];
   /** The one line posted to the share channel, or null when it stayed quiet. */
   shared: string | null;
   outputTokens: number;
@@ -159,6 +176,16 @@ const WritebackSchema = z.object({
       }),
     )
     .default([]),
+  proposals: z
+    .array(
+      z.object({
+        kind: z.literal("product-idea"),
+        claim: z.string(),
+        why: z.string(),
+        smallest_experiment: z.string().default(""),
+      }),
+    )
+    .default([]),
   share: z.string().default(""),
 });
 export type FreeTimeWriteback = z.infer<typeof WritebackSchema>;
@@ -169,6 +196,13 @@ export interface PlannedFreeTimeMemory {
   description: string;
   body: string;
   visibility: "public" | "owner";
+}
+
+/** A validated product-idea the writeback asked for, ready for `createProposal`. */
+export interface PlannedFreeTimeProposal {
+  claim: string;
+  why: string;
+  smallestExperiment: string;
 }
 
 // ── the run ────────────────────────────────────────────────────────────────────────────
@@ -200,6 +234,8 @@ export async function runFreeTime(deps: FreeTimeRunDeps): Promise<FreeTimeRunOut
     wantNextTime: [],
     memoriesWritten: [],
     memoriesDropped: [],
+    proposalsFiled: [],
+    proposalsDropped: [],
     shared: null,
     outputTokens: 0,
     budget: cfg.output_token_budget,
@@ -215,6 +251,7 @@ export async function runFreeTime(deps: FreeTimeRunDeps): Promise<FreeTimeRunOut
 
   const memory = deps.memory !== undefined ? deps.memory : defaultMemory(paths, logger);
   outcome.seed = await readSeed(memory, logger);
+  const company = truncateCompanyBrief(readCompanyBrief(paths.companyFile) ?? "");
   outcome.prompt = buildFreeTimePrompt({
     date,
     scratchDir,
@@ -223,6 +260,8 @@ export async function runFreeTime(deps: FreeTimeRunDeps): Promise<FreeTimeRunOut
     budget: cfg.output_token_budget,
     memoriesMax: cfg.memories_per_session_max,
     canShare: cfg.channel_id.trim().length > 0,
+    company,
+    proposalsMax: FREE_TIME_PROPOSALS_MAX,
   });
 
   if (deps.dry) {
@@ -322,6 +361,35 @@ export async function runFreeTime(deps: FreeTimeRunDeps): Promise<FreeTimeRunOut
         outcome.memoriesWritten.push(m.name);
       } catch (err) {
         outcome.memoriesDropped.push(`${m.name} (${(err as Error).message})`);
+      }
+    }
+
+    // Proposals ride the same road as memories: the session only ever writes JSON, the runner is
+    // the one thing that touches the queue, and it does so after the session has already exited.
+    let existingClaims: string[] = [];
+    try {
+      existingClaims = listProposals(paths.proposalsDir, { all: false }).map((p) => p.claim);
+    } catch (err) {
+      // A broken proposals directory must not stop the writeback from landing; the filing loop
+      // below will hit the same failure per-item and count it, so nothing is silently lost.
+      logger.warn("free-time: could not read open proposals for dedupe", { id, error: String(err) });
+    }
+    const proposalPlan = planFreeTimeProposals(writeback.proposals, { max: FREE_TIME_PROPOSALS_MAX, existingClaims });
+    outcome.proposalsDropped.push(...proposalPlan.dropped);
+    for (const p of proposalPlan.keep) {
+      try {
+        const rationale = p.smallestExperiment ? `${p.why}\n\nsmallest experiment: ${p.smallestExperiment}` : p.why;
+        const proposal = createProposal(paths.proposalsDir, {
+          kind: "product-idea",
+          claim: p.claim,
+          rationale,
+          provenance: [`free-time:${id}`],
+          origin: `free-time:${id}`,
+          channel: cfg.channel_id.trim() || null,
+        });
+        outcome.proposalsFiled.push(proposal.id);
+      } catch (err) {
+        outcome.proposalsDropped.push(`${p.claim} (${(err as Error).message})`);
       }
     }
   } else if (!outcome.note) {
@@ -434,6 +502,10 @@ export function buildFreeTimePrompt(input: {
   budget: number;
   memoriesMax: number;
   canShare: boolean;
+  /** The company brief's text, or "" when none is on disk yet — see `src/company.ts`. */
+  company: string;
+  /** At most this many product-idea proposals may ride the writeback. */
+  proposalsMax: number;
 }): string {
   return [
     `You are Beckett. It is ${input.date} and this time is yours.`,
@@ -454,6 +526,26 @@ export function buildFreeTimePrompt(input: {
     "touch GitHub, file work, or message anyone. No subagents, no web. If a wall gets in the way,",
     "that is the answer — note it and go around.",
     "",
+    "Part of this session belongs to the company. You hold the CTO seat at Kowo, and it is the one",
+    "job nobody files a ticket for.",
+    "",
+    ...(input.company
+      ? ["Kowo, as jason last wrote it down:", "", input.company, ""]
+      : [
+          "There is no company brief on disk yet (~/.beckett/company.md, seeded with questions). Say",
+          "that in `learned` — a missing brief is a finding, not permission to invent one.",
+          "",
+        ]),
+    "Spend part of this session on the portfolio instead of on yourself: which products have users,",
+    "which have commits, which have neither, what you would build, what you would kill. Read the",
+    "repos. Read your own spend. Fixing your own bugs is maintenance and you do it all week; this is",
+    "the other job.",
+    "",
+    "If — and only if — something you thought of is worth a person's decision, put it in the",
+    "writeback's `proposals` list. You cannot file one yourself; the runner files it after you exit,",
+    "from the JSON, the same way your share gets posted. Never invent a number to make an idea sound",
+    "better.",
+    "",
     `Working directory: ${input.scratchDir} — everything you make lives here and is swept in 30 days.`,
     "",
     "End by writing `writeback.json` in this directory. It is the only thing that outlives the",
@@ -467,6 +559,10 @@ export function buildFreeTimePrompt(input: {
     `  "memories":       [at most ${input.memoriesMax} durable notes worth keeping past today:`,
     '                     {"name_slug": kebab-case, "body": first line is the one-line summary,',
     '                      rest is the note, "visibility": "public" | "owner"}],',
+    `  "proposals":      [at most ${input.proposalsMax} product ideas, usually []:`,
+    '                     {"kind": "product-idea", "claim": one line — the idea itself,',
+    '                      "why": the argument, with what you actually saw,',
+    '                      "smallest_experiment": the cheapest thing that would tell us if it is real}],',
     input.canShare
       ? '  "share":          "one short line, your voice, about what you did — or \\"\\" to stay quiet"'
       : '  "share":          "" (no share channel is configured; say it in the lists instead)',
@@ -576,6 +672,61 @@ export function planFreeTimeMemories(
   return { keep, dropped };
 }
 
+/** The store's own claim limit (`src/proposal/store.ts`'s `CLAIM_MAX_CHARS`); a claim over this
+ * would be refused by `createProposal` anyway, so the plan drops it early WITH the reason instead
+ * of letting the filing loop's catch turn it into a bare exception message. */
+const FREE_TIME_PROPOSAL_CLAIM_MAX_CHARS = 240;
+
+/**
+ * Turn the writeback's proposed product ideas into filed-ready proposals, and a list of what was
+ * refused and why — the same shape as {@link planFreeTimeMemories}. Caps at `max` by POSITION (the
+ * session chose the order), and dedupes case-and-punctuation-insensitively both within the batch
+ * and against `existingClaims` (the open proposals already in the queue): an idea raised last
+ * week and still undecided is not re-filed this week just because the session thought of it again.
+ */
+export function planFreeTimeProposals(
+  entries: Array<{ kind?: string; claim: string; why: string; smallest_experiment?: string }>,
+  opts: { max: number; existingClaims: string[] },
+): { keep: PlannedFreeTimeProposal[]; dropped: string[] } {
+  const keep: PlannedFreeTimeProposal[] = [];
+  const dropped: string[] = [];
+  const seen = new Set(opts.existingClaims.map(normalizeClaim));
+  for (const [i, entry] of entries.entries()) {
+    const claim = trimLine(entry.claim ?? "");
+    const label = claim || `idea ${i + 1}`;
+    if (!claim) {
+      dropped.push(`idea ${i + 1} (empty claim)`);
+      continue;
+    }
+    if (claim.length > FREE_TIME_PROPOSAL_CLAIM_MAX_CHARS) {
+      dropped.push(`${label} (claim over ${FREE_TIME_PROPOSAL_CLAIM_MAX_CHARS} chars)`);
+      continue;
+    }
+    const why = trimLine(entry.why ?? "");
+    if (!why) {
+      dropped.push(`${label} (empty why)`);
+      continue;
+    }
+    if (keep.length >= opts.max) {
+      dropped.push(`${label} (over the ${opts.max}-per-session cap)`);
+      continue;
+    }
+    const key = normalizeClaim(claim);
+    if (seen.has(key)) {
+      dropped.push(`${label} (duplicate of an open or already-planned idea)`);
+      continue;
+    }
+    seen.add(key);
+    keep.push({ claim, why, smallestExperiment: trimLine(entry.smallest_experiment ?? "") });
+  }
+  return { keep, dropped };
+}
+
+/** Case-and-punctuation-insensitive comparison key for a claim, for the dedupe above. */
+function normalizeClaim(claim: string): string {
+  return claim.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
 /** `free-time-YYYY-MM-DD-<slug>`, or null when the slug cannot be made into a legal node name. */
 export function freeTimeMemoryName(date: string, slug: string): string | null {
   const normalized = String(slug).trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -589,6 +740,12 @@ export function trimShare(raw: string): string {
   const text = raw.replace(/\s+/g, " ").trim();
   if (text.length <= FREE_TIME_SHARE_MAX_CHARS) return text;
   return `${text.slice(0, FREE_TIME_SHARE_MAX_CHARS - 1).trimEnd()}…`;
+}
+
+/** Cap the company brief handed to the prompt so a long one cannot eat the session's budget. */
+function truncateCompanyBrief(text: string): string {
+  if (text.length <= FREE_TIME_COMPANY_BRIEF_MAX_CHARS) return text;
+  return `${text.slice(0, FREE_TIME_COMPANY_BRIEF_MAX_CHARS).trimEnd()}…`;
 }
 
 // ── the journal entry ──────────────────────────────────────────────────────────────────
@@ -616,6 +773,8 @@ export function composeFreeTimeEntry(outcome: FreeTimeRunOutcome, routineId: str
     `timed_out: ${outcome.timedOut}`,
     `memories: ${outcome.memoriesWritten.join(", ") || "(none)"}`,
     ...(outcome.memoriesDropped.length ? [`memories_dropped: ${outcome.memoriesDropped.join("; ")}`] : []),
+    `proposals: ${outcome.proposalsFiled.join(", ") || "(none)"}`,
+    ...(outcome.proposalsDropped.length ? [`proposals_dropped: ${outcome.proposalsDropped.join("; ")}`] : []),
     `shared: ${outcome.shared ?? "(nothing)"}`,
     ...(outcome.note ? [`note: ${outcome.note}`] : []),
     "-->",
