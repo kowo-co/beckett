@@ -1531,12 +1531,18 @@ export class RunSupervisor {
     outcome: Extract<PublishOutcome, { status: "skipped" | "published" }>,
     summary: string,
   ): Promise<void> {
-    const landingMode: LandingMode =
-      outcome.status === "skipped" ? "local" : outcome.kind === "pr" ? "pr" : "direct-push";
-    // ONLY a pull-request URL goes in `prUrl` from here on — a direct push's bare repo/compare URL
+    // Landing is classified off the URL SHAPE, not `outcome.kind`: `GitHubCli.ensurePublished`
+    // returns `kind: "pushed"` for every owned-repo publish, PR or not — `kind: "pr"` only ever
+    // comes back on the cross-fork path. A `/pull/<n>` URL is the only reliable "this is a PR"
+    // signal regardless of which code path produced it.
+    const prish =
+      outcome.status === "published" && !!outcome.prUrl && /\/pull\/\d+/.test(outcome.prUrl);
+    const landingMode: LandingMode = outcome.status === "skipped" ? "local" : prish ? "pr" : "direct-push";
+    // ONLY a pull-request URL goes in `prUrl` from here on — a direct push's bare repo/commit URL
     // goes in `proof.pushUrl` instead. This is the `?? outcome.url` fallback's removal.
-    const prUrl = landingMode === "pr" && outcome.status === "published" ? outcome.prUrl ?? null : null;
-    const pushUrl = landingMode === "direct-push" && outcome.status === "published" ? outcome.url : null;
+    const prUrl = prish && outcome.status === "published" ? outcome.prUrl! : null;
+    const pushUrl =
+      outcome.status === "published" && !prish ? outcome.prUrl ?? outcome.url : null;
     const proof = await this.assembleProofFor(run, { landingMode, prUrl, pushUrl, attempts: 0 });
 
     await this.patchRun(run.id, {
@@ -1585,7 +1591,10 @@ export class RunSupervisor {
       }
     }
 
-    const uiWork = await this.runTouchesFrontend(run);
+    // Only ASSERT uiWork when there is a reader that could ever produce a screenshot for it — an
+    // unwired `frontendProof` must degrade to "not asserted" (uiWork: false), never to a false
+    // `unverified` on every run that happens to touch a .tsx/.css file (Task 5 step 5).
+    const uiWork = this.frontendProof ? await this.runTouchesFrontend(run) : false;
     let screenshotPath: string | null = null;
     if (uiWork && this.frontendProof && run.workspace) {
       try {
@@ -1764,15 +1773,10 @@ export class RunSupervisor {
         };
       }
       this.publishStallClock.delete(run.id);
-      const prUrl = pub.status === "published" ? pub.prUrl ?? pub.url ?? null : null;
-      await this.patchRun(run.id, {
-        state: "done",
-        prUrl,
-        error: null,
-        published: { via: "outbox", prUrl },
-      });
-      const shipped = pub.status === "published" ? pub.prUrl ?? pub.url : "";
-      this.trace(run, "done", "passed", shipped || "durable publish retry succeeded");
+      // A publish that succeeds on a RETRY still goes through the same proof gate as one that
+      // succeeds first try — otherwise a retried publish grants an unproven `done` with a bare
+      // repo/commit URL in `prUrl`, exactly the bug this task exists to kill.
+      await this.finalizePublish(run, pub, op.summary);
       return { action: "remove" };
     });
   }
@@ -1866,7 +1870,8 @@ export class RunSupervisor {
           this.transientBlocker(
             fresh,
             `this run published but never earned a verified proof after ${attempts} re-check(s): ` +
-              `${proof.gaps.join("; ")} — check ${fresh.prUrl ?? "the landing"} and either fix it or ` +
+              `${proof.gaps.join("; ")}`,
+            `check ${fresh.prUrl ?? fresh.proof?.pushUrl ?? "the landing"} and either fix it or ` +
               `\`beckett task courier ${fresh.id}\``,
           ),
         );
@@ -2235,9 +2240,25 @@ export class RunSupervisor {
    * scoped) write; re-tracing here just lets a still-open progress card pick the URL up.
    */
   async backfillCourierPrUrl(runId: string, prUrl: string): Promise<Run | null> {
-    const run = await this.store.backfillCourierPrUrl(runId, prUrl);
+    let run = await this.store.backfillCourierPrUrl(runId, prUrl);
     if (run.published?.via === "courier" && run.published.prUrl === prUrl) {
       this.trace(run, "done:courier", "passed", prUrl);
+      // The URL just supplied is exactly what an `unverified` courier proof was missing — re-check
+      // immediately instead of leaving it for the watchdog's next pass (up to 20 re-checks away).
+      if (run.state === "unverified") {
+        const proof = await this.assembleProofFor(run, {
+          landingMode: "courier",
+          prUrl,
+          pushUrl: null,
+          attempts: run.proof?.attempts ?? 0,
+        });
+        const patched = await this.patchRun(runId, {
+          state: proof.verified ? "done" : "unverified",
+          error: proof.verified ? null : proof.gaps.join("; "),
+          proof,
+        });
+        if (patched) run = patched;
+      }
     }
     return run;
   }

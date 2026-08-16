@@ -1040,6 +1040,107 @@ describe("proof gates done (overhaul B12)", () => {
     expect(parked.blocker?.class).toBe("transient");
     expect(parked.blocker?.actor).toBe("human");
     expect(parked.error).toContain("2 re-check");
+    // The rendered remedy must point at a command that actually works for this run — `resume()`
+    // dead-ends on a published run — not the transientBlocker default.
+    expect(parked.error).toContain(`beckett task courier ${run.id}`);
+    expect(parked.error).not.toContain(`beckett task resume ${run.id}`);
+  });
+
+  test("a production-shaped kind:pushed outcome with a /pull/ prUrl still lands as landingMode pr (not direct-push)", async () => {
+    // `GitHubCli.ensurePublished` returns `kind: \"pushed\"` for EVERY owned-repo publish — the
+    // real PR shape only ever differs by whether `prUrl` matches `/pull/<n>/`. Landing must be
+    // classified off the URL, not `outcome.kind`.
+    const { supervisor, store } = newSupervisor({
+      publish: async () => ({
+        url: "https://github.com/o/gateway",
+        kind: "pushed" as const,
+        prUrl: "https://github.com/o/gateway/pull/7",
+      }),
+      verifyPr: async () => ({ resolves: true, ci: "success" }),
+    });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal(true));
+    await settle();
+    created[1]!.finish("success", "looks good", doneSignal(true));
+    await settle();
+    const done = store.get(run.id)!;
+    expect(done.landingMode).toBe("pr");
+    expect(done.prUrl).toBe("https://github.com/o/gateway/pull/7");
+    expect(done.proof?.prResolves).toBe(true);
+    expect(done.state).toBe("done");
+  });
+
+  test("uiWork is never asserted with frontendProof unwired — a .tsx diff still reaches done", async () => {
+    const before = reviewDiffText;
+    reviewDiffText = "diff --git a/web/App.tsx b/web/App.tsx\n+added";
+    try {
+      const { supervisor, store } = newSupervisor({ publish: true }); // no frontendProof wired
+      const run = seedRun(store, makeRun());
+      await supervisor.admit(run.id);
+      await tick();
+      created[0]!.finish("success", "implemented", doneSignal(true));
+      await settle();
+      created[1]!.finish("success", "looks good", doneSignal(true));
+      await settle();
+      const done = store.get(run.id)!;
+      expect(done.state).toBe("done");
+      expect(done.proof?.uiWork).toBe(false);
+      expect(done.proof?.screenshotPath).toBeNull();
+    } finally {
+      reviewDiffText = before;
+    }
+  });
+
+  test("a durable outbox retry that finally succeeds still goes through the proof gate", async () => {
+    const dir = scratch();
+    const outbox = join(dir, "run-publish-outbox.jsonl");
+    let attempt = 0;
+    const { supervisor, store } = newSupervisor({
+      publishOutboxPath: outbox,
+      publish: async () => {
+        attempt += 1;
+        if (attempt === 1) throw new Error("gh pr create failed (1): transient network blip");
+        return { url: "https://github.com/o/gateway", kind: "pushed" as const, prUrl: "https://github.com/o/gateway" };
+      },
+    });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal(true));
+    await settle();
+    created[1]!.finish("success", "pass", doneSignal(true));
+    await settle();
+    expect(store.get(run.id)!.state).toBe("publishing");
+
+    const row = JSON.parse(readFileSync(outbox, "utf8").trim());
+    writeFileSync(outbox, `${JSON.stringify({ ...row, nextAttemptAt: 1 })}\n`);
+    await supervisor.replayPublishes();
+    const landed = store.get(run.id)!;
+    // A retry success is a direct push here (no /pull/ in the URL) — it must go through the SAME
+    // proof gate a first-attempt success does: `landingMode: direct-push`, and the bare repo URL
+    // lands in `proof.pushUrl`, NEVER in `prUrl` — exactly the bug a bypassed proof gate on the
+    // retry path would reintroduce (`pub.prUrl ?? pub.url` stamped straight into `prUrl`).
+    expect(landed.state).toBe("done");
+    expect(landed.landingMode).toBe("direct-push");
+    expect(landed.prUrl).toBeNull();
+    expect(landed.proof?.pushUrl).toBe("https://github.com/o/gateway");
+  });
+
+  test("courier backfill re-checks the proof immediately and promotes an unverified courier run to done", async () => {
+    const { supervisor, store } = newSupervisor({
+      verifyPr: async () => ({ resolves: true, ci: "success" }),
+    });
+    const run = seedRun(store, makeRun({ state: "publishing" }));
+    const couriered = await supervisor.courier(run.id);
+    expect(couriered).toBe("done"); // courier()'s return value is a legacy label, not the run state
+    expect(store.get(run.id)!.state).toBe("unverified");
+
+    const backfilled = await supervisor.backfillCourierPrUrl(run.id, "https://github.com/o/gateway/pull/9");
+    expect(backfilled?.state).toBe("done");
+    expect(store.get(run.id)!.state).toBe("done");
+    expect(store.get(run.id)!.proof?.verified).toBe(true);
   });
 });
 

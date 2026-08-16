@@ -127,7 +127,7 @@ export type CiVerdict = "success" | "failed" | "pending" | "none" | "unknown";
 /**
  * The verified (or not) shape of a landed run — assembled by `./proof.ts#assembleProof`, never
  * hand-built. `done` used to be a label `publishRun` granted itself the instant `git push`
- * returned; it is now a VERDICT this object earns. `gaps` is empty iff `verified`.
+ * returned; it is now a VERDICT this object earns.
  */
 export interface Proof {
   landingMode: LandingMode;
@@ -141,7 +141,11 @@ export interface Proof {
   uiWork: boolean;
   screenshotPath: string | null;
   verified: boolean;
-  /** Human-readable reasons `verified` is false. Empty iff verified. */
+  /**
+   * Human-readable reasons the proof is short of full assertion. Empty on a fully-asserted
+   * verified proof; a verified proof CAN carry gaps (e.g. local-only, or no PR reader wired) —
+   * non-empty + verified means "verified, with a gap," not "not verified."
+   */
   gaps: string[];
   /** ISO — when this proof was assembled. */
   checkedAt: string;
