@@ -926,7 +926,9 @@ export async function runTask(argv: string[]): Promise<void> {
         ...(channel ? ["--channel", channel] : []),
         ...(project ? ["--repo", project] : []),
         ...(Object.keys(casting).length > 0 ? ["--cast", JSON.stringify(casting)] : []),
-        ...(flags["cast-quote"] ? ["--cast-quote", String(flags["cast-quote"])] : []),
+        ...(typeof flags["cast-quote"] === "string" && flags["cast-quote"].trim()
+          ? ["--cast-quote", flags["cast-quote"]]
+          : []),
         ...(flags.ultracode ? ["--ultracode"] : []),
       ],
       {

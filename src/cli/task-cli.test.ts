@@ -100,6 +100,23 @@ test("task start deploys a run for the branch and links the branch to it", async
   expect(shown.branch).toMatchObject({ ref: "#1.1", status: "ready", run: { runId: started.runId } });
 });
 
+test("task start does not launder a bare --cast-quote flag into a stamped human quote", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-task-cli-bare-quote-"));
+  dirs.push(dir);
+  await cli(dir, ["task", "create", "--title", "Voting launch", "--project", "polls"]);
+  // A bare trailing --cast-quote (no value) is parsed as boolean `true` by io.ts; core.ts must
+  // not forward that through as the literal string "true" and have it stamped as a quote.
+  await cli(dir, [
+    "task", "start", "#1.1",
+    "--body", "Build it",
+    "--cast", '{"implement":{"harness":"claude","model":"claude-opus-5"}}',
+    "--cast-quote",
+  ]);
+
+  const run = JSON.parse(readFileSync(join(dir, "runs.json"), "utf8")).runs[0];
+  expect(run.cast?.implement?.reason).toBeUndefined();
+});
+
 test("task start refuses a cast naming a stage a run does not have", async () => {
   const dir = mkdtempSync(join(tmpdir(), "beckett-task-cli-badcast-"));
   dirs.push(dir);

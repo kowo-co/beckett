@@ -189,7 +189,8 @@ Where kind-of-work overrides weight:
   than hoping review catches it.
 - **A fuzzy ask moves the seat.** Class 1 and 2 pay off only because "done" is checkable. When it
   isn't, either firm the prompt up yourself (see *The prompt IS the brief*) and keep the cheap
-  seat, or cast Opus 4.8 and judge the *result* instead of the diff. Never hand Sonnet a vibe.
+  seat, or, if a person named a heavier seat, cast it with `--cast-quote "<their words>"` and
+  judge the *result* instead of the diff. Never hand Sonnet a vibe.
 - **Long run where the risk is silently-missing work** — keep the implement seat its weight class
   calls for and cast `review` explicitly at Opus 5 `high` to grind every checklist item against
   reality instead of trusting the scaled default.
