@@ -946,7 +946,7 @@ describe("stage flow", () => {
 // declaration — every test in `describe("admission")`/`describe("stage flow")` above deploys no
 // `deps`/`files` and needed no change for this feature to land, which is the acceptance gate.
 describe("dependency edges (overhaul B9)", () => {
-  test("a run whose files overlap an in-flight sibling stays queued and records the auto dep", async () => {
+  test("a run whose files overlap an in-flight sibling stays queued without persisting an auto dep", async () => {
     const { supervisor, store } = newSupervisor();
     const sib = seedRun(store, makeRun({ id: "run-sib", slug: "sib", files: ["src/run/"] }));
     const dep = seedRun(store, makeRun({ id: "run-dep", slug: "dep", files: ["src/run/supervisor.ts"] }));
@@ -958,7 +958,9 @@ describe("dependency edges (overhaul B9)", () => {
     await tick();
     expect(spawnCalls.map((c) => c.itemId)).toEqual([sib.id]);
     expect(store.get(dep.id)!.state).toBe("queued");
-    expect(store.get(dep.id)!.deps).toEqual([sib.id]);
+    // Finding 22: the auto edge is recomputed from `run.files` on every admit and is never
+    // persisted into `run.deps` — the trace ("held: waits on …") is the durable explanation.
+    expect(store.get(dep.id)!.deps).toEqual([]);
   });
 
   test("it starts by itself the moment the sibling reaches done", async () => {
@@ -978,6 +980,30 @@ describe("dependency edges (overhaul B9)", () => {
     expect(store.get(sib.id)!.state).toBe("done");
     expect(spawnCalls.map((c) => c.itemId)).toContain(dep.id);
     expect(store.get(dep.id)!.state).not.toBe("queued");
+  });
+
+  test("a run auto-blocked by an overlapping sibling still composes that sibling's branch once it's done", async () => {
+    // The auto edge is never persisted into `run.deps` (finding 22), but `prepareWorktree` must
+    // still see it — otherwise a dependent admitted right after its overlap sibling finishes
+    // would cut its worktree from stale `origin/main` instead of the sibling's committed edits
+    // to the exact files they share.
+    const { supervisor, store } = newSupervisor({ publish: true });
+    const sib = seedRun(store, makeRun({ id: "run-sib", slug: "sib", files: ["src/run/"] }));
+    const dep = seedRun(store, makeRun({ id: "run-dep", slug: "dep", files: ["src/run/supervisor.ts"] }));
+    await supervisor.admit(sib.id);
+    await tick();
+    await supervisor.admit(dep.id);
+    await tick();
+    expect(store.get(dep.id)!.deps).toEqual([]); // no persisted edge
+
+    created[0]!.finish("success", "implemented", doneSignal(true));
+    await settle();
+    created[1]!.finish("success", "looks good", doneSignal(true));
+    await settle();
+    expect(store.get(sib.id)!.state).toBe("done");
+    const depWorktreeCall = createWorktreeCalls.find((c) => c.branch === store.get(dep.id)!.branch);
+    expect(depWorktreeCall?.baseRef).toBe(store.get(sib.id)!.branch);
+    expect(mergeCalls).toHaveLength(0);
   });
 
   test("a dependent run's worktree is cut from its dep's branch, not origin/main", async () => {
@@ -2579,6 +2605,51 @@ describe("staffing watchdog", () => {
     const t0 = 9_000_000;
     expect(await supervisor.reconcileStaffing(t0)).toEqual({ restaffed: [], parked: [] });
     expect(await supervisor.reconcileStaffing(t0 + 400_000)).toEqual({ restaffed: [], parked: [] });
+    expect(spawnCalls).toHaveLength(1);
+  });
+
+  // Finding 1: a paused `queued` run must not be wedge-clocked into a park — the hold is
+  // transient, and `beckett task resume` is exactly what the pause lane exists to avoid needing.
+  test("a paused queued run's wedge clock is forgotten — it never gets parked for the hold", async () => {
+    const dir = scratch("beckett-pause-");
+    const pauseFile = join(dir, "pause.json");
+    writeFileSync(pauseFile, JSON.stringify({ pausedAt: "2026-08-15T00:00:00.000Z", reason: "hands off tonight", by: "jason" }));
+    const { supervisor, store } = newSupervisor({ pauseFilePath: pauseFile });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    // Held by the pause guard in `spawnGuarded` — no worker, run stays `queued`.
+    expect(spawnCalls).toHaveLength(0);
+    expect(store.get(run.id)!.state).toBe("queued");
+
+    const t0 = 8_000_000;
+    await supervisor.reconcileStaffing(t0);
+    const first = await supervisor.reconcileStaffing(t0 + 121_000);
+    expect(first).toEqual({ restaffed: [], parked: [] });
+    const second = await supervisor.reconcileStaffing(t0 + 400_000);
+    expect(second).toEqual({ restaffed: [], parked: [] });
+    expect(store.get(run.id)!.state).toBe("queued");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  // Finding 2: the watchdog must not bypass the B9 dependency gate — a dependent run staying
+  // `queued` behind an in-flight sibling is not "wedged", it is waiting exactly as designed.
+  test("a queued run waiting on a file-overlap dependency is never force-restaffed by the watchdog", async () => {
+    const { supervisor, store } = newSupervisor();
+    const sib = seedRun(store, makeRun({ id: "run-sib", slug: "sib", files: ["src/run/"] }));
+    const dep = seedRun(store, makeRun({ id: "run-dep", slug: "dep", files: ["src/run/supervisor.ts"] }));
+    await supervisor.admit(sib.id);
+    await tick();
+    await supervisor.admit(dep.id);
+    await tick();
+    expect(spawnCalls.map((c) => c.itemId)).toEqual([sib.id]);
+    expect(store.get(dep.id)!.state).toBe("queued");
+
+    const t0 = 8_000_000;
+    await supervisor.reconcileStaffing(t0);
+    await supervisor.reconcileStaffing(t0 + 10 * 121_000);
+    await supervisor.reconcileStaffing(t0 + 20 * 121_000);
+    expect(store.get(dep.id)!.state).toBe("queued");
     expect(spawnCalls).toHaveLength(1);
   });
 });
