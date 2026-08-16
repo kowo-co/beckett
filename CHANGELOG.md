@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v7.1.0 (2026-08-16)
+
 ### Overhaul (Aug 15–16): parking is no longer a one-way door, publish emits a PR, and beckett can be paused
 
 - An overheard turn is not a smaller license — the ambient "do not deploy any work yet" injection
