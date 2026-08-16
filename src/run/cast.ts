@@ -203,11 +203,12 @@ export interface SonnetFirstResult {
  *   - an explicit opus cast → kept ONLY when it carries a `reason` (the framer's stated case that
  *     this task clears sonnet's bar); with no reason it's downgraded to sonnet and the caller gets
  *     a human-readable note to log on the run record. Note: the CLI boundary that actually mints a
- *     run's cast (`../cli/task-deploy.ts#resolveCast`) auto-stamps a reason on a human-typed
- *     `--cast` naming opus — see that function's doc comment — so this gate in practice only ever
- *     fires for a reason-less opus cast that reached deploy some OTHER way (a raw API/library
- *     caller, a future automated framer that skips the CLI). That is exactly the case doctrine
- *     wants caught.
+ *     run's cast (`../cli/task-deploy.ts#resolveCast`) now STRIPS any `reason` an opus implement
+ *     cast arrives with unless a human supplied `--cast-quote` alongside it — so this gate fires
+ *     for the normal path: any implement cast, from a hand-typed `--cast`, a preset file, or a raw
+ *     API/library caller, that reached deploy without a quoted human directive behind it. Only a
+ *     `--cast-quote`'d cast (or one whose reason survived because it already had one) reaches this
+ *     gate carrying a `reason`, and is the only case kept on opus.
  */
 export function applySonnetFirst(explicit: HarnessSpec | undefined): SonnetFirstResult {
   if (!explicit) return { spec: { harness: "claude", model: DEFAULT_IMPLEMENT_MODEL } };

@@ -110,6 +110,11 @@ the login fix and the generator") and leave the plumbing out of it.
 
 ### `--cast` — only when the default seat is wrong
 
+**You do not pick the implement seat. Sonnet 5 implements.** Cast a heavier implement seat only
+when a person named it in this conversation — and then pass `--cast-quote "<their exact words>"`
+alongside `--cast`, or the policy downgrades it back to Sonnet and says so on the run. Casting
+`review` is still yours to choose. `--ultracode` is unchanged.
+
 Per-stage: who *implements*, who *reviews*, as JSON on one argument. Shape
 `{ "<stage>": { "harness": "claude", "model": "…", "effort": "…" } }` — a run only casts
 `implement` and `review`; `harness` is always `claude`. Cast nothing and implement runs on
@@ -170,17 +175,18 @@ Sonnet 5 `high` for standard grind, Opus 4.8 `high` for looser scopes.
 
 | Weight of the work | cast | ~all-in |
 |---|---|---:|
-| **1 · Trivial / mechanical** — copy tweak, version bump, config edit, rename, one obvious diff | nothing (Sonnet 5 default), or `sonnet-5` @ `medium` | ~$2–3 |
-| **2 · Standard spec'd work** *(the common case)* — APIs, parsers, data layers, business logic, tests, migrations | nothing; **`opus-4-8` @ `high`** when the ask is "go do this, report back" | ~$5–7 |
-| **3 · Judgment-heavy** — design calls, wide refactor, taste, hard debugging, **anything visual** | `opus-5` @ `high` (`xhigh` if genuinely hard), with a very explicit prompt | ~$8–16 |
+| **1 · Trivial / mechanical** — copy tweak, version bump, config edit, rename, one obvious diff | nothing (Sonnet 5) | ~$2–3 |
+| **2 · Standard spec'd work** *(the common case)* — APIs, parsers, data layers, business logic, tests, migrations | nothing (Sonnet 5) | ~$5–7 |
+| **3 · Judgment-heavy** — design calls, wide refactor, taste, hard debugging, **anything visual** | nothing (Sonnet 5) — a person naming a heavier seat gets it quoted via `--cast-quote` | ~$8–16 |
 | **4 · Correctness-critical** — auth, money, migrations, concurrency, Beckett's own source | `fable-5` @ `high` — **confirm with the human first** — plus `opus-5` on `review` | ~$18–21 |
 | **Multifaceted, any weight** — several subsystems, a migration plus its tests plus its docs | `--ultracode` (no `--cast`) | varies, high |
 
 Where kind-of-work overrides weight:
 
-- **Anything visual is Opus 5** — a canvas toy, a game, an animation, a landing page, "make it
-  look like X." A reviewer can't see a layout defect, so buy the implement seat, and say in the
-  prompt what it should look like rather than hoping review catches it.
+- **When a person asks for visual work on a heavier seat, quote them** — a canvas toy, a game, an
+  animation, a landing page, "make it look like X." A reviewer can't see a layout defect, so if
+  they named the seat pass `--cast-quote`, and say in the prompt what it should look like rather
+  than hoping review catches it.
 - **A fuzzy ask moves the seat.** Class 1 and 2 pay off only because "done" is checkable. When it
   isn't, either firm the prompt up yourself (see *The prompt IS the brief*) and keep the cheap
   seat, or cast Opus 4.8 and judge the *result* instead of the diff. Never hand Sonnet a vibe.

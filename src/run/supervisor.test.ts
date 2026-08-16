@@ -1653,7 +1653,11 @@ describe("sonnet-first implement casting", () => {
     expect(spawnCalls[0]!.harness).toMatchObject({ harness: "claude", model: "claude-sonnet-5", effort: "high" });
   });
 
-  test("an opus cast WITH a stated reason is kept, and the reason rides along on the record", async () => {
+  // Task 2 (overhaul B-P16): an opus implement cast reaches the supervisor carrying a `reason`
+  // ONLY when a human quoted one via `--cast-quote` at `task-deploy.ts#resolveCast` (or the cast
+  // already had one) — so a KEPT opus cast is now traced, not silently passed through, so jason
+  // can grep for casts he never authored.
+  test("an opus implement cast with a human quote runs opus and is traced, not downgraded", async () => {
     const { supervisor, store, events } = newSupervisor();
     const run = seedRun(
       store,
@@ -1662,7 +1666,7 @@ describe("sonnet-first implement casting", () => {
           implement: {
             harness: "claude",
             model: "claude-opus-5",
-            reason: "cross-cutting integration across the gateway and the auth service",
+            reason: 'human cast directive: "jason said opus for the gateway/auth cross-cut"',
           },
         },
       }),
@@ -1672,13 +1676,17 @@ describe("sonnet-first implement casting", () => {
     expect(spawnCalls[0]!.harness).toMatchObject({
       harness: "claude",
       model: "claude-opus-5",
-      reason: "cross-cutting integration across the gateway and the auth service",
+      reason: 'human cast directive: "jason said opus for the gateway/auth cross-cut"',
     });
-    // No downgrade note — the reason on `run.cast.implement` (persisted to runs.json) IS the
-    // record of why opus was kept, so nothing extra needs logging.
-    expect(events.find((e) => e.stage === "implement:cast")).toBeUndefined();
+    // The reason on `run.cast.implement` (persisted to runs.json) is the record of why opus was
+    // kept, so `run.cast` is NOT patched (unlike the downgrade path) — but it IS traced.
+    const note = events.find((e) => e.stage === "implement:cast");
+    expect(note).toBeDefined();
+    expect(note!.outcome).toBe("info");
+    expect(note!.message).toContain("opus implement kept");
+    expect(note!.message).toContain('human cast directive: "jason said opus for the gateway/auth cross-cut"');
     expect(store.get(run.id)!.cast?.implement?.reason).toBe(
-      "cross-cutting integration across the gateway and the auth service",
+      'human cast directive: "jason said opus for the gateway/auth cross-cut"',
     );
   });
 
