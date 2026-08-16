@@ -79,6 +79,8 @@ function run(overrides: Partial<Run> = {}): Run {
     published: null,
     proof: null,
     landingMode: null,
+    deps: [],
+    files: [],
     ...overrides,
   };
 }

@@ -177,6 +177,11 @@ const RunSchema = z.object({
   // without one (B12).
   proof: ProofSchema.nullable().default(null),
   landingMode: z.enum(LANDING_MODES).nullable().default(null),
+  // Defaulted so an OLD persisted row (minted before dependency edges existed) still parses, and
+  // a run declaring neither `--needs` nor `--files` round-trips with the empty arrays that keep
+  // this feature opt-in (B9).
+  deps: z.array(z.string()).default([]),
+  files: z.array(z.string()).default([]),
 });
 
 const LedgerSchema = z.object({
@@ -216,6 +221,10 @@ export interface CreateRunInput {
   ultracode?: boolean;
   cast?: Run["cast"];
   repo?: string | null;
+  /** Run ids this run must not start before (`--needs`, resolved from slugs by the CLI). B9. */
+  deps?: string[];
+  /** Repo-relative paths/directory-prefixes this run expects to touch (`--files`). B9. */
+  files?: string[];
 }
 
 export interface ListRunsOptions {
@@ -272,6 +281,8 @@ export class RunStore {
         question: null,
         proof: null,
         landingMode: null,
+        deps: input.deps ?? [],
+        files: input.files ?? [],
       };
       ledger.runs.push(run);
       return structuredClone(run);

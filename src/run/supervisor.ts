@@ -68,6 +68,7 @@ import {
   fetchRemote,
   hasDiffSince,
   headSha,
+  mergeBranchesIntoWorktree,
   readBranchVsMain,
   readDiff,
   remoteBranchExists,
@@ -110,6 +111,7 @@ import {
 import { blockerFromDoneSignal, makeBlocker, renderBlocker, stopsTheRun } from "./blocker.ts";
 import { blockerFromDeath, classifyDeath } from "./death.ts";
 import { assembleProof } from "./proof.ts";
+import { readiness } from "./deps.ts";
 import { isFrontendChange } from "../preview/index.ts";
 import type { CapabilityInventory, CapabilityTarget } from "../capability/preflight.ts";
 import { renderCapabilityGaps } from "../capability/preflight.ts";
@@ -131,6 +133,8 @@ export interface RunGitOps {
   remoteBranchExists: typeof remoteBranchExists;
   fetchRemote: typeof fetchRemote;
   readBranchVsMain: typeof readBranchVsMain;
+  /** Compose a dependent run's other dep branches into its worktree (B9). */
+  mergeBranchesIntoWorktree: typeof mergeBranchesIntoWorktree;
 }
 
 /**
@@ -400,6 +404,12 @@ export class RunSupervisor {
   private readonly askTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly budgetBlocked = new Set<string>();
   /**
+   * Dedupes the "held: waits on …" trace (B9): keyed by run id, valued by the rendered
+   * `waitsOn` list last traced for it, so a re-admit with the SAME unmet deps produces no
+   * repeat event — only a changed wait list (or the run finally clearing it) traces again.
+   */
+  private readonly waitingOn = new Map<string, string>();
+  /**
    * The live activity blurb's whole state, per run: the tail of journal lines the worker produced,
    * its refresh throttle, and the phrase last put on the card. EPHEMERAL on purpose — a blurb is
    * decoration on a durable timeline, so none of this is written to runs.json or survives a
@@ -449,6 +459,7 @@ export class RunSupervisor {
       remoteBranchExists,
       fetchRemote,
       readBranchVsMain,
+      mergeBranchesIntoWorktree,
       ...deps.gitOps,
     };
     this.stages = deps.stages ?? stageRegistry;
@@ -643,9 +654,37 @@ export class RunSupervisor {
 
   private admitRun(run: Run): void {
     if (RUN_TERMINAL.has(run.state)) return;
+    if (run.state === "queued" && !this.dependenciesReady(run)) return;
     const stage = this.stageFor(run);
     if (!stage) return;
     this.spawnGuarded(run, stage);
+  }
+
+  /**
+   * Dependency gate (B9): a `queued` run whose `readiness()` is not yet `ready` stays queued
+   * rather than staffing. Persists any newly-discovered auto edge (a file overlap with an
+   * in-flight sibling), so the wait survives a restart, and traces "held: waits on …" exactly
+   * once per distinct wait list — not once per admit call. Re-pumped from `patchRun` whenever
+   * any run reaches `done` (see below).
+   */
+  private dependenciesReady(run: Run): boolean {
+    if (run.deps.length === 0 && run.files.length === 0) return true; // opt-in: nothing to check
+    const all = this.store.list();
+    const { ready, waitsOn, autoDeps } = readiness(run, all);
+    if (ready) {
+      this.waitingOn.delete(run.id);
+      return true;
+    }
+    if (autoDeps.length > 0) {
+      const merged = [...run.deps, ...autoDeps.filter((id) => !run.deps.includes(id))];
+      void this.patchRun(run.id, { deps: merged });
+    }
+    const key = waitsOn.slice().sort().join(",");
+    if (this.waitingOn.get(run.id) !== key) {
+      this.waitingOn.set(run.id, key);
+      this.trace(run, "admit", "held", `waits on ${waitsOn.join(", ")}`);
+    }
+    return false;
   }
 
   /** True if a worker is live, OR a spawn is mid-flight, for this run (airtight dedup). */
@@ -878,8 +917,31 @@ export class RunSupervisor {
     try {
       workspace = await this.prepareWorktree(run, repoRoot);
     } catch (err) {
-      this.trace(run, "worktree", "failed", undefined, (err as Error).message);
-      await this.noteSpawnFailure(run, `could not allocate a worktree under \`${repoRoot}\`: ${(err as Error).message}`);
+      const message = (err as Error).message;
+      this.trace(run, "worktree", "failed", undefined, message);
+      // B9: `mergeBranchesIntoWorktree` (via `prepareWorktree`) throws this exact prefix on a
+      // real merge conflict between dep branches — that is a product decision, not a spawn
+      // glitch the watchdog should retry into the same conflict forever.
+      if (message.startsWith("cannot compose dependency branch")) {
+        const conflictMatch = /conflicts: (.+)$/.exec(message);
+        const files = conflictMatch?.[1] ?? "the touched files";
+        await this.hold(
+          run,
+          makeBlocker(
+            {
+              class: "product-decision",
+              reversible: false,
+              remedy: `the dependency branches conflict — resolve ${files} by hand or re-file this run on top of main`,
+              detail: message,
+              defaultAnswer: null,
+              stage: null,
+            },
+            () => new Date(this.now()),
+          ),
+        );
+        return;
+      }
+      await this.noteSpawnFailure(run, `could not allocate a worktree under \`${repoRoot}\`: ${message}`);
       return;
     }
 
@@ -1095,19 +1157,39 @@ export class RunSupervisor {
     this.logger.info("worker spawned for run", { run: run.id, stage, workerId: handle.id, harness: spec.harness });
   }
 
-  /** Allocate (or reuse) the run's worktree on its own branch. */
+  /**
+   * Allocate (or reuse) the run's worktree on its own branch.
+   *
+   * B9: on FIRST allocation only (`firstTouch`), a run with declared `deps` is cut from its
+   * newest — the last entry of `run.deps` — dep's branch instead of `origin/main`, and every
+   * OTHER dep branch is merged in via `mergeBranchesIntoWorktree`. By the time a run reaches
+   * here every dep is `done` (the admission gate in `dependenciesReady` would not have released
+   * it otherwise), so this never blocks on a dep that hasn't landed. A defensive fallback to
+   * `origin/main` covers the (should-never-happen) case of a dep going missing between admission
+   * and spawn.
+   */
   private async prepareWorktree(run: Run, repoRoot: string): Promise<string> {
     const firstTouch = !run.workspace;
     const workspace = run.workspace ?? join(repoRoot, ".beckett", "worktrees", run.id);
     this.trace(run, "worktree", "started", firstTouch ? "creating isolated worktree" : "reusing isolated worktree");
     if (firstTouch) await this.git.fetchRemote(repoRoot);
+    const depRuns = firstTouch ? run.deps.map((id) => this.store.get(id)) : [];
+    const doneDeps = depRuns.filter((d): d is Run => d !== null && d.state === "done");
+    const composeReady = run.deps.length > 0 && doneDeps.length === run.deps.length;
+    const baseRef = composeReady ? doneDeps[doneDeps.length - 1]!.branch : "origin/main";
     await this.git.createWorktree({
       repoRoot,
       workspace,
       branch: run.branch,
-      baseRef: "origin/main",
+      baseRef,
       reuseIfExists: true,
     });
+    if (composeReady && doneDeps.length > 1) {
+      await this.git.mergeBranchesIntoWorktree(
+        workspace,
+        doneDeps.slice(0, -1).map((d) => d.branch),
+      );
+    }
     this.trace(run, "worktree", "passed", workspace);
     return workspace;
   }
@@ -2800,6 +2882,12 @@ export class RunSupervisor {
         } catch (err) {
           this.logger.warn("run state-change listener threw (ignored)", { run: runId, error: String(err) });
         }
+      }
+      // Dependency pump (B9): a run reaching `done` is exactly the event that can clear another
+      // run's `readiness()` — walk every queued run and re-admit it. Cheap (queued runs are rare
+      // relative to live ones) and correct even when nothing is actually waiting.
+      if (patch.state === "done" && patch.state !== before) {
+        for (const queued of this.store.list({ states: ["queued"] })) this.admitRun(queued);
       }
       return updated;
     } catch (err) {

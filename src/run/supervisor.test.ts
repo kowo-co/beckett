@@ -134,6 +134,11 @@ let commitResult = { committed: true, sha: "commit000" };
 /** The diff the review stage pre-reads — a `let` so a test can swap in a copy/href surface (#234). */
 const DEFAULT_REVIEW_DIFF = "diff --git a/x.ts b/x.ts\n+added";
 let reviewDiffText = DEFAULT_REVIEW_DIFF;
+/** B9: recorded `mergeBranchesIntoWorktree` calls, and an optional throw for the conflict test. */
+let mergeCalls: { workspace: string; branches: string[] }[] = [];
+let mergeThrows: Error | null = null;
+/** B9: recorded `createWorktree` calls — which `baseRef` a dependent run was actually cut from. */
+let createWorktreeCalls: { workspace: string; branch: string; baseRef: string }[] = [];
 const gitFakes: Partial<RunGitOps> = {
   commitWorktree: async (workspace: string, message: string) => {
     commitCalls.push({ workspace, message });
@@ -146,6 +151,7 @@ const gitFakes: Partial<RunGitOps> = {
   },
   readDiff: async () => reviewDiffText,
   createWorktree: async (opts) => {
+    createWorktreeCalls.push({ workspace: opts.workspace, branch: opts.branch, baseRef: opts.baseRef });
     mkdirSync(opts.workspace, { recursive: true });
     return { repoRoot: opts.repoRoot, workspace: opts.workspace, branch: opts.branch };
   },
@@ -153,6 +159,10 @@ const gitFakes: Partial<RunGitOps> = {
   deleteBranch: async () => {},
   remoteBranchExists: async () => false,
   fetchRemote: async () => true,
+  mergeBranchesIntoWorktree: async (workspace: string, branches: string[]) => {
+    mergeCalls.push({ workspace, branches });
+    if (mergeThrows) throw mergeThrows;
+  },
   // Default: comparison unavailable → the generic push hand-off. Tests that assert case (a)/(b)/(c)
   // advice override this per-test to return the specific branch-vs-main shape.
   readBranchVsMain: async () => ({ compared: false, ahead: 0, behind: 0, aheadUnlanded: 0 }),
@@ -220,6 +230,8 @@ function makeRun(over: Partial<Run> = {}): Run {
     question: over.question === undefined ? null : over.question,
     proof: over.proof === undefined ? null : over.proof,
     landingMode: over.landingMode === undefined ? null : over.landingMode,
+    deps: over.deps ?? [],
+    files: over.files ?? [],
   };
 }
 
@@ -328,6 +340,9 @@ beforeEach(() => {
   ensureCalls = [];
   commitResult = { committed: true, sha: "commit000" };
   reviewDiffText = DEFAULT_REVIEW_DIFF;
+  mergeCalls = [];
+  mergeThrows = null;
+  createWorktreeCalls = [];
 });
 
 afterEach(() => {
@@ -924,6 +939,93 @@ describe("stage flow", () => {
     // vs. the old free-text `park(run, "${detail}\n\n${summary}")`.
     expect(store.get(run.id)!.error).toContain("stuck on auth");
     expect(commitCalls.some((c) => c.message.includes("WIP"))).toBe(true);
+  });
+});
+
+// B9: two runs that would fight over the same files queue instead of racing. Opt-in by
+// declaration — every test in `describe("admission")`/`describe("stage flow")` above deploys no
+// `deps`/`files` and needed no change for this feature to land, which is the acceptance gate.
+describe("dependency edges (overhaul B9)", () => {
+  test("a run whose files overlap an in-flight sibling stays queued and records the auto dep", async () => {
+    const { supervisor, store } = newSupervisor();
+    const sib = seedRun(store, makeRun({ id: "run-sib", slug: "sib", files: ["src/run/"] }));
+    const dep = seedRun(store, makeRun({ id: "run-dep", slug: "dep", files: ["src/run/supervisor.ts"] }));
+    await supervisor.admit(sib.id);
+    await tick();
+    expect(spawnCalls.map((c) => c.itemId)).toEqual([sib.id]);
+
+    await supervisor.admit(dep.id);
+    await tick();
+    expect(spawnCalls.map((c) => c.itemId)).toEqual([sib.id]);
+    expect(store.get(dep.id)!.state).toBe("queued");
+    expect(store.get(dep.id)!.deps).toEqual([sib.id]);
+  });
+
+  test("it starts by itself the moment the sibling reaches done", async () => {
+    const { supervisor, store } = newSupervisor({ publish: true });
+    const sib = seedRun(store, makeRun({ id: "run-sib", slug: "sib", files: ["src/run/"] }));
+    const dep = seedRun(store, makeRun({ id: "run-dep", slug: "dep", files: ["src/run/supervisor.ts"] }));
+    await supervisor.admit(sib.id);
+    await tick();
+    await supervisor.admit(dep.id);
+    await tick();
+    expect(spawnCalls).toHaveLength(1);
+
+    created[0]!.finish("success", "implemented", doneSignal(true));
+    await settle();
+    created[1]!.finish("success", "looks good", doneSignal(true));
+    await settle();
+    expect(store.get(sib.id)!.state).toBe("done");
+    expect(spawnCalls.map((c) => c.itemId)).toContain(dep.id);
+    expect(store.get(dep.id)!.state).not.toBe("queued");
+  });
+
+  test("a dependent run's worktree is cut from its dep's branch, not origin/main", async () => {
+    const { supervisor, store } = newSupervisor();
+    const dep = seedRun(store, makeRun({ id: "run-dep", slug: "dep", state: "done" }));
+    const run = seedRun(store, makeRun({ id: "run-x", slug: "x", deps: [dep.id] }));
+    await supervisor.admit(run.id);
+    await tick();
+    expect(createWorktreeCalls[0]?.baseRef).toBe("beckett/run-dep");
+    expect(mergeCalls).toHaveLength(0);
+  });
+
+  test("two deps: the second is merged in with mergeBranchesIntoWorktree", async () => {
+    const { supervisor, store } = newSupervisor();
+    const depA = seedRun(store, makeRun({ id: "run-a", slug: "a", state: "done" }));
+    const depB = seedRun(store, makeRun({ id: "run-b", slug: "b", state: "done" }));
+    const run = seedRun(store, makeRun({ id: "run-x", slug: "x", deps: [depA.id, depB.id] }));
+    await supervisor.admit(run.id);
+    await tick();
+    expect(createWorktreeCalls[0]?.baseRef).toBe(depB.branch);
+    expect(mergeCalls).toHaveLength(1);
+    expect(mergeCalls[0]?.branches).toEqual([depA.branch]);
+  });
+
+  test("a conflicting compose parks with a product-decision blocker naming the files", async () => {
+    mergeThrows = new Error("cannot compose dependency branch beckett/run-b; conflicts: src/run/supervisor.ts");
+    const { supervisor, store } = newSupervisor();
+    const depA = seedRun(store, makeRun({ id: "run-a", slug: "a", state: "done" }));
+    const depB = seedRun(store, makeRun({ id: "run-b", slug: "b", state: "done" }));
+    const run = seedRun(store, makeRun({ id: "run-x", slug: "x", deps: [depA.id, depB.id] }));
+    await supervisor.admit(run.id);
+    await settle();
+    const parked = store.get(run.id)!;
+    expect(parked.state).toBe("parked");
+    expect(parked.blocker?.class).toBe("product-decision");
+    expect(parked.blocker?.remedy).toContain("src/run/supervisor.ts");
+  });
+
+  test("runs with no declared files are unaffected", async () => {
+    const { supervisor, store } = newSupervisor();
+    const a = seedRun(store, makeRun({ id: "run-a", slug: "a" }));
+    const b = seedRun(store, makeRun({ id: "run-b", slug: "b" }));
+    await supervisor.admit(a.id);
+    await supervisor.admit(b.id);
+    await tick();
+    expect(spawnCalls.map((c) => c.itemId).sort()).toEqual([a.id, b.id].sort());
+    expect(store.get(a.id)!.deps).toEqual([]);
+    expect(store.get(b.id)!.deps).toEqual([]);
   });
 });
 

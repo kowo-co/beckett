@@ -59,6 +59,8 @@ function makeRun(over: Partial<Run> = {}): Run {
     published: null,
     proof: null,
     landingMode: null,
+    deps: [],
+    files: [],
     ...over,
   };
 }
