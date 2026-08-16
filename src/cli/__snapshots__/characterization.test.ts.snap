@@ -1848,6 +1848,9 @@ enabled = true
 provider = "off"
 throttle_secs = 15
 
+[proactive_sweep]
+repos = []
+
 [github]
 poll_secs = 60
 

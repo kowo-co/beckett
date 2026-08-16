@@ -1241,6 +1241,12 @@ export async function runStatus(argv: string[]): Promise<void> {
       typeof tick === "number" ? `${Math.round((Date.now() - tick) / 1000)}s ago` : "not yet"
     }`,
   );
+  const sweepRepos: string[] = Array.isArray(data.proactiveSweep?.repos) ? data.proactiveSweep.repos : [];
+  lines.push(
+    sweepRepos.length === 0
+      ? "sweep:     no repos opted in — add them to [proactive_sweep] repos in config.toml"
+      : `sweep:     ${sweepRepos.length} repo(s) — ${sweepRepos.join(", ")}`,
+  );
   const c = data.concierge ?? {};
   const gate = c.turnGate ?? {};
   lines.push(

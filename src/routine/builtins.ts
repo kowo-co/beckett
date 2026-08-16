@@ -62,9 +62,9 @@ export const WEEKLY_DEPS_UPDATE_ID = "weekly-deps-update";
 /**
  * Id of the proactive rot-sweep routine (issue #79): ro's ask — "let me open PRs on rot in repos
  * without being asked." It ships ENABLED but with an EMPTY opt-in list, so it is scheduled and
- * running yet sweeps nothing until ro names repos (`beckett routine proactive add <owner/name>`).
- * That is the "never all repos by default" guarantee made concrete: the sweep has no repos to touch
- * until a human adds them one by one.
+ * running yet sweeps nothing until a human names repos in `[proactive_sweep] repos` in
+ * config.toml. That is the "never all repos by default" guarantee made concrete: the sweep has no
+ * repos to touch until a human adds them, and config is the only place that ever happens.
  */
 export const PROACTIVE_SWEEP_ID = "proactive-sweep";
 
@@ -84,13 +84,23 @@ export const WEEKLY_SPEND_REPORT_ID = "weekly-spend-report";
 export const FREE_TIME_ID = "weekly-free-time";
 
 /**
- * Seed-time overrides for the built-in definitions. Only free time takes one: its schedule ships
- * in `[free_time]` config so a fresh install can be retimed without editing source, while every
- * other builtin's window is a code constant. After the seed the routine store owns the timing —
- * this is a SEED value, not a live binding, and `beckett routine` is how a seeded routine moves.
+ * Config-sourced overrides for the built-in definitions. Free time's schedule ships in
+ * `[free_time]` config so a fresh install can be retimed without editing source; every other
+ * builtin's window is a code constant. After the seed the routine store owns the timing — that
+ * one is a SEED value, not a live binding, and `beckett routine` is how a seeded schedule moves.
+ * The proactive sweep's repo list is different: it is config-authoritative on EVERY load (see
+ * `RoutineStore`), because it is an allow-list and a seed-only override would go stale the moment
+ * config changed on an existing install.
  */
 export interface BuiltinRoutineOverrides {
   freeTime?: { weekday: Weekday; window: FuzzWindow };
+  /**
+   * The proactive-sweep routine's opt-in repo list, from `[proactive_sweep] repos` in config.
+   * Unlike `freeTime` (seed-only), this override is applied on EVERY load, not just the first
+   * write — see `RoutineStore`'s doc comment for why an allow-list can't have two sources of
+   * truth.
+   */
+  proactiveSweep?: { repos: string[] };
 }
 
 /** The free-time schedule shipped when nothing overrides it — mirrors the `[free_time]` defaults. */
