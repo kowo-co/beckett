@@ -251,7 +251,8 @@ export function branchStatusForRun(state: RunState): TaskBranchStatus {
     case "queued": return "ready";
     case "implementing": return "running";
     case "reviewing":
-    case "publishing": return "review";
+    case "publishing":
+    case "unverified": return "review";
     case "done": return "done";
     case "cancelled": return "cancelled";
     case "failed":

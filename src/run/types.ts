@@ -24,6 +24,10 @@ export type RunStage = "implement" | "review";
  * state. `awaiting_input` (B8) is LIVE, not terminal: the supervisor owns it end to end (arms the
  * answer timer, re-arms it at boot, resumes on an answer or the default, or hands off to
  * `parked` on a silent timeout with no default) — a human only ever answers it, never restaffs it.
+ * `unverified` (B12) is likewise LIVE, not terminal: a publish succeeded but its {@link Proof}
+ * has not (yet) earned `verified` — the staffing watchdog's `reconcileProofs` re-assembles it on
+ * every pass, promoting to `done` when it does, or `hold()`-ing with a transient blocker once
+ * `runs.proof_recheck_max` passes are burned. Nobody but the supervisor moves a run out of here.
  */
 export type RunState =
   | "queued"
@@ -31,6 +35,7 @@ export type RunState =
   | "reviewing"
   | "publishing"
   | "awaiting_input"
+  | "unverified"
   | "done"
   | "failed"
   | "cancelled"
@@ -104,6 +109,48 @@ export interface RunQuestion {
   defaultAnswer: string | null;
   askedAt: string;
   expiresAt: string;
+}
+
+// ── B12: proof ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * How a `done`(-bound) run's branch actually reached (or will reach) GitHub. Distinct from
+ * `PublishRecord.via`, which only distinguishes "the outbox did it" from "a human did it" — this
+ * is the shape of the LANDING itself, and it is what {@link Proof} keys its verification rules
+ * on. `"local"` is an install with no `publishRepo` wired at all (see `../shell/main.ts`).
+ */
+export type LandingMode = "pr" | "direct-push" | "courier" | "local";
+
+/** CI's rolled-up verdict on a PR's head commit, as `./proof.ts#assembleProof` needs it. */
+export type CiVerdict = "success" | "failed" | "pending" | "none" | "unknown";
+
+/**
+ * The verified (or not) shape of a landed run — assembled by `./proof.ts#assembleProof`, never
+ * hand-built. `done` used to be a label `publishRun` granted itself the instant `git push`
+ * returned; it is now a VERDICT this object earns.
+ */
+export interface Proof {
+  landingMode: LandingMode;
+  /** ONLY a pull-request URL. A bare repo/compare URL belongs in `pushUrl`, never here. */
+  prUrl: string | null;
+  pushUrl: string | null;
+  /** Does the PR still exist and (for a "pr" landing) what did CI say. null = never checked. */
+  prResolves: boolean | null;
+  ci: CiVerdict;
+  /** Did this run's own diff touch a browser-facing frontend (`../preview/index.ts#isFrontendChange`). */
+  uiWork: boolean;
+  screenshotPath: string | null;
+  verified: boolean;
+  /**
+   * Human-readable reasons the proof is short of full assertion. Empty on a fully-asserted
+   * verified proof; a verified proof CAN carry gaps (e.g. local-only, or no PR reader wired) —
+   * non-empty + verified means "verified, with a gap," not "not verified."
+   */
+  gaps: string[];
+  /** ISO — when this proof was assembled. */
+  checkedAt: string;
+  /** How many re-check passes this proof has burned (`runs.proof_recheck_max` bounds it). */
+  attempts: number;
 }
 
 /**
@@ -184,4 +231,8 @@ export interface Run {
   blocker: Blocker | null;
   /** Non-null iff `state === "awaiting_input"` (B8). The one open question, and its default. */
   question: RunQuestion | null;
+  /** Non-null once a publish attempt succeeds (state `unverified` or `done`). See {@link Proof} (B12). */
+  proof: Proof | null;
+  /** How this run's branch landed (or is landing). Set alongside `proof`; null before publish. */
+  landingMode: LandingMode | null;
 }

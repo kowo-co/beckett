@@ -974,6 +974,9 @@ export interface Config {
     /** Seconds an `awaiting_input` run waits for an answer before its own timer fires (B8,
      *  `./run/supervisor.ts`). Default 1800. */
     question_wait_s: number;
+    /** Re-check passes an `unverified` run gets before the watchdog holds it for a human instead
+     *  of re-assembling its proof forever (B12, `./run/proof.ts`). Default 20. */
+    proof_recheck_max: number;
     /** Per-run USD ceiling; 0 falls back to `[budget] per_task_usd_cap`. Default 0. */
     budget_usd_per_run: number;
     /**

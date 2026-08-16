@@ -36,7 +36,12 @@ import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileS
 import { dirname } from "node:path";
 import type { Logger } from "../types.ts";
 
-/** The three run-lifecycle states a person is owed a word about (issue #233). */
+/**
+ * The three run-lifecycle states a person is owed a word about (issue #233). Deliberately does
+ * NOT include `unverified` (B12): a run sitting there is still in flight — the staffing watchdog's
+ * `reconcileProofs` keeps re-checking it, and it lands on `done` or `parked`, both of which ARE
+ * covered here. Same posture as `awaiting_input` (B8), also excluded for the identical reason.
+ */
 export type OwedRunNotificationState = "done" | "failed" | "parked";
 
 const OWED_RUN_NOTIFICATION_STATES: ReadonlySet<string> = new Set<OwedRunNotificationState>([

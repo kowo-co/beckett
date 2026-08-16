@@ -6023,8 +6023,11 @@ export class Concierge {
         // Deliberately NEUTRAL wording: a run reaches done by a direct push OR an open PR awaiting
         // a human merge, so "shipped" would be a lie for the PR case. The link says which.
         let detail = "Review passed — the work is **done**.";
-        if (run.prUrl) {
-          detail += `\nArtifact: ${run.prUrl}`;
+        // A direct-push/branchless landing has no PR URL — `run.prUrl` is null there by design
+        // (B12) — but `proof.pushUrl` still names the real commit/repo it shipped to.
+        const artifact = run.prUrl ?? run.proof?.pushUrl ?? null;
+        if (artifact) {
+          detail += `\nArtifact: ${artifact}`;
           detail += "\nInclude the artifact link in your reply so the person can click straight through.";
         }
         return this.runUpdateTurn(run, detail);

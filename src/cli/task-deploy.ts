@@ -269,6 +269,8 @@ export function previewRun(input: TaskDeployInput, now: Date): Run {
     published: null,
     blocker: null,
     question: null,
+    proof: null,
+    landingMode: null,
   };
 }
 

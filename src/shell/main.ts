@@ -29,7 +29,7 @@ import { recordBoot, recordCleanShutdown, uptimeLedgerPath } from "../uptime.ts"
 import { log as rootLog } from "../log.ts";
 import type { Config, Harness, Logger } from "../types.ts";
 import { RunStore } from "../run/store.ts";
-import type { RunState } from "../run/types.ts";
+import type { CiVerdict, RunState } from "../run/types.ts";
 import { createRunSupervisor, runProjectSlug, runSpecReader, type RunSupervisor } from "../run/supervisor.ts";
 import { createStagesExtension, stageViewOf } from "../dispatch/stages.ts";
 import { createProgressCardService, shouldObserveRunCard, type ProgressCardService } from "../progress/cards.ts";
@@ -327,6 +327,27 @@ async function boot(): Promise<BootedSystem> {
     browserLane: () => browserLaneHealth?.() ?? { ok: true, detail: "unknown" },
   });
 
+  // B12: does a run's PR still resolve, and what did CI say (`RunSupervisor.finalizePublish`'s
+  // `assembleProof`). Wired only when a GitHub credential is configured — the exact condition
+  // `prPoller` above already keys on — so an install with none degrades `prResolves` to `null`
+  // ("not asserted"), never to a false `unverified`.
+  const verifyPr = githubReader
+    ? async (prUrl: string) => {
+        const parsed = parsePrUrl(prUrl);
+        if (!parsed) throw new Error(`could not parse a repo/number out of PR url: ${prUrl}`);
+        const signals = await githubReader.prSignals(parsed.repo, parsed.number);
+        const ci: CiVerdict =
+          signals.checkConclusion === "SUCCESS"
+            ? "success"
+            : signals.checkConclusion === "FAILURE"
+              ? "failed"
+              : signals.checkConclusion === "PENDING"
+                ? "pending"
+                : "none";
+        return { resolves: signals.state !== "CLOSED", ci };
+      }
+    : undefined;
+
   // The RUN engine — `beckett task deploy` files a Run, and this drives it implement → review →
   // publish → done. It is the daemon's ONLY staffing loop.
   const runSupervisor = createRunSupervisor({
@@ -339,6 +360,12 @@ async function boot(): Promise<BootedSystem> {
     // point at two different repositories.
     resolveRepoRoot: (run) => join(PROJECTS_ROOT, runProjectSlug(run)),
     publishRepo,
+    ...(verifyPr ? { verifyPr } : {}),
+    // `frontendProof` (a UI screenshot for `runs` with `uiWork: true`) is intentionally NOT wired
+    // — `../preview/screenshot.ts#createFrontendScreenshotHook` has no production caller yet and
+    // wiring it needs a one-shot browser capture this daemon does not have a small seam for.
+    // Omitted degrades `screenshotPath` to `null` (a named gap on UI-touching runs), never to a
+    // false `unverified` on non-UI work — see `RunSupervisorDeps.frontendProof`'s doc comment.
     capabilityPreflight,
     progress: concierge.progressSink(),
     dispatchEventsPath: join(paths.eventsDir, "dispatch.jsonl"),

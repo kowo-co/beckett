@@ -99,7 +99,7 @@ import { specGateSpec } from "../hooks/registry.ts";
 import { parseSpecChecklist, renderSpecScaffold, specRunId, SPEC_FILE_REL, type ParsedSpecChecklist } from "./spec-file.ts";
 import { runAsWorkItem } from "./adapter.ts";
 import type { RunStore } from "./store.ts";
-import type { Blocker, Run, RunQuestion, RunStage, RunStateChange } from "./types.ts";
+import type { Blocker, CiVerdict, LandingMode, Proof, Run, RunQuestion, RunStage, RunStateChange } from "./types.ts";
 import { RUN_TERMINAL } from "./types.ts";
 import {
   planWorktreeSweep,
@@ -109,6 +109,8 @@ import {
 } from "./worktree-sweep.ts";
 import { blockerFromDoneSignal, makeBlocker, renderBlocker, stopsTheRun } from "./blocker.ts";
 import { blockerFromDeath, classifyDeath } from "./death.ts";
+import { assembleProof } from "./proof.ts";
+import { isFrontendChange } from "../preview/index.ts";
 import type { CapabilityInventory, CapabilityTarget } from "../capability/preflight.ts";
 import { renderCapabilityGaps } from "../capability/preflight.ts";
 
@@ -189,6 +191,21 @@ export interface RunSupervisorDeps {
   onStateChange?: (event: RunStateChange) => void;
   /** Fired on every successful publication (push or PR). */
   onPublished?: (info: { url: string; kind: "pushed" | "pr"; prUrl?: string; run: Run }) => unknown;
+  /**
+   * Resolve a PR: does it still exist, and what did CI say (B12, `./proof.ts`). Best-effort —
+   * `publishRun`/`reconcileProofs` catch a throw, log it, and degrade to `prResolves: null`
+   * ("not asserted"), never a false `unverified`. Omitted (no GitHub credential configured) →
+   * `prResolves` stays `null` forever, and a `"pr"` landing is verified-with-a-gap instead of
+   * blocking on a check nothing can perform.
+   */
+  verifyPr?: (prUrl: string) => Promise<{ resolves: boolean; ci: CiVerdict }>;
+  /**
+   * UI proof for a finished run's worktree — one screenshot of the built branch (B12,
+   * `../preview/screenshot.ts`). Best-effort, same contract as {@link verifyPr}: a throw degrades
+   * to `screenshotPath: null`. Omitted → UI work is never asserted, which is a gap but not a false
+   * `unverified` UNLESS the run's diff is frontend work, in which case the gap IS the point.
+   */
+  frontendProof?: (args: { run: Run; workspace: string; baseRef: string }) => Promise<string | null>;
   /** Test seam for the orphan sweep; default ps-verifies + kills. */
   sweepOrphan?: (pid: number, expectedBin: string) => boolean;
   /**
@@ -340,6 +357,8 @@ export class RunSupervisor {
   private readonly onPrOpened?: RunSupervisorDeps["onPrOpened"];
   private readonly onStateChange?: RunSupervisorDeps["onStateChange"];
   private readonly onPublished?: RunSupervisorDeps["onPublished"];
+  private readonly verifyPr?: RunSupervisorDeps["verifyPr"];
+  private readonly frontendProof?: RunSupervisorDeps["frontendProof"];
   private readonly sweepOrphan: (pid: number, expectedBin: string) => boolean;
   private readonly bus?: RunBusPort;
   private readonly events: DispatchEventBus;
@@ -441,6 +460,8 @@ export class RunSupervisor {
     this.onPrOpened = deps.onPrOpened;
     this.onStateChange = deps.onStateChange;
     this.onPublished = deps.onPublished;
+    this.verifyPr = deps.verifyPr;
+    this.frontendProof = deps.frontendProof;
     this.bus = deps.bus;
     this.sweepOrphan =
       deps.sweepOrphan ?? ((pid, expectedBin) => sweepLedgeredWorker(pid, expectedBin, this.logger));
@@ -1494,18 +1515,129 @@ export class RunSupervisor {
       return;
     }
     this.publishStallClock.delete(run.id);
-    const prUrl = outcome.status === "published" ? outcome.prUrl ?? outcome.url ?? null : null;
+    await this.finalizePublish(publishing, outcome, summary);
+  }
+
+  /**
+   * B12: publish success no longer grants `done` directly — it hands the landing to
+   * {@link assembleProof}, which decides `done` (verified) vs `unverified` (not yet, or never).
+   * `reconcileProofs` re-assembles the identical proof for every `unverified` run on each
+   * watchdog pass, so a run that starts here with `prResolves: null` (no `verifyPr` wired at
+   * publish time) is never stuck — it is verified-with-a-gap on THIS pass, not held waiting for a
+   * check that will never come.
+   */
+  private async finalizePublish(
+    run: Run,
+    outcome: Extract<PublishOutcome, { status: "skipped" | "published" }>,
+    summary: string,
+  ): Promise<void> {
+    // Landing is classified off the URL SHAPE, not `outcome.kind`: `GitHubCli.ensurePublished`
+    // returns `kind: "pushed"` for every owned-repo publish, PR or not — `kind: "pr"` only ever
+    // comes back on the cross-fork path. A `/pull/<n>` URL is the only reliable "this is a PR"
+    // signal regardless of which code path produced it.
+    const prish =
+      outcome.status === "published" && !!outcome.prUrl && /\/pull\/\d+/.test(outcome.prUrl);
+    const landingMode: LandingMode = outcome.status === "skipped" ? "local" : prish ? "pr" : "direct-push";
+    // ONLY a pull-request URL goes in `prUrl` from here on — a direct push's bare repo/commit URL
+    // goes in `proof.pushUrl` instead. This is the `?? outcome.url` fallback's removal.
+    const prUrl = prish && outcome.status === "published" ? outcome.prUrl! : null;
+    const pushUrl =
+      outcome.status === "published" && !prish ? outcome.prUrl ?? outcome.url : null;
+    const proof = await this.assembleProofFor(run, { landingMode, prUrl, pushUrl, attempts: 0 });
+
     await this.patchRun(run.id, {
-      state: "done",
+      state: proof.verified ? "done" : "unverified",
       prUrl,
-      error: null,
+      error: proof.verified ? null : proof.gaps.join("; "),
       published: { via: "outbox", prUrl },
+      proof,
+      landingMode,
     });
     // The deploy receipt's closing line: the shipped PR/push URL when there is one, the review
     // summary otherwise (a local-only completion with no publishRepo wired).
-    const shipped = outcome.status === "published" ? outcome.prUrl ?? outcome.url : "";
-    this.trace(publishing, "done", "passed", shipped || summary);
-    this.logger.info("run done", { run: run.id });
+    const shipped = prUrl || pushUrl || "";
+    if (proof.verified) {
+      this.trace(run, "done", "passed", shipped || summary);
+      this.logger.info("run done", { run: run.id });
+    } else {
+      this.trace(run, "unverified", "held", proof.gaps.join("; "));
+      this.logger.info("run published but not yet verified", { run: run.id, gaps: proof.gaps });
+    }
+  }
+
+  /**
+   * Best-effort fact-gathering for {@link assembleProof} — `verifyPr` and `frontendProof` are both
+   * OPTIONAL injected deps (`./types.ts`'s doc comment on each); a throw or an unwired dep degrades
+   * to `null`/`"unknown"`, never to a fabricated failure. Shared by `finalizePublish` (fresh facts
+   * off a just-succeeded publish) and `reconcileProofs` (fresh facts off an `unverified` run's
+   * already-recorded landing).
+   */
+  private async assembleProofFor(
+    run: Run,
+    facts: { landingMode: LandingMode; prUrl: string | null; pushUrl: string | null; attempts: number },
+  ): Promise<Proof> {
+    let prResolves: boolean | null = null;
+    let ci: CiVerdict = "unknown";
+    if (facts.landingMode === "pr" && facts.prUrl && this.verifyPr) {
+      try {
+        const signals = await this.verifyPr(facts.prUrl);
+        prResolves = signals.resolves;
+        ci = signals.ci;
+      } catch (err) {
+        this.logger.warn("verifyPr failed (proof degrades to not-asserted)", {
+          run: run.id,
+          error: (err as Error).message,
+        });
+      }
+    }
+
+    // Only ASSERT uiWork when there is a reader that could ever produce a screenshot for it — an
+    // unwired `frontendProof` must degrade to "not asserted" (uiWork: false), never to a false
+    // `unverified` on every run that happens to touch a .tsx/.css file (Task 5 step 5).
+    const uiWork = this.frontendProof ? await this.runTouchesFrontend(run) : false;
+    let screenshotPath: string | null = null;
+    if (uiWork && this.frontendProof && run.workspace) {
+      try {
+        screenshotPath = await this.frontendProof({
+          run,
+          workspace: run.workspace,
+          baseRef: run.baseSha ?? "HEAD",
+        });
+      } catch (err) {
+        this.logger.warn("frontendProof failed (proof degrades to no-screenshot)", {
+          run: run.id,
+          error: (err as Error).message,
+        });
+      }
+    }
+
+    return assembleProof(
+      { landingMode: facts.landingMode, prUrl: facts.prUrl, pushUrl: facts.pushUrl, prResolves, ci, uiWork, screenshotPath, attempts: facts.attempts },
+      () => new Date(this.now()),
+    );
+  }
+
+  /**
+   * Does this run's OWN diff touch a browser-facing frontend (`../preview/index.ts`'s #49 gate,
+   * reused rather than re-derived). Best-effort: an unreadable diff (no workspace left, a
+   * mid-teardown race) is `false`, not a thrown proof — the same posture `readDiff` already gets
+   * at cast time (`:968`).
+   */
+  private async runTouchesFrontend(run: Run): Promise<boolean> {
+    if (!run.workspace) return false;
+    try {
+      const diff = await this.git.readDiff(run.workspace, run.baseSha ?? "HEAD");
+      // Reuses `classifyDiffSurface`'s changed-file extraction (issue #234's classifier) rather
+      // than parsing the `diff --git` headers a second time — the ONE diff read this run's own
+      // proof needs, not a new one.
+      return isFrontendChange(classifyDiffSurface(diff).files);
+    } catch (err) {
+      this.logger.warn("frontend-touch diff read failed (uiWork treated as false)", {
+        run: run.id,
+        error: (err as Error).message,
+      });
+      return false;
+    }
   }
 
   /**
@@ -1641,15 +1773,10 @@ export class RunSupervisor {
         };
       }
       this.publishStallClock.delete(run.id);
-      const prUrl = pub.status === "published" ? pub.prUrl ?? pub.url ?? null : null;
-      await this.patchRun(run.id, {
-        state: "done",
-        prUrl,
-        error: null,
-        published: { via: "outbox", prUrl },
-      });
-      const shipped = pub.status === "published" ? pub.prUrl ?? pub.url : "";
-      this.trace(run, "done", "passed", shipped || "durable publish retry succeeded");
+      // A publish that succeeds on a RETRY still goes through the same proof gate as one that
+      // succeeds first try — otherwise a retried publish grants an unproven `done` with a bare
+      // repo/commit URL in `prUrl`, exactly the bug this task exists to kill.
+      await this.finalizePublish(run, pub, op.summary);
       return { action: "remove" };
     });
   }
@@ -1706,6 +1833,54 @@ export class RunSupervisor {
       parked.push(run.id);
     }
     return parked;
+  }
+
+  /**
+   * The other half of B12's watchdog work: every `unverified` run gets its proof re-assembled with
+   * whatever facts are available NOW — a `verifyPr` that only just got wired, a PR whose CI
+   * finished, a courier PR URL a human backfilled. A run that flips to `verified` is promoted to
+   * `done` here (identical to a fresh `finalizePublish`/`courier` verdict); one that has burned
+   * `runs.proof_recheck_max` re-check passes with nothing to show for it is held for a human
+   * instead of re-checking forever.
+   */
+  async reconcileProofs(nowMs: number = Date.now()): Promise<string[]> {
+    const held: string[] = [];
+    const cap = this.config.runs?.proof_recheck_max ?? 20;
+    for (const run of this.store.live()) {
+      if (run.state !== "unverified") continue;
+      const prior = run.proof;
+      const attempts = (prior?.attempts ?? 0) + 1;
+      const proof = await this.assembleProofFor(run, {
+        landingMode: run.landingMode ?? prior?.landingMode ?? "local",
+        prUrl: run.prUrl,
+        pushUrl: prior?.pushUrl ?? null,
+        attempts,
+      });
+      if (proof.verified) {
+        await this.patchRun(run.id, { state: "done", error: null, proof });
+        this.trace(run, "done", "passed", "proof verified on re-check");
+        this.logger.info("unverified run promoted to done on re-check", { run: run.id });
+        continue;
+      }
+      if (attempts >= cap) {
+        await this.patchRun(run.id, { proof });
+        const fresh = this.store.get(run.id) ?? run;
+        await this.hold(
+          fresh,
+          this.transientBlocker(
+            fresh,
+            `this run published but never earned a verified proof after ${attempts} re-check(s): ` +
+              `${proof.gaps.join("; ")}`,
+            `check ${fresh.prUrl ?? fresh.proof?.pushUrl ?? "the landing"} and either fix it or ` +
+              `\`beckett task courier ${fresh.id}\``,
+          ),
+        );
+        held.push(run.id);
+        continue;
+      }
+      await this.patchRun(run.id, { proof, error: proof.gaps.join("; ") });
+    }
+    return held;
   }
 
   /**
@@ -1991,10 +2166,12 @@ export class RunSupervisor {
    * — 14/14 done, review PASS, landed on main as a real PR — used to end
    * `state: "cancelled", error: "cancelled", prUrl: null`, throwing its own outcome away).
    *
-   * Ends the run `done` with `published: {via: "courier", prUrl: null}` and NO error — the daemon
-   * never drove this publish, so there is no PR URL to record synchronously; a human/future caller
-   * backfills it with `RunStore.backfillCourierPrUrl` once one is known. `error` stays `null`
-   * because nothing failed: this is a successful publish, just not one the outbox did itself.
+   * Stamps `landingMode: "courier"` and assembles a {@link Proof} same as any other landing (B12)
+   * — never a bare grant of `done`. There is deliberately no PR URL to record SYNCHRONOUSLY here
+   * (the daemon never drove this publish), so the proof's `courier` rule (`./proof.ts`) is always
+   * unverified on the very call that lands here: `error` carries the gap, `state` is `unverified`,
+   * and `reconcileProofs` (or `backfillCourierPrUrl` once a human learns the URL) promotes it to
+   * `done` on a later pass — #228's backfill hole, made visible instead of silently `done`.
    *
    * Eligible only from `publishing` (the outbox still nominally owns it) or `parked` (it already
    * gave up and asked for a human) — a run still mid-implement/review has nothing for a courier to
@@ -2028,13 +2205,29 @@ export class RunSupervisor {
     if (persist) this.persistRuntimeState();
     this.forgetActivity(runId);
 
-    const updated = await this.patchRun(runId, {
-      state: "done",
-      error: null,
-      published: { via: "courier", prUrl: null },
+    const proof = await this.assembleProofFor(run, {
+      landingMode: "courier",
+      prUrl: null,
+      pushUrl: null,
+      attempts: 0,
     });
-    this.trace(updated ?? run, "done:courier", "passed", "shipped by human courier");
-    this.logger.info("run handed to a human courier — marked done, not cancelled", { run: runId });
+    const updated = await this.patchRun(runId, {
+      state: proof.verified ? "done" : "unverified",
+      error: proof.verified ? null : proof.gaps.join("; "),
+      published: { via: "courier", prUrl: null },
+      proof,
+      landingMode: "courier",
+    });
+    if (proof.verified) {
+      this.trace(updated ?? run, "done:courier", "passed", "shipped by human courier");
+      this.logger.info("run handed to a human courier — marked done, not cancelled", { run: runId });
+    } else {
+      this.trace(updated ?? run, "done:courier", "held", proof.gaps.join("; "));
+      this.logger.info("run handed to a human courier — awaiting a PR URL to verify", {
+        run: runId,
+        gaps: proof.gaps,
+      });
+    }
     this.pump();
     return "done";
   }
@@ -2047,9 +2240,25 @@ export class RunSupervisor {
    * scoped) write; re-tracing here just lets a still-open progress card pick the URL up.
    */
   async backfillCourierPrUrl(runId: string, prUrl: string): Promise<Run | null> {
-    const run = await this.store.backfillCourierPrUrl(runId, prUrl);
+    let run = await this.store.backfillCourierPrUrl(runId, prUrl);
     if (run.published?.via === "courier" && run.published.prUrl === prUrl) {
       this.trace(run, "done:courier", "passed", prUrl);
+      // The URL just supplied is exactly what an `unverified` courier proof was missing — re-check
+      // immediately instead of leaving it for the watchdog's next pass (up to 20 re-checks away).
+      if (run.state === "unverified") {
+        const proof = await this.assembleProofFor(run, {
+          landingMode: "courier",
+          prUrl,
+          pushUrl: null,
+          attempts: run.proof?.attempts ?? 0,
+        });
+        const patched = await this.patchRun(runId, {
+          state: proof.verified ? "done" : "unverified",
+          error: proof.verified ? null : proof.gaps.join("; "),
+          proof,
+        });
+        if (patched) run = patched;
+      }
     }
     return run;
   }
@@ -2160,6 +2369,15 @@ export class RunSupervisor {
         parked.push(...(await this.reconcilePublishing(nowMs)));
       } catch (err) {
         this.logger.warn("publishing-stall guard failed (staffing pass continues)", { error: String(err) });
+      }
+      // …then re-check every `unverified` run's proof (B12) — a pending CI run going green, a
+      // courier PR URL a human just backfilled, a PR reader that only just got wired. Runs the
+      // exact assembly `finalizePublish`/`courier` use, so a promotion here is byte-identical to
+      // one at publish time, just later.
+      try {
+        parked.push(...(await this.reconcileProofs(nowMs)));
+      } catch (err) {
+        this.logger.warn("proof reconciliation failed (staffing pass continues)", { error: String(err) });
       }
       // Rate-limited to once an hour — the 60s watchdog tick would otherwise re-scan every run's
       // terminal state (and ls-remote every past-TTL candidate) far more often than useful.
