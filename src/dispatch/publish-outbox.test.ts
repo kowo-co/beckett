@@ -61,6 +61,28 @@ test("classifier treats structurally-deterministic publish failures as non-retry
   }
 });
 
+// #11 (overhaul seams review): since #277/#271 every publish failure carries a PR URL and a
+// `PR #<n>` reference. A PR numbered 401/403/404 must not re-classify the two shapes the publish
+// path itself mints as transient into permanent.
+test("classifier treats the publish path's own transient prefixes as authoritative over a PR number", () => {
+  expect(
+    classifyPublishError(
+      new Error(
+        "publish: still waiting on CI for https://github.com/kowo-co/beckett/pull/403 — gave up waiting on PR #403 (attempt 1) after 300s",
+      ),
+    ),
+  ).toBe("transient");
+  expect(
+    classifyPublishError(
+      new Error("publish: GitHub did not settle this attempt — could not read PR #404 (https://github.com/kowo-co/beckett/pull/404)"),
+    ),
+  ).toBe("transient");
+  // A genuinely healthy PR number (not 401/403/404) still classifies transient too, unaffected.
+  expect(
+    classifyPublishError(new Error("publish: still waiting on CI for https://github.com/kowo-co/beckett/pull/512 — gave up waiting on PR #512")),
+  ).toBe("transient");
+});
+
 // ── BUG 2: the parked hand-off advice is computed from the branch's real state vs origin/main ─────
 
 function raw(over: Partial<BranchVsMainRaw> = {}): BranchVsMainRaw {
@@ -271,6 +293,19 @@ test("publishFixHint names the fix for the failure classes we can recognize, and
   );
   expect(publishFixHint("gh repo view failed (404): Not Found")).toContain("beckett gh raw -- repo view");
   expect(publishFixHint("connection reset by peer")).toBeNull();
+});
+
+// #11 (overhaul seams review): a PR numbered 401/403/404 embedded in a URL or `PR #n` reference
+// must not be mistaken for that HTTP status code.
+test("publishFixHint scrubs PR URLs and references before matching status codes", () => {
+  expect(
+    publishFixHint(
+      "publish: still waiting on CI for https://github.com/kowo-co/beckett/pull/403 — gave up waiting on PR #403 (attempt 1) after 300s",
+    ),
+  ).toBeNull();
+  expect(
+    publishFixHint("publish: GitHub did not settle this attempt — could not read PR #404 (https://github.com/kowo-co/beckett/pull/404)"),
+  ).toBeNull();
 });
 
 test("publishFailureReason names the step, the attempt, the cause, and what to do about it", () => {

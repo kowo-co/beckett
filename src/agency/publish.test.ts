@@ -306,6 +306,55 @@ test("an open PR is reused on a retry and a MERGED PR short-circuits to success"
   expect(merged).toBe(1); // MERGED short-circuits — no second `pr merge`
 });
 
+// Review finding #14 (overhaul seams review): attempt 1 merges the PR via the API (which deletes
+// the head branch); the daemon dies before finalizePublish runs; the retry re-pushes the branch and
+// finds no OPEN PR (the real one is MERGED), so `gh pr create` fails "no commits between". Rather
+// than degrading to a bare commit URL (mislabeling a PR landing as a direct push), look up the
+// MERGED PR for the branch and report its URL.
+test("a retry that finds its PR already merged and the branch deleted reports the merged PR url, not a commit url", async () => {
+  const { gh, calls } = cli((j) => {
+    if (j.startsWith("git remote get-url origin")) return fail("no origin");
+    if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
+    if (j.includes("api --method PATCH")) return ok();
+    if (j.includes("--json defaultBranchRef")) return ok("main");
+    if (j.startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
+    if (j.startsWith("git push")) return ok();
+    if (j.startsWith("gh pr list") && j.includes("--state open")) return noOpenPr();
+    if (j.startsWith("gh pr list") && j.includes("--state merged")) {
+      return ok(JSON.stringify([{ number: 9, url: "https://github.com/0xbeckett/beckett/pull/9" }]));
+    }
+    if (j.startsWith("gh pr create")) return fail("no commits between main and beckett/OPS-25");
+    return undefined;
+  });
+  const result = await gh.ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "OPS-25" });
+  expect(result.prUrl).toBe("https://github.com/0xbeckett/beckett/pull/9");
+  expect(calls.some((c) => c.startsWith("git commit"))).toBe(false);
+});
+
+// Same scenario, but no merged PR is found either — this is the genuinely un-attributable case
+// (nothing was ever committed, per land.ts's rewritten message), which must NOT be reported as a
+// success: the old commit-url fallback would point at the base tip commit, not the run's own
+// work — exactly the false-done shape B12 closed. It stays a permanent "publish blocked:" park
+// instead (which classifyPublishError already keys on), so a human courier gets it.
+test("a retry with no open AND no merged PR stays a permanent publish-blocked failure, not a false success", async () => {
+  const { gh, calls } = cli((j) => {
+    if (j.startsWith("git remote get-url origin")) return fail("no origin");
+    if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
+    if (j.includes("api --method PATCH")) return ok();
+    if (j.includes("--json defaultBranchRef")) return ok("main");
+    if (j.startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
+    if (j.startsWith("git push")) return ok();
+    if (j.startsWith("gh pr list")) return noOpenPr(); // matches both --state open and --state merged
+    if (j.startsWith("gh pr create")) return fail("no commits between main and beckett/OPS-25");
+    return undefined;
+  });
+  const failure = await gh
+    .ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "OPS-25" })
+    .then(() => null, (err: Error) => err.message);
+  expect(failure).toMatch(/^publish blocked:/);
+  expect(calls.some((c) => c.startsWith("git commit"))).toBe(false);
+});
+
 test("a CONFLICTING PR fails the publish with the PR url and never touches the local checkout", async () => {
   const { gh, calls } = cli((j) => {
     if (j.startsWith("git remote get-url origin")) return fail("no origin");
@@ -714,6 +763,70 @@ test("a dirty publish checkout is committed, and the committed work is what reac
     expect(
       (await realRun(["git", "--git-dir", remote, "cat-file", "-e", "beckett/ops-dirty:.beckett/notes.md"])).code,
     ).not.toBe(0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30_000); // real-git: many shell-outs; needs headroom over the 5s default under full-suite parallel load
+
+/**
+ * #15 (overhaul seams review): a worker can write a root `spec.md` mid-run (the legacy location —
+ * the spawn-time migration only fires when `.beckett/spec.md` does not already exist), and it is
+ * UNTRACKED, so `commitStrayWorkingTree`'s dirty-tree commit would previously stage and commit it
+ * (only `.beckett/` was excluded), landing it on the pushed branch before `stripHarnessState`'s
+ * follow-up cleanup commit ever ran. `assertNoHarnessState`, which existed to catch exactly this,
+ * ran BEFORE `commitStrayWorkingTree` and so never saw it. Both must now be fixed: the stray
+ * `spec.md` is excluded from the commit (same as `.beckett/`) and never reaches the pushed branch
+ * at all — assert against real git that the pushed tree carries no `spec.md`.
+ */
+test("a stray run-stamped root spec.md written mid-run never reaches the pushed branch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "beckett-publish-stray-spec-"));
+  try {
+    const { remote, worker, gh } = await dirtyPublishFixture(root, "run-worktree");
+    await writeFile(
+      join(worker, "spec.md"),
+      "# Fixture\n> run: run-x · branch: beckett/run-x · created: yesterday\n\n## Checklist\n- [x] done\n",
+    );
+
+    const result = await gh.ensurePublished({
+      slug: "beckett",
+      sourceDir: worker,
+      description: "run title",
+      ticket: "OPS-dirty",
+      commitMessage: "the run's summary",
+    });
+
+    expect(result.kind).toBe("pushed");
+    expect((await realRun(["git", "--git-dir", remote, "cat-file", "-e", "beckett/ops-dirty:spec.md"])).code).not.toBe(0);
+    // Never committed at all — it's still sitting untracked in the worktree, not merely stripped
+    // in a follow-up commit after already having been pushed.
+    expect(await git(worker, "status", "--porcelain", "--", "spec.md")).toContain("spec.md");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30_000); // real-git: many shell-outs; needs headroom over the 5s default under full-suite parallel load
+
+/**
+ * The flip side of the fix above (review finding on B15's "should" half): the exclusion is only
+ * ever ours to apply to a RUN-STAMPED spec.md. An UNSTAMPED root spec.md — the customer's own
+ * file, never rendered by `renderSpecScaffold` — edited mid-run must still reach the pushed
+ * branch: excluding it unconditionally would silently drop that edit from the publish commit.
+ */
+test("an unstamped root spec.md edited mid-run still reaches the pushed branch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "beckett-publish-unstamped-spec-"));
+  try {
+    const { remote, worker, gh } = await dirtyPublishFixture(root, "run-worktree");
+    await writeFile(join(worker, "spec.md"), "# A customer's own notes\nNo stamp here.\nEdited mid-run.\n");
+
+    const result = await gh.ensurePublished({
+      slug: "beckett",
+      sourceDir: worker,
+      description: "run title",
+      ticket: "OPS-dirty",
+      commitMessage: "the run's summary",
+    });
+
+    expect(result.kind).toBe("pushed");
+    expect(await git(root, "--git-dir", remote, "show", "beckett/ops-dirty:spec.md")).toContain("Edited mid-run.");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
