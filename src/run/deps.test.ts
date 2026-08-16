@@ -74,6 +74,25 @@ describe("readiness", () => {
     expect(result.waitsOn).toEqual(["run-b"]);
   });
 
+  test("a cancelled explicit dep clears — it is never coming back", () => {
+    const a = run({ id: "run-a", state: "queued", deps: ["run-b"] });
+    const b = run({ id: "run-b", state: "cancelled" });
+    expect(readiness(a, [a, b])).toEqual({ ready: true, waitsOn: [], autoDeps: [] });
+  });
+
+  test("a sibling still `queued` in the ledger but already staffing in memory counts as in flight", () => {
+    // Two runs deployed back-to-back with overlapping files: the first is admitted and mid-spawn
+    // (worktree being cut) while its ledger row still says `queued`. Without the in-flight set the
+    // second would pass the gate and both would run on the same files.
+    const a = run({ id: "run-a", state: "queued", files: ["src/run/supervisor.ts"], createdAt: "2026-08-16T00:01:00.000Z" });
+    const b = run({ id: "run-b", state: "queued", files: ["src/run/"], createdAt: "2026-08-16T00:00:00.000Z" });
+    expect(readiness(a, [a, b]).ready).toBe(true);
+    const result = readiness(a, [a, b], new Set(["run-b"]));
+    expect(result.ready).toBe(false);
+    expect(result.waitsOn).toEqual(["run-b"]);
+    expect(result.autoDeps).toEqual(["run-b"]);
+  });
+
   test("a run whose files overlap an in-flight sibling on the same repo waits, and records the auto dep", () => {
     const a = run({ id: "run-a", state: "queued", files: ["src/run/supervisor.ts"] });
     const b = run({ id: "run-b", state: "reviewing", files: ["src/run/"] });

@@ -101,7 +101,7 @@ import { parseSpecChecklist, renderSpecScaffold, specRunId, SPEC_FILE_REL, type 
 import { runAsWorkItem } from "./adapter.ts";
 import type { RunStore } from "./store.ts";
 import type { Blocker, CiVerdict, LandingMode, Proof, Run, RunQuestion, RunStage, RunStateChange } from "./types.ts";
-import { RUN_TERMINAL } from "./types.ts";
+import { RUN_FINAL, RUN_TERMINAL } from "./types.ts";
 import {
   planWorktreeSweep,
   SWEEP_TTL_ABANDONED_MS,
@@ -670,7 +670,10 @@ export class RunSupervisor {
   private dependenciesReady(run: Run): boolean {
     if (run.deps.length === 0 && run.files.length === 0) return true; // opt-in: nothing to check
     const all = this.store.list();
-    const { ready, waitsOn, autoDeps } = readiness(run, all);
+    // The in-memory in-flight set covers the mid-spawn window (a run admitted but still `queued`
+    // in the ledger while its worktree is cut) and the cap-held pending queue.
+    const inFlight = new Set<string>([...this.staffing.keys(), ...this.workers.keys(), ...this.pending.map((p) => p.runId)]);
+    const { ready, waitsOn, autoDeps } = readiness(run, all, inFlight);
     if (ready) {
       this.waitingOn.delete(run.id);
       return true;
@@ -1175,15 +1178,22 @@ export class RunSupervisor {
     if (firstTouch) await this.git.fetchRemote(repoRoot);
     const depRuns = firstTouch ? run.deps.map((id) => this.store.get(id)) : [];
     const doneDeps = depRuns.filter((d): d is Run => d !== null && d.state === "done");
-    const composeReady = run.deps.length > 0 && doneDeps.length === run.deps.length;
+    // A cancelled dep clears readiness (deps.ts) but has nothing to compose — build on the done
+    // ones only, and only when every dep has settled one way or the other.
+    const settled = depRuns.every((d) => d === null || d.state === "done" || d.state === "cancelled");
+    let composeReady = run.deps.length > 0 && settled && doneDeps.length > 0;
     const baseRef = composeReady ? doneDeps[doneDeps.length - 1]!.branch : "origin/main";
-    await this.git.createWorktree({
-      repoRoot,
-      workspace,
-      branch: run.branch,
-      baseRef,
-      reuseIfExists: true,
-    });
+    try {
+      await this.git.createWorktree({ repoRoot, workspace, branch: run.branch, baseRef, reuseIfExists: true });
+    } catch (err) {
+      if (!composeReady) throw err;
+      // The dep's local branch can be gone by now (the TTL sweep retires a done run's branch once
+      // it is provably on origin, and its work is on trunk anyway) — fall back to trunk instead of
+      // failing the spawn over a base ref that no longer exists.
+      this.trace(run, "worktree", "info", `dep branch ${baseRef} is gone — cutting from origin/main instead: ${(err as Error).message}`);
+      composeReady = false;
+      await this.git.createWorktree({ repoRoot, workspace, branch: run.branch, baseRef: "origin/main", reuseIfExists: true });
+    }
     if (composeReady && doneDeps.length > 1) {
       await this.git.mergeBranchesIntoWorktree(
         workspace,
@@ -2883,10 +2893,12 @@ export class RunSupervisor {
           this.logger.warn("run state-change listener threw (ignored)", { run: runId, error: String(err) });
         }
       }
-      // Dependency pump (B9): a run reaching `done` is exactly the event that can clear another
-      // run's `readiness()` — walk every queued run and re-admit it. Cheap (queued runs are rare
-      // relative to live ones) and correct even when nothing is actually waiting.
-      if (patch.state === "done" && patch.state !== before) {
+      // Dependency pump (B9): a run reaching a FINAL state (`done` clears a dep; `cancelled` clears
+      // it too — that dep is never coming back; `failed` keeps blocking but a re-admit is harmless)
+      // is exactly the event that can clear another run's `readiness()` — walk every queued run
+      // and re-admit it. Cheap (queued runs are rare relative to live ones) and correct even when
+      // nothing is actually waiting.
+      if (patch.state !== undefined && patch.state !== before && RUN_FINAL.has(patch.state)) {
         for (const queued of this.store.list({ states: ["queued"] })) this.admitRun(queued);
       }
       return updated;

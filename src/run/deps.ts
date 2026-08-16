@@ -62,7 +62,7 @@ function isNewer(a: Run, b: Run): boolean {
  *
  * - An explicit dep (`run.deps`) that has not reached `state === "done"` blocks admission — a
  *   FAILED dep still blocks: the dependent waits until a human resumes or cancels it, never
- *   auto-proceeds past a dep that didn't make it.
+ *   auto-proceeds past a dep that didn't make it. A CANCELLED dep clears (it will never finish).
  * - A sibling on the SAME repo, currently `implementing|reviewing|publishing|unverified`, whose
  *   declared `files` overlap `run.files`, also blocks — and is reported back in `autoDeps` so the
  *   caller can persist the edge (the reason a run is waiting must survive a restart). Neither
@@ -72,7 +72,17 @@ function isNewer(a: Run, b: Run): boolean {
  *   proceeds — an edge back to a run that is itself waiting on us is ignored rather than
  *   deadlocking both forever.
  */
-export function readiness(run: Run, all: readonly Run[]): { ready: boolean; waitsOn: string[]; autoDeps: string[] } {
+export function readiness(
+  run: Run,
+  all: readonly Run[],
+  /**
+   * Run ids the supervisor is ALREADY staffing or running in memory. A run that has been admitted
+   * stays `queued` in the ledger for the whole async prefix of its spawn (preflight, repo fetch,
+   * worktree cut) — without this set, two runs deployed back-to-back with overlapping `files`
+   * would both pass the overlap gate before either flips to `implementing`.
+   */
+  inFlight: ReadonlySet<string> = new Set(),
+): { ready: boolean; waitsOn: string[]; autoDeps: string[] } {
   const byId = new Map(all.map((r) => [r.id, r] as const));
   const waitsOn: string[] = [];
   const autoDeps: string[] = [];
@@ -81,7 +91,9 @@ export function readiness(run: Run, all: readonly Run[]): { ready: boolean; wait
     if (depId === run.id) continue;
     const dep = byId.get(depId);
     if (!dep) continue; // an unresolvable dep id can never clear itself; do not wedge on a ghost
-    if (dep.state === "done") continue;
+    // A done dep is satisfied; a CANCELLED one is never coming back, so it must not wedge its
+    // dependent forever either. A FAILED dep still blocks — a human can resume it.
+    if (dep.state === "done" || dep.state === "cancelled") continue;
     // Cycle: `dep` also names `run` as one of ITS deps. Break it by letting the older run
     // proceed — only the newer one keeps waiting.
     if (dep.deps.includes(run.id) && isNewer(dep, run)) continue;
@@ -92,7 +104,7 @@ export function readiness(run: Run, all: readonly Run[]): { ready: boolean; wait
     for (const sib of all) {
       if (sib.id === run.id) continue;
       if (sib.repo !== run.repo) continue;
-      if (!IN_FLIGHT_FOR_OVERLAP.has(sib.state)) continue;
+      if (!IN_FLIGHT_FOR_OVERLAP.has(sib.state) && !inFlight.has(sib.id)) continue;
       if (sib.files.length === 0) continue;
       if (pathOverlaps(run.files, sib.files).length === 0) continue;
       if (!waitsOn.includes(sib.id)) waitsOn.push(sib.id);
