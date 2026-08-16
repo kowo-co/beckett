@@ -235,4 +235,20 @@ export interface Run {
   proof: Proof | null;
   /** How this run's branch landed (or is landing). Set alongside `proof`; null before publish. */
   landingMode: LandingMode | null;
+  /**
+   * Run ids this run must not start before (B9, `./deps.ts`). Explicit — via `--needs` at
+   * `beckett task deploy` — plus AUTO edges the supervisor appends itself when this run's
+   * `files` overlap an in-flight sibling on the same repo. Auto edges are persisted here (not
+   * held only in memory) so the reason a run is waiting survives a daemon restart and shows in
+   * `task show`. Empty for every run that declares no `--needs`/`--files` — opt-in by
+   * declaration, so an install that never uses this feature sees byte-identical behavior.
+   */
+  deps: string[];
+  /**
+   * Repo-relative paths (or directory prefixes ending in `/`) this run expects to touch (B9,
+   * `--files` at deploy time). No globs — `./deps.ts#pathOverlaps` matches literal equality or
+   * prefix containment only. Empty means "declared no footprint", which is what keeps this
+   * feature from ever silently serializing a run that doesn't use it.
+   */
+  files: string[];
 }

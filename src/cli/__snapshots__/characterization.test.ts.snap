@@ -1544,7 +1544,7 @@ exports[`cli: task: deploy without a prompt prints usage 1`] = `
   "exit": 1,
   "stderr": 
 "error: --prompt <text> or --prompt-file <path> is required
-usage: beckett task deploy --prompt <text>|--prompt-file <path> [--title <t>] [--channel <id>] [--requester <id>] [--ultracode] [--cast <json>] [--cast-quote <text>] [--repo <slug>] [--task <#N.x>] [--dry]
+usage: beckett task deploy --prompt <text>|--prompt-file <path> [--title <t>] [--channel <id>] [--requester <id>] [--ultracode] [--cast <json>] [--cast-quote <text>] [--repo <slug>] [--task <#N.x>] [--needs <run-id-or-slug>[,<run-id-or-slug>…]] [--files <repo-relative-path-or-dir/>[,…]] (no globs — literal paths or trailing-slash directory prefixes only) [--dry]
 "
 ,
   "stdout": "",
@@ -1556,7 +1556,7 @@ exports[`cli: task: deploy with a broken cast is refused 1`] = `
   "exit": 1,
   "stderr": 
 "error: --cast is not valid JSON: JSON Parse error: Expected '}'
-usage: beckett task deploy --prompt <text>|--prompt-file <path> [--title <t>] [--channel <id>] [--requester <id>] [--ultracode] [--cast <json>] [--cast-quote <text>] [--repo <slug>] [--task <#N.x>] [--dry]
+usage: beckett task deploy --prompt <text>|--prompt-file <path> [--title <t>] [--channel <id>] [--requester <id>] [--ultracode] [--cast <json>] [--cast-quote <text>] [--repo <slug>] [--task <#N.x>] [--needs <run-id-or-slug>[,<run-id-or-slug>…]] [--files <repo-relative-path-or-dir/>[,…]] (no globs — literal paths or trailing-slash directory prefixes only) [--dry]
 "
 ,
   "stdout": "",

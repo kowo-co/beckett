@@ -32,7 +32,9 @@ const TITLE_WORD_COUNT = 8;
 
 export const TASK_DEPLOY_USAGE =
   'usage: beckett task deploy --prompt <text>|--prompt-file <path> [--title <t>] [--channel <id>] ' +
-  '[--requester <id>] [--ultracode] [--cast <json>] [--cast-quote <text>] [--repo <slug>] [--task <#N.x>] [--dry]';
+  '[--requester <id>] [--ultracode] [--cast <json>] [--cast-quote <text>] [--repo <slug>] [--task <#N.x>] ' +
+  "[--needs <run-id-or-slug>[,<run-id-or-slug>…]] " +
+  "[--files <repo-relative-path-or-dir/>[,…]] (no globs — literal paths or trailing-slash directory prefixes only) [--dry]";
 
 /** `--cast-quote` is capped this long before it lands in `run.cast.implement.reason` — a directive, not a transcript. */
 const CAST_QUOTE_MAX_LEN = 200;
@@ -47,6 +49,10 @@ function usage(msg: string): never {
 /** The minimal slice of the real `RunStore` (W1A, `../run/store.ts`) this CLI needs. */
 export interface RunStoreLike {
   create(input: CreateRunInput): Promise<Run>;
+  /** Resolves a `--needs` token as a run id (B9). */
+  get(id: string): Run | null;
+  /** Resolves a `--needs` token as a run slug (B9) when it is not an id. */
+  bySlug(slug: string): Run | null;
 }
 
 export interface TaskDeployDeps {
@@ -89,6 +95,10 @@ interface TaskDeployInput {
   dry: boolean;
   /** Verbatim words a HUMAN used to name a model/preset this turn (`--cast-quote`). */
   castQuote: string | null;
+  /** `--needs` tokens, unresolved (run ids or slugs) — resolved to ids by {@link deployRun}. */
+  needs: string[];
+  /** `--files` — repo-relative literal paths or directory prefixes ending in `/`. No globs. */
+  files: string[];
 }
 
 /** kebab-case a title into a run slug: lowercase, `[a-z0-9-]` only, ≤40 chars, no dangling dash. */
@@ -174,6 +184,34 @@ function resolveCastQuote(raw: string | boolean | undefined): string | null {
   return trimmed.slice(0, CAST_QUOTE_MAX_LEN);
 }
 
+/** Comma-separated `--needs` tokens (run ids or slugs), trimmed. Resolution to ids happens in {@link deployRun}. */
+function resolveNeeds(raw: string | boolean | undefined): string[] {
+  if (typeof raw !== "string" || !raw.trim()) return [];
+  return raw
+    .split(",")
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Comma-separated `--files` tokens: repo-relative literal paths, or directory prefixes ending in
+ * `/`. No globs — a token carrying `*`, `?`, `[`, or `]` is a usage error, not a silently-dropped
+ * or silently-matched pattern (B9: the matcher is exact-or-prefix only, `../run/deps.ts`).
+ */
+function resolveFiles(raw: string | boolean | undefined): string[] {
+  if (typeof raw !== "string" || !raw.trim()) return [];
+  const tokens = raw
+    .split(",")
+    .map((token) => token.trim())
+    .filter(Boolean);
+  for (const token of tokens) {
+    if (/[*?[\]]/.test(token)) {
+      usage(`--files ${token}: globs are not supported — use a literal path or a directory prefix ending in /`);
+    }
+  }
+  return tokens;
+}
+
 function resolvePrompt(flags: Record<string, string | boolean>): string {
   if (typeof flags.prompt === "string" && flags.prompt.trim()) return flags.prompt.trim();
   if (typeof flags["prompt-file"] === "string") {
@@ -209,6 +247,8 @@ export function parseTaskDeployArgs(argv: string[]): TaskDeployInput {
     taskRef: taskRefRaw ? (taskRefRaw.startsWith("#") ? taskRefRaw : `#${taskRefRaw}`) : null,
     dry: Boolean(flags.dry),
     castQuote,
+    needs: resolveNeeds(flags.needs),
+    files: resolveFiles(flags.files),
   };
 }
 
@@ -220,8 +260,23 @@ function runId(slug: string, now: Date): string {
   return `run-${y}${m}${d}-${slug}`;
 }
 
+/**
+ * `--needs` tokens (ids or slugs) resolved to run ids — the ledger only ever holds ids, never a
+ * slug that could later collide or be renamed (B9). Throws {@link TaskDeployUsageError} naming
+ * the first token that resolves to nothing.
+ */
+function resolveNeedsToIds(needs: string[], store: RunStoreLike): string[] {
+  return needs.map((token) => {
+    const byId = store.get(token);
+    if (byId) return byId.id;
+    const bySlug = store.bySlug(token);
+    if (bySlug) return bySlug.id;
+    usage(`--needs ${token}: no such run`);
+  });
+}
+
 /** The resolved argv fields the store needs; it mints everything else. */
-function createInputOf(input: TaskDeployInput): CreateRunInput {
+function createInputOf(input: TaskDeployInput, deps: string[]): CreateRunInput {
   return {
     title: input.title,
     prompt: input.prompt,
@@ -232,15 +287,19 @@ function createInputOf(input: TaskDeployInput): CreateRunInput {
     ultracode: input.ultracode,
     cast: input.cast,
     repo: input.repo,
+    deps,
+    files: input.files,
   };
 }
 
 /**
  * The Run `--dry` prints: what the store WOULD mint from this argv, built locally so a dry deploy
  * never touches the ledger. Mirrors `RunStore.create()`'s minting rules; only the slug-collision
- * dedupe (`-2`, `-3`, …) can't be previewed without reading the ledger.
+ * dedupe (`-2`, `-3`, …) can't be previewed without reading the ledger. `deps` is the ALREADY
+ * resolved id list ({@link resolveNeedsToIds} still runs on `--dry` — a preview should not lie
+ * about an unresolvable `--needs`).
  */
-export function previewRun(input: TaskDeployInput, now: Date): Run {
+export function previewRun(input: TaskDeployInput, now: Date, deps: string[] = []): Run {
   const iso = now.toISOString();
   return {
     id: runId(input.slug, now),
@@ -271,6 +330,8 @@ export function previewRun(input: TaskDeployInput, now: Date): Run {
     question: null,
     proof: null,
     landingMode: null,
+    deps,
+    files: input.files,
   };
 }
 
@@ -294,8 +355,9 @@ export async function deployRun(argv: string[], deps: TaskDeployDeps): Promise<R
   if (held) throw new TaskDeployUsageError(pauseRefusal(held, "deploy a run"));
   const input = parseTaskDeployArgs(argv);
   const now = deps.now ? deps.now() : new Date();
-  if (input.dry) return previewRun(input, now);
-  const created = await deps.store.create(createInputOf(input));
+  const runDeps = resolveNeedsToIds(input.needs, deps.store);
+  if (input.dry) return previewRun(input, now, runDeps);
+  const created = await deps.store.create(createInputOf(input, runDeps));
   // Create → link → ping, in that order. The ping is what admits the run, so anything the first
   // event needs to resolve correctly has to be on disk before it goes out.
   if (deps.preNotify) await deps.preNotify(created);

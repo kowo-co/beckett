@@ -25,9 +25,10 @@ const FAKE_NOW = "2026-08-10T12:00:00.000Z";
  * (`../run/store.ts`), minus the ledger-dependent slug dedupe — so these tests pin the CLI's
  * side of the contract (what argv resolves to) rather than re-testing the store.
  */
-function fakeDeps(): TaskDeployDeps & { created: Run[]; busPings: Array<{ cmd: string; args: Record<string, unknown> }> } {
+function fakeDeps(seed: Run[] = []): TaskDeployDeps & { created: Run[]; busPings: Array<{ cmd: string; args: Record<string, unknown> }> } {
   const created: Run[] = [];
   const busPings: Array<{ cmd: string; args: Record<string, unknown> }> = [];
+  const ledger: Run[] = [...seed];
   const store: RunStoreLike = {
     async create(input) {
       const slug = input.slug ?? input.title;
@@ -60,9 +61,18 @@ function fakeDeps(): TaskDeployDeps & { created: Run[]; busPings: Array<{ cmd: s
         published: null,
         proof: null,
         landingMode: null,
+        deps: input.deps ?? [],
+        files: input.files ?? [],
       };
       created.push(run);
+      ledger.push(run);
       return run;
+    },
+    get(id) {
+      return ledger.find((r) => r.id === id) ?? null;
+    },
+    bySlug(slug) {
+      return ledger.find((r) => r.slug === slug) ?? null;
     },
   };
   return {
@@ -134,6 +144,76 @@ test("parseTaskDeployArgs: without --ultracode/--channel/--requester/--repo/--ta
   expect(input.taskRef).toBeNull();
   expect(input.ultracode).toBe(false);
   expect(input.cast).toBeNull();
+});
+
+// ── dependency edges (overhaul B9) ────────────────────────────────────────────────────────
+
+test("parseTaskDeployArgs: --files records the declared footprint", () => {
+  const input = parseTaskDeployArgs(["--prompt", "x", "--files", "src/run/,src/cli/core.ts"]);
+  expect(input.files).toEqual(["src/run/", "src/cli/core.ts"]);
+});
+
+test("parseTaskDeployArgs: without --needs/--files both default to empty", () => {
+  const input = parseTaskDeployArgs(["--prompt", "x"]);
+  expect(input.needs).toEqual([]);
+  expect(input.files).toEqual([]);
+});
+
+test("parseTaskDeployArgs: a glob in --files is refused", () => {
+  expect(() => parseTaskDeployArgs(["--prompt", "x", "--files", "src/**/*.ts"])).toThrow(TaskDeployUsageError);
+});
+
+function seedRunFixture(over: Partial<Run>): Run {
+  const slug = over.slug ?? "upstream";
+  return {
+    id: over.id ?? `run-20260809-${slug}`,
+    slug,
+    title: "upstream work",
+    prompt: "p",
+    channelId: null,
+    requesterId: null,
+    taskRef: null,
+    ultracode: false,
+    cast: null,
+    repo: null,
+    state: "done",
+    createdAt: "2026-08-09T00:00:00.000Z",
+    updatedAt: "2026-08-09T00:00:00.000Z",
+    workspace: null,
+    branch: `beckett/run-${slug}`,
+    baseSha: null,
+    sessionIds: {},
+    sessionName: `beckett-run-${slug}`,
+    reviewCycles: 0,
+    continuations: 0,
+    autoResumes: 0,
+    prUrl: null,
+    error: null,
+    blocker: null,
+    question: null,
+    published: null,
+    proof: null,
+    landingMode: null,
+    deps: [],
+    files: [],
+    ...over,
+  };
+}
+
+test("deployRun: --needs records run ids, resolving a slug against the store", async () => {
+  const upstream = seedRunFixture({});
+  const deps = fakeDeps([upstream]);
+  const result = await deployRun(["--prompt", "downstream work", "--needs", "run-20260809-upstream,upstream"], deps);
+  expect("runId" in result).toBe(true);
+  const created = deps.created[0]!;
+  expect(created.deps).toEqual(["run-20260809-upstream", "run-20260809-upstream"]);
+});
+
+test("deployRun: --needs on an unknown run fails the deploy", async () => {
+  const deps = fakeDeps();
+  await expect(deployRun(["--prompt", "x", "--needs", "run-nope"], deps)).rejects.toThrow(TaskDeployUsageError);
+  expect(deps.created).toEqual([]);
+  expect(deps.busPings).toEqual([]);
 });
 
 // ── slug derivation ───────────────────────────────────────────────────────────────────────
@@ -296,6 +376,8 @@ test("deployRun: --dry prints the full Run JSON but writes nothing and pings no 
     published: null,
     proof: null,
     landingMode: null,
+    deps: [],
+    files: [],
   });
   expect(deps.created).toEqual([]);
   expect(deps.busPings).toEqual([]);
