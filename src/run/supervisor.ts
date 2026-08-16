@@ -63,12 +63,14 @@ import { hardCapSeconds, sweepLedgeredWorker } from "../drivers/proc.ts";
 import {
   commitWorktree,
   createWorktree,
+  deleteBranch,
   ensureProjectRepo,
   fetchRemote,
   hasDiffSince,
   headSha,
   readBranchVsMain,
   readDiff,
+  remoteBranchExists,
   removeWorktree,
 } from "../worker/worktree.ts";
 import { spawnWorker, type WorkerHandle } from "../dispatch/spawn.ts";
@@ -99,6 +101,7 @@ import { runAsWorkItem } from "./adapter.ts";
 import type { RunStore } from "./store.ts";
 import type { Blocker, Run, RunStage, RunStateChange } from "./types.ts";
 import { RUN_TERMINAL } from "./types.ts";
+import { planWorktreeSweep, type SweepCandidate } from "./worktree-sweep.ts";
 import { blockerFromDoneSignal, makeBlocker, renderBlocker, stopsTheRun } from "./blocker.ts";
 import { blockerFromDeath, classifyDeath } from "./death.ts";
 import type { CapabilityInventory, CapabilityTarget } from "../capability/preflight.ts";
@@ -117,6 +120,8 @@ export interface RunGitOps {
   readDiff: typeof readDiff;
   createWorktree: typeof createWorktree;
   removeWorktree: typeof removeWorktree;
+  deleteBranch: typeof deleteBranch;
+  remoteBranchExists: typeof remoteBranchExists;
   fetchRemote: typeof fetchRemote;
   readBranchVsMain: typeof readBranchVsMain;
 }
@@ -297,6 +302,8 @@ const DEFAULT_WATCHDOG_GRACE_S = 120;
 const WATCHDOG_MIN_INTERVAL_MS = 15_000;
 /** Publish-outbox drain cadence — the shortest retry delay, so a due row waits at most one tick. */
 const PUBLISH_DRAIN_INTERVAL_MS = PUBLISH_RETRY_DELAYS_MS[0];
+/** How often {@link RunSupervisor.sweepWorktrees} may run — rate-limits it off the 60s watchdog tick. */
+const SWEEP_INTERVAL_MS = 60 * 60_000;
 /**
  * The longest a run may sit in `publishing` with nothing scheduled to move it before
  * {@link RunSupervisor.reconcilePublishing} parks it. Comfortably longer than the whole retry
@@ -378,6 +385,8 @@ export class RunSupervisor {
   private watchdogInFlight = false;
   /** Epoch ms of the last completed staffing pass — the status dashboard's liveness signal. */
   private lastTickAt: number | null = null;
+  /** Epoch ms of the last worktree sweep — rate-limits {@link sweepWorktrees} to once an hour. */
+  private lastSweepAt: number | null = null;
   private publishDrainTimer?: ReturnType<typeof setInterval>;
   private checkpointTimer?: ReturnType<typeof setInterval>;
   private checkpointInFlight = false;
@@ -402,6 +411,8 @@ export class RunSupervisor {
       readDiff,
       createWorktree,
       removeWorktree,
+      deleteBranch,
+      remoteBranchExists,
       fetchRemote,
       readBranchVsMain,
       ...deps.gitOps,
@@ -1569,6 +1580,60 @@ export class RunSupervisor {
   }
 
   /**
+   * TTL sweep for terminal runs' worktrees and local branches (`./worktree-sweep.ts` owns the
+   * policy; this method is the I/O). `removeWorktree` was wired into the git deps since v7 launch
+   * but had zero callers — this is the fix. Never throws: a removal failure is logged and the pass
+   * continues to the next candidate, because a disk-cleanup miss must never touch staffing.
+   */
+  private async sweepWorktrees(nowMs: number = Date.now()): Promise<string[]> {
+    const swept: string[] = [];
+    const terminal = this.store.list({ states: ["done", "failed", "cancelled"] });
+    const candidates: (SweepCandidate & { repoRoot: string })[] = [];
+    for (const run of terminal) {
+      if (!run.workspace || !existsSync(run.workspace)) continue;
+      const entered = Date.parse(run.updatedAt);
+      const ageMs = Number.isFinite(entered) ? nowMs - entered : 0;
+      // The TTL check comes before any network call — `pushed` is only resolved for a candidate
+      // already past its own TTL, so a normal hourly tick costs zero remote round-trips for the
+      // (common) case where nothing is old enough to sweep yet.
+      const pastTtl =
+        run.state === "done" ? ageMs >= 48 * 60 * 60_000 : ageMs >= 7 * 24 * 60 * 60_000;
+      const repoRoot = this.resolveRepoRoot(run);
+      const pushed = pastTtl ? await this.git.remoteBranchExists(repoRoot, run.branch).catch(() => false) : false;
+      candidates.push({
+        runId: run.id,
+        state: run.state,
+        workspace: run.workspace,
+        repoRoot,
+        branch: run.branch,
+        ageMs,
+        pushed,
+      });
+    }
+    const decisions = planWorktreeSweep(candidates);
+    const byId = new Map(candidates.map((c) => [c.runId, c]));
+    for (const decision of decisions) {
+      if (decision.action !== "remove") continue;
+      const c = byId.get(decision.runId);
+      if (!c) continue;
+      try {
+        await this.git.removeWorktree(c.repoRoot, c.workspace);
+      } catch (err) {
+        this.logger.warn("worktree sweep: removeWorktree failed", { run: c.runId, workspace: c.workspace, error: (err as Error).message });
+      }
+      try {
+        await this.git.deleteBranch(c.repoRoot, c.branch);
+      } catch (err) {
+        this.logger.warn("worktree sweep: deleteBranch failed", { run: c.runId, branch: c.branch, error: (err as Error).message });
+      }
+      this.logger.info("worktree sweep: freed", { run: c.runId, workspace: c.workspace, reason: decision.reason });
+      await this.patchRun(c.runId, { workspace: null });
+      swept.push(c.runId);
+    }
+    return swept;
+  }
+
+  /**
    * Boot repair for the one window the outbox cannot cover: the daemon died BETWEEN
    * `state = "publishing"` and the failed attempt that would have written the durable row. Such a
    * run has no outbox row, staffs nothing ({@link stageFor} returns null for `publishing`), and is
@@ -1926,6 +1991,16 @@ export class RunSupervisor {
         parked.push(...(await this.reconcilePublishing(nowMs)));
       } catch (err) {
         this.logger.warn("publishing-stall guard failed (staffing pass continues)", { error: String(err) });
+      }
+      // Rate-limited to once an hour — the 60s watchdog tick would otherwise re-scan every run's
+      // terminal state (and ls-remote every past-TTL candidate) far more often than useful.
+      if (this.lastSweepAt === null || nowMs - this.lastSweepAt >= SWEEP_INTERVAL_MS) {
+        this.lastSweepAt = nowMs;
+        try {
+          await this.sweepWorktrees(nowMs);
+        } catch (err) {
+          this.logger.warn("worktree sweep failed (staffing pass continues)", { error: String(err) });
+        }
       }
       const graceMs = (this.config.supervise?.staffing_watchdog_s ?? DEFAULT_WATCHDOG_GRACE_S) * 1000;
       const wedged = new Set<string>();

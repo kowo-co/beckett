@@ -371,6 +371,17 @@ export async function deleteBranch(repoRoot: string, branch: string): Promise<vo
 }
 
 /**
+ * True if `branch` exists on `remote` (`git ls-remote --heads`). Used by the worktree sweep
+ * (Task 4) to confirm a terminal run's work is durable elsewhere before its local branch and
+ * worktree are removed. Any failure (network, auth, missing remote) reads as false — "not
+ * provably pushed" — so the sweep only ever removes what it can prove is safe.
+ */
+export async function remoteBranchExists(repoRoot: string, branch: string, remote = "origin"): Promise<boolean> {
+  const r = await runGit(["ls-remote", "--heads", remote, `refs/heads/${branch}`], repoRoot);
+  return r.code === 0 && r.stdout.trim().length > 0;
+}
+
+/**
  * Append ignore patterns to a worktree's git exclude file (`info/exclude`) so per-worker meta
  * files (the scope-guard settings + done schema) never appear in the worker's diff.
  */
