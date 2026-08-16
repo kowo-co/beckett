@@ -75,7 +75,7 @@ function boundMcpText(value: string, maxChars: number): string {
 }
 
 /** Envelope keys compacted before serialization. `value`/`pages` are model data — never touched. */
-const OMIT_WHEN_EMPTY = ["console", "events", "screenshots", "attachments", "warnings", "challenges", "skills"] as const;
+const OMIT_WHEN_EMPTY = ["console", "events", "screenshots", "attachments", "warnings", "challenges", "skills", "secretsSaved"] as const;
 export function compactEvalPayload<T extends Record<string, unknown>>(payload: T): T {
   const compact = { ...payload } as Record<string, unknown>;
   for (const key of OMIT_WHEN_EMPTY) {

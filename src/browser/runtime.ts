@@ -50,6 +50,7 @@ import {
 import { createIsolatedBrowserRuntime } from "./isolated.ts";
 import { isDisposableCacheDir, pruneChromeProfileCaches } from "./profile-cache.ts";
 import { sleep, spawnSubprocess, type SpawnedProcess, type SpawnProcess } from "./subprocess.ts";
+import type { SecretSaveReceipt } from "./secret-sink.ts";
 
 const MAX_CODE_CHARS = 100_000;
 const MAX_EVENTS = 100;
@@ -109,6 +110,8 @@ export interface BrowserEvalResult {
   challenges?: unknown[];
   skills?: BrowserSkillHint[];
   pendingCredential?: BrowserPendingCredential;
+  /** Receipts for any `secrets.save` calls this eval made — field names + outcome, never values. */
+  secretsSaved?: SecretSaveReceipt[];
 }
 
 /** Optional per-call evaluation controls threaded from the MCP tool input to BetterWright run(). */

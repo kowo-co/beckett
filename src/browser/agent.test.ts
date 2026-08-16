@@ -7,6 +7,7 @@ import { join } from "node:path";
 import type { BrowserRuntime } from "./runtime.ts";
 import type { Config, Logger } from "../types.ts";
 import type { KeychainReader } from "../secret/keychain-read.ts";
+import type { KeychainStore, KeychainField } from "../secret/keychain.ts";
 import {
   contextPreamble,
   createBrowserAgent,
@@ -177,6 +178,14 @@ function fakeKeychain(values: Record<string, string>, totpCodes: string[] = []):
   };
 }
 
+/** Records every write; `fail` makes it throw instead (a bad jingle exit code). */
+function fakeKeychainStore(calls: { entry: string; fields: KeychainField[] }[], fail = false): KeychainStore {
+  return async ({ entry, fields }) => {
+    calls.push({ entry, fields });
+    if (fail) throw new Error("jingle set failed (1)");
+  };
+}
+
 function setup(
   overrides: Partial<Config["quick"]> = {},
   behavior: {
@@ -184,6 +193,7 @@ function setup(
     onOutcome?: (run: BrowserAgentRun) => void | Promise<void>;
     browser?: BrowserRuntime;
     keychain?: KeychainReader;
+    keychainStore?: KeychainStore;
     dir?: string;
     logger?: Logger;
   } = {},
@@ -196,6 +206,7 @@ function setup(
     logger: behavior.logger ?? quietLog,
     browser: behavior.browser ?? fakeBrowser(),
     ...(behavior.keychain ? { keychain: behavior.keychain } : {}),
+    ...(behavior.keychainStore ? { keychainStore: behavior.keychainStore } : {}),
     onOutcome: behavior.onOutcome ?? ((run) => {
       outcomes.push(structuredClone(run));
     }),
@@ -602,6 +613,79 @@ describe("keychain secrets", () => {
     expect(preamble).toContain("secrets.email");
     expect(preamble).toContain("secrets.totp");
     expect(preamble).not.toContain("bot@example.com");
+  });
+});
+
+describe("secrets.save (the write door)", () => {
+  test("saveSecret writes the run's own entry and never journals the value", async () => {
+    const calls: { entry: string; fields: KeychainField[] }[] = [];
+    const keychainStore = fakeKeychainStore(calls);
+    const { dir, agent } = setup({}, { keychain: fakeKeychain({}), keychainStore });
+    const { runId } = await agent.run("ASK_COLOR", { channelId: "chan", requesterId: "owner", credsEntry: "huggingface" });
+    await waitUntil(() => agent.stats().waiting === 1);
+    const receipt = await agent.saveSecret(runId, "hf_token", "hf_live_super_secret_token");
+    expect(receipt).toEqual({ field: "hf_token", entry: "huggingface", ok: true });
+    expect(calls).toEqual([{ entry: "huggingface", fields: [{ field: "hf_token", value: "hf_live_super_secret_token" }] }]);
+    const journal = readFileSync(join(dir, "browser-agent", runId, "journal.jsonl"), "utf8");
+    expect(journal).toContain('"field":"hf_token"');
+    expect(journal).toContain('"kind":"secret"');
+    expect(journal).not.toContain("hf_live_super_secret_token");
+  });
+
+  test("a saved value is redacted from everything the run says afterwards", async () => {
+    const calls: { entry: string; fields: KeychainField[] }[] = [];
+    const keychainStore = fakeKeychainStore(calls);
+    const { agent, outcomes } = setup({}, { keychain: fakeKeychain({}), keychainStore });
+    const { runId } = await agent.run("ASK_COLOR", { channelId: "chan", requesterId: "owner", credsEntry: "huggingface" });
+    await waitUntil(() => agent.stats().waiting === 1);
+    await agent.saveSecret(runId, "hf_token", "hf_live_super_secret_token");
+    await agent.resume(runId, "the minted token was hf_live_super_secret_token, all done");
+    await waitUntil(() => outcomes.length === 1);
+    expect(outcomes[0]!.result).not.toContain("hf_live_super_secret_token");
+    expect(outcomes[0]!.result).toContain("[redacted]");
+  });
+
+  test("a later eval sees the saved field in secrets", async () => {
+    const calls: { entry: string; fields: KeychainField[] }[] = [];
+    const keychainStore = fakeKeychainStore(calls);
+    const { agent } = setup({}, { keychain: fakeKeychain({}), keychainStore });
+    const { runId } = await agent.run("ASK_COLOR", { channelId: "chan", requesterId: "owner", credsEntry: "huggingface" });
+    await waitUntil(() => agent.stats().waiting === 1);
+    expect(await agent.evalSecrets(runId)).toEqual({});
+    await agent.saveSecret(runId, "hf_token", "hf_live_super_secret_token");
+    expect(await agent.evalSecrets(runId)).toEqual({ hf_token: "hf_live_super_secret_token" });
+  });
+
+  test("saveSecret on a run with no credsEntry refuses with the re-dispatch instruction", async () => {
+    const calls: { entry: string; fields: KeychainField[] }[] = [];
+    const keychainStore = fakeKeychainStore(calls);
+    const { agent } = setup({}, { keychainStore });
+    const { runId } = await agent.run("ASK_COLOR", { channelId: "chan", requesterId: "owner" });
+    await waitUntil(() => agent.stats().waiting === 1);
+    const receipt = await agent.saveSecret(runId, "hf_token", "hf_live_super_secret_token");
+    expect(receipt.ok).toBe(false);
+    expect(receipt.error).toContain("re-dispatch it with credsEntry");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("a jingle write failure returns ok:false and does not cache the value", async () => {
+    const calls: { entry: string; fields: KeychainField[] }[] = [];
+    const keychainStore = fakeKeychainStore(calls, true);
+    const { agent } = setup({}, { keychain: fakeKeychain({}), keychainStore });
+    const { runId } = await agent.run("ASK_COLOR", { channelId: "chan", requesterId: "owner", credsEntry: "huggingface" });
+    await waitUntil(() => agent.stats().waiting === 1);
+    const receipt = await agent.saveSecret(runId, "hf_token", "hf_live_super_secret_token");
+    expect(receipt.ok).toBe(false);
+    expect(receipt.error).toContain("jingle refused the write");
+    expect(await agent.evalSecrets(runId)).toEqual({});
+  });
+
+  test("saveSecret refuses without throwing when no keychainStore is wired", async () => {
+    const { agent } = setup({}, { keychain: fakeKeychain({}) });
+    const { runId } = await agent.run("ASK_COLOR", { channelId: "chan", requesterId: "owner", credsEntry: "huggingface" });
+    await waitUntil(() => agent.stats().waiting === 1);
+    const receipt = await agent.saveSecret(runId, "hf_token", "hf_live_super_secret_token");
+    expect(receipt).toEqual({ field: "hf_token", entry: "huggingface", ok: false, error: "the jingle keychain writer is not wired" });
   });
 });
 

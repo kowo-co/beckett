@@ -21,6 +21,8 @@ import type { Config, Logger } from "../types.ts";
 import { MAX_BROWSER_EVAL_CALL_TIMEOUT_MS } from "./runtime.ts";
 import type { BrowserRuntime } from "./runtime.ts";
 import type { KeychainEntrySecrets, KeychainReader } from "../secret/keychain-read.ts";
+import type { KeychainStore } from "../secret/keychain.ts";
+import { SECRET_FIELD_RE, MAX_SECRET_VALUE_CHARS, type SecretSaveReceipt } from "./secret-sink.ts";
 
 export type BrowserAgentState = "queued" | "running" | "waiting" | "done" | "error" | "timeout" | "cancelled";
 
@@ -57,6 +59,8 @@ export interface CreateBrowserAgentDeps {
   logger: Logger;
   browser: BrowserRuntime;
   keychain?: KeychainReader;
+  /** Jingle write door for `secrets.save`; absent → saves refuse with "not wired". */
+  keychainStore?: KeychainStore;
   /** Surface one blocking question to the origin channel; resolves to the Discord anchor id. */
   onQuestion: (run: BrowserAgentRun, question: BrowserAgentQuestion) => Promise<string>;
   /** Report a terminal run to the concierge (update turn). Throwing keeps the run undelivered. */
@@ -76,7 +80,7 @@ export interface BrowserAgentStats {
 /** One redacted line of a run's activity journal (journal.jsonl in the run directory). */
 export interface BrowserJournalEvent {
   ts: number;
-  kind: "dispatched" | "queued" | "leg" | "eval" | "steer" | "question" | "finished";
+  kind: "dispatched" | "queued" | "leg" | "eval" | "steer" | "question" | "finished" | "secret";
   [key: string]: unknown;
 }
 
@@ -147,6 +151,13 @@ export interface BrowserAgent {
    * has no keychain entry. Values are for injection + redaction only — never log or persist.
    */
   evalSecrets(runId: string): Promise<Record<string, string> | null>;
+  /**
+   * Persist one value a live run's script produced into the run's own jingle entry. The value is
+   * written to jingle on stdin, added to the run's sensitiveInputs, and folded into the run's
+   * cached `secrets` so later scripts can read it back. It is never logged, journaled or
+   * returned — the journal and the receipt carry the field NAME only. Never throws.
+   */
+  saveSecret(runId: string, field: string, value: string): Promise<SecretSaveReceipt>;
   /**
    * Report every run a dead daemon stranded as cancelled; never replay work after a restart.
    * Call once at boot, after the concierge can take turns.
@@ -275,7 +286,10 @@ export function secretsPreamble(secrets: KeychainEntrySecrets): string {
     `Credentials for this task are pre-loaded from the keychain entry "${secrets.entry}" as a ` +
     `read-only \`secrets\` object inside every betterwright_browser script: ${fields.join(", ")}. ` +
     `Use them directly in browser code; their values are injected outside your view — never ask ` +
-    `for them, and never return, log, or screenshot them.`
+    `for them, and never return, log, or screenshot them. If a script mints a new credential ` +
+    `(a token, a freshly-set password), save it with \`await secrets.save("<field>", value)\` in ` +
+    `a small script that returns right away — it goes straight into the "${secrets.entry}" ` +
+    `keychain entry out of your view, and the value is never printed, returned, or screenshotted.`
   );
 }
 
@@ -332,7 +346,7 @@ export function resolveCredsEntry(task: string, requested: string | null, vaultE
 }
 
 export function createBrowserAgent(deps: CreateBrowserAgentDeps): BrowserAgent {
-  const { config, logger, browser, keychain } = deps;
+  const { config, logger, browser, keychain, keychainStore } = deps;
   const spawn = deps.spawn ?? Bun.spawn;
   const paths = buildPaths(config);
   const agentDir = join(paths.beckettDir, "browser-agent");
@@ -1108,6 +1122,56 @@ export function createBrowserAgent(deps: CreateBrowserAgentDeps): BrowserAgent {
         if (!entry.sensitiveInputs.includes(code)) entry.sensitiveInputs.push(code);
       }
       return values;
+    },
+
+    async saveSecret(runId, field, value) {
+      const entry = live.get(runId);
+      if (!entry) return { field, entry: "", ok: false, error: `browser run ${runId} is not live` };
+      const credsEntry = entry.run.credsEntry;
+      if (!credsEntry) {
+        return {
+          field,
+          entry: "",
+          ok: false,
+          error:
+            "this run has no keychain entry — re-dispatch it with credsEntry set to the entry the " +
+            "value belongs in",
+        };
+      }
+      if (!keychainStore) {
+        return { field, entry: credsEntry, ok: false, error: "the jingle keychain writer is not wired" };
+      }
+      if (typeof field !== "string" || !SECRET_FIELD_RE.test(field)) {
+        return { field, entry: credsEntry, ok: false, error: `invalid field name "${field}"` };
+      }
+      if (typeof value !== "string" || value.length === 0) {
+        return { field, entry: credsEntry, ok: false, error: "secrets.save needs a non-empty string value" };
+      }
+      if (value.length > MAX_SECRET_VALUE_CHARS) {
+        return { field, entry: credsEntry, ok: false, error: "secrets.save value is too long" };
+      }
+      try {
+        await keychainStore({ entry: credsEntry, fields: [{ field, value }] });
+      } catch (error) {
+        return {
+          field,
+          entry: credsEntry,
+          ok: false,
+          error: `jingle refused the write (${(error as Error).message})`,
+        };
+      }
+      // The value is live from this instant: fold it into sensitiveInputs BEFORE the journal
+      // call so the journal line (field name only) is written through the same redaction path
+      // as everything else, and cache it into `secrets` so a later eval can read it back.
+      if (!entry.sensitiveInputs.includes(value)) entry.sensitiveInputs.push(value);
+      if (entry.secrets) {
+        entry.secrets.values[field] = value;
+        if (!entry.secrets.fields.includes(field)) entry.secrets.fields.push(field);
+      } else {
+        entry.secrets = { entry: credsEntry, fields: [field], values: { [field]: value }, hasTotp: false };
+      }
+      journal(runId, entry.sensitiveInputs, { kind: "secret", entry: credsEntry, field, ok: true });
+      return { field, entry: credsEntry, ok: true };
     },
 
     async recover() {
