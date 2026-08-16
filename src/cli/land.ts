@@ -3,17 +3,18 @@
  * =======================================================================================
  * One engine for "get these commits onto `main`" when `main` refuses a direct push. Branch
  * protection on `kowo-co/beckett` requires a pull request and the `check` status check, so a
- * `git push origin main` — from a person, from `beckett finish`, or from the deploy script —
+ * `git push origin main` — from a person or from `beckett finish` —
  * cannot land anything: GitHub answers `GH006: Protected branch update failed`. The only path that
  * works is push a branch → open (or reuse) its PR → wait for CI → merge, and that path is here,
  * ONCE, rather than re-implemented per caller.
  *
- * Two callers share it: {@link runFinish} (`beckett finish`, the end-of-ticket motion) and
- * `beckett gh land`, which `deploy/deploy-prod.sh` uses to land the release-version bump commit.
+ * Two callers share it: {@link runFinish} (`beckett finish`) and `GitHubCli.publishViaPullRequest`
+ * (the run engine's owned-repo publish). `deploy/deploy-prod.sh` no longer lands through here —
+ * since 2026-08-12 the release bump pushes straight at main under the App's ruleset bypass.
  * Both push through {@link GitHubCli} — the single credential boundary, which hands `git` the
- * GitHub App installation token as `x-access-token` — because the deploy re-execs itself into a
- * `systemd --user --scope` that has NO ambient git credentials, and a bare `git push` there dies
- * with `could not read Username for 'https://github.com'`.
+ * GitHub App installation token as `x-access-token`, because neither `beckett finish` nor the run
+ * engine's publish has ambient git credentials for kowo-co: a bare `git push` there dies with
+ * `could not read Username for 'https://github.com'`.
  *
  * Everything that can stop a landing is NAMED here: {@link gateMerge} turns GitHub's collapsed
  * `mergeStateStatus` into a specific cause plus the command that clears it, and every message
@@ -151,10 +152,11 @@ export function describeMergeFailure(
   number: number,
   branch: string,
   command: string = DEFAULT_COMMAND,
+  base: string = "main",
 ): string {
   const raw = err.trim();
   const lower = raw.toLowerCase();
-  const rebase = `\`git fetch origin && git rebase origin/main\` in the ${branch} checkout, push, then re-run \`${command}\``;
+  const rebase = `\`git fetch origin && git rebase origin/${base}\` in the ${branch} checkout, push, then re-run \`${command}\``;
   if (lower.includes("not mergeable") || lower.includes("conflict")) {
     return `merging PR #${number} failed: GitHub refused it as not mergeable — the base moved under the branch. Resolve with ${rebase}.\n${raw}`;
   }
@@ -310,7 +312,7 @@ export async function landBranch(gh: LandClient, opts: LandOptions): Promise<Lan
   try {
     await gh.mergePR(opts.repo, pr.number, opts.strategy);
   } catch (err) {
-    throw new LandError(describeMergeFailure((err as Error).message, opts.repo, pr.number, opts.head, command), "merge");
+    throw new LandError(describeMergeFailure((err as Error).message, opts.repo, pr.number, opts.head, command, opts.base), "merge");
   }
   return { pr, merge: "merged" };
 }

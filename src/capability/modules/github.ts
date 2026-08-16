@@ -420,9 +420,9 @@ export const createGithubExtension: ExtensionFactory = ({ config }): Extension =
 
     // `beckett gh land` — get a branch's commits ONTO a protected base the only way protection
     // allows: push it, open (or reuse) its PR, wait for CI, merge. `beckett finish` runs the same
-    // engine (`src/cli/land.ts`) for the end-of-ticket motion; `deploy/deploy-prod.sh` runs this
-    // verb to land its release-version bump, since `git push origin main` is refused by GH006 and,
-    // inside the deploy's `systemd --user --scope`, has no credential at all.
+    // engine (`src/cli/land.ts`) for the end-of-ticket motion, as does `GitHubCli.publishViaPullRequest`
+    // (the run engine's owned-repo publish). `deploy/deploy-prod.sh` no longer lands through here —
+    // since 2026-08-12 the release bump pushes straight at main under the App's ruleset bypass.
     if (sub === "land") {
       for (const k of ["repo", "head", "title"]) if (!flags[k]) fail(LAND_USAGE);
       const { DEFAULT_CI_TIMEOUT_MS, LandError, landBranch } = await import("../../cli/land.ts");

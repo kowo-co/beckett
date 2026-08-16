@@ -69,3 +69,20 @@ test("recordBoot's returned event is a single source of truth fit for both the l
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("finding 18: run.courier rejects a non-PR --pr-url before touching the run", () => {
+  const start = source.indexOf('name: "run.courier"');
+  expect(start).toBeGreaterThan(-1);
+  const end = source.indexOf("\n      },", start);
+  expect(end).toBeGreaterThan(start);
+  const body = source.slice(start, end);
+
+  // The shape check must run on the raw flag before the courier outcome is decided, so a bad
+  // URL fails the whole verb instead of silently landing a non-PR string in run.prUrl.
+  const guardIndex = body.indexOf("must be a pull-request URL");
+  const courierCallIndex = body.indexOf("runSupervisor.courier(runId)");
+  expect(guardIndex).toBeGreaterThan(-1);
+  expect(courierCallIndex).toBeGreaterThan(-1);
+  expect(guardIndex).toBeLessThan(courierCallIndex);
+  expect(body).toContain('/\\/pull\\/\\d+(?:$|[/?#])/');
+});

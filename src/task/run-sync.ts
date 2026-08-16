@@ -51,7 +51,7 @@ export interface RunTaskSync {
   /** Record the PR a run just opened (the card's artifact link + Merge button). */
   onPrOpened(run: Run, pr: { repo: string; number: number; url: string }): Promise<void>;
   /** Record a successful publication (push or PR). */
-  onPublished(run: Run, publication: { url: string; kind: "pushed" | "pr" }): Promise<void>;
+  onPublished(run: Run, publication: { url: string; kind: "pushed" | "pr"; prUrl?: string }): Promise<void>;
 }
 
 /**
@@ -116,7 +116,7 @@ export function createRunTaskSync(deps: RunTaskSyncDeps): RunTaskSync {
       await attempt("publication", branchRef, run.id, () =>
         tasks.setPublication(branchRef, {
           repo: `${githubOwner}/${projectSlugOf(run)}`,
-          url: publication.url,
+          url: publication.prUrl ?? publication.url,
           kind: publication.kind,
         }),
       );

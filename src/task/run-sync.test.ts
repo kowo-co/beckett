@@ -144,6 +144,24 @@ describe("the board follows the run", () => {
     });
   });
 
+  test("an owned-repo pushed publication carrying a prUrl records the PR URL, not the repo root", async () => {
+    const store = await registry();
+    const sync = syncFor(store);
+    const run = makeRun();
+    await sync.onStateChange(change(run, "implementing"));
+    await sync.onPublished(run, {
+      url: "https://github.com/kowo-co/gateway",
+      kind: "pushed",
+      prUrl: "https://github.com/kowo-co/gateway/pull/9",
+    });
+    const branch = store.getBranch("1.1")!.branch;
+    expect(branch.publication).toEqual({
+      repo: "kowo-co/gateway",
+      url: "https://github.com/kowo-co/gateway/pull/9",
+      kind: "pushed",
+    });
+  });
+
   test("a run with no task branch touches nothing", async () => {
     const store = await registry();
     const sync = syncFor(store);

@@ -1033,7 +1033,8 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
         this.opts.logger.info("published via direct push (branchless repo)", { repo, branch: trunk.base });
         // #246: `prUrl` is what the Discord publish announcement renders — it must point at something
         // real (the landed commit), never the bare repo root. `url` stays the repo root for callers
-        // that want the repo itself (e.g. the task registry's publication link).
+        // that want the repo itself; the task registry's publication link now prefers `prUrl`
+        // (run-sync.ts) so the card points at the change, not the homepage.
         return {
           nameWithOwner: repo,
           url: `${this.gitHost()}/${repo}`,
