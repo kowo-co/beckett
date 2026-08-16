@@ -1032,7 +1032,9 @@ export const createRoutinesExtension =
       // gates on. This is a READ ONLY: the list itself is declared in `[proactive_sweep] repos` in
       // config.toml and applied on every routine-store load, so there is exactly one source of
       // truth for an allow-list. The `--routine` flag targets a non-default sweep routine; it
-      // defaults to the built-in `proactive-sweep`.
+      // defaults to the built-in `proactive-sweep`. Note: reconcileProactiveSweep forces the SAME
+      // config list onto every proactive-sweep routine on every load, so `--routine` only changes
+      // which routine's enabled/id fields are shown — the repos list is identical across all of them.
       if (sub === "proactive") {
         const { _, flags } = parse(rest);
         const [op] = _;

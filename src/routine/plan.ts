@@ -169,7 +169,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       freeTime: false,
       preview:
         repos.length === 0
-          ? "sweep for rot — but no repos are opted in, so nothing is swept (add repos to the routine's list)"
+          ? "sweep for rot — but no repos are opted in, so nothing is swept (add them to [proactive_sweep] repos in config.toml)"
           : `sweep ${repos.join(", ")} for red CI / dependency advisories / broken README links, ` +
             "opening at most one proactive-labelled PR per finding (never merges, never force-pushes)",
       credsEntry: null,
