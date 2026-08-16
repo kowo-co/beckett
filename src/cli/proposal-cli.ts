@@ -6,7 +6,9 @@
  *   - `proposals show <id>` print one proposal
  *   - `proposals accept <id>` — THE only way a proposal becomes a ticket or a task branch.
  *     Accepting a doctrine or persona proposal files a normal ticket; accepting a ticket or
- *     memory-correction proposal allocates a real task branch. Neither this file nor anything it
+ *     memory-correction proposal allocates a real task branch. Accepting a `product-idea`
+ *     deploys a SCOPING run whose only deliverable is `docs/ideas/<slug>.md` — never a build —
+ *     in `--project`'s repo, or Beckett's own by default. Neither this file nor anything it
  *     calls can edit doctrine, persona, or a memory.
  *   - `proposals reject <id> --why <reason>` — rejection is signal, not deletion; it always
  *     records a calibration.

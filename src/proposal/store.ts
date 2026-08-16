@@ -31,7 +31,13 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFile
 import { join } from "node:path";
 
 /** What a proposal can be about. A dream never gets a fifth kind by writing one into a file. */
-export const PROPOSAL_KINDS = ["doctrine-change", "persona-change", "ticket", "memory-correction"] as const;
+export const PROPOSAL_KINDS = [
+  "doctrine-change",
+  "persona-change",
+  "memory-correction",
+  "product-idea",
+  "ticket",
+] as const;
 export type ProposalKind = (typeof PROPOSAL_KINDS)[number];
 
 export const PROPOSAL_STATUSES = ["open", "accepted", "rejected", "expired"] as const;
@@ -55,14 +61,17 @@ const CLAIM_MAX_CHARS = 240;
 
 /**
  * Highest-signal kind first in every listing: a proposal to change my doctrine is the
- * highest-stakes thing the queue can hold, a spike idea is the lowest. Oldest first WITHIN a
- * kind, so nothing rots at the bottom of its own class.
+ * highest-stakes thing the queue can hold, a spike idea is the lowest. A product idea outranks a
+ * spike-shaped ticket — it costs a scoping memo to accept, not a build — but sits below the three
+ * kinds that change Beckett's own core. Oldest first WITHIN a kind, so nothing rots at the bottom
+ * of its own class.
  */
 const KIND_ORDER: Record<ProposalKind, number> = {
   "doctrine-change": 0,
   "persona-change": 1,
   "memory-correction": 2,
-  ticket: 3,
+  "product-idea": 3,
+  ticket: 4,
 };
 
 /** The parsed record. Every field here is read explicitly; anything else on disk is ignored. */

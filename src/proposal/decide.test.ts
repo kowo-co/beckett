@@ -108,6 +108,37 @@ test("a persona change deploys a run too; a ticket or memory correction becomes 
   expect(h.branched.map((b) => b.title)).toEqual(["spike the retry idea", "jason moved off pacific time"]);
 });
 
+test("accepting a product idea buys a scoping memo, never a build", async () => {
+  const dir = sandbox();
+  const h = harness(dir);
+  const idea = createProposal(dir, {
+    ...BASE,
+    kind: "product-idea",
+    claim: "a shared watchlist for the free-time session",
+  });
+
+  const result = await acceptProposal(h.accept, idea.id);
+
+  expect(result.route).toBe("run");
+  expect(h.filed.length).toBe(1);
+  expect(h.filed[0]!.title).toBe("scope: a shared watchlist for the free-time session");
+  const body = h.filed[0]!.body;
+  expect(body).toContain("docs/ideas/");
+  expect(body).toContain("Scope this idea. Do NOT build it.");
+  expect(body).toContain("The smallest experiment");
+  expect(body).toContain("A diff that adds product code fails this run's review");
+});
+
+test("a doctrine change is still briefed the old way", async () => {
+  const dir = sandbox();
+  const h = harness(dir);
+  const p = createProposal(dir, BASE);
+
+  await acceptProposal(h.accept, p.id);
+
+  expect(h.filed[0]!.body).not.toContain("docs/ideas/");
+});
+
 test("a failed route leaves the proposal open rather than claiming it became something", async () => {
   const dir = sandbox();
   const p = createProposal(dir, BASE);
