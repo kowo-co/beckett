@@ -110,7 +110,7 @@ import {
 } from "./worktree-sweep.ts";
 import { blockerFromDoneSignal, makeBlocker, renderBlocker, stopsTheRun } from "./blocker.ts";
 import { blockerFromDeath, classifyDeath } from "./death.ts";
-import { assembleProof } from "./proof.ts";
+import { assembleProof, proofVerdict } from "./proof.ts";
 import { pathOverlaps, readiness } from "./deps.ts";
 import { isFrontendChange } from "../preview/index.ts";
 import type { CapabilityInventory, CapabilityTarget } from "../capability/preflight.ts";
@@ -515,6 +515,9 @@ export class RunSupervisor {
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
+    // `stop()` raises this and never lowers it — an in-process restart (a test, or any future
+    // stop/start cycle) must not classify every subsequent worker death as a shutdown death.
+    this.shuttingDown = false;
     this.bus?.on("run.deploy", async (args) => {
       const runId = typeof args.runId === "string" ? args.runId : "";
       if (runId) await this.admit(runId);
@@ -1308,6 +1311,9 @@ export class RunSupervisor {
     );
     this.recordSpend(run, stage, handle, status, spendMeta);
     this.spendMetaByWorker.delete(handle.id);
+    // A stage that finishes on its own has paid off whatever this run owed — a stale row would
+    // otherwise survive to a later, unrelated park and get boot-requeued right past it.
+    if (!died && this.owedResumes.delete(runId)) this.persistRuntimeState();
     // Mark the run mid-finish BEFORE freeing its slot: the commit/publish below can outlive a
     // watchdog grace window, and for its whole duration the run is workerless.
     this.finishing.add(runId);
@@ -1351,6 +1357,13 @@ export class RunSupervisor {
         // (answer, default, or an eventual park on silence) (B8).
         if (signal.blocker.class === "question") {
           await this.askRunQuestion(run, signal.blocker);
+          return;
+        }
+        // A "continuation" blocker means "give me another pass", not a stop — it is a
+        // supervisor-actor class (`blocker.ts`'s ACTOR_BY_CLASS) precisely so a worker can ask for
+        // this transition instead of the generic park below.
+        if (signal.blocker.class === "continuation") {
+          await this.continueImplement(run, summary);
           return;
         }
         // Behaviour-preserving vs. the old free-text `park(run, ...)`: the worker's summary of
@@ -1985,17 +1998,33 @@ export class RunSupervisor {
         this.logger.info("unverified run promoted to done on re-check", { run: run.id });
         continue;
       }
+      // `pending` ("CI is still running") resolves by waiting; `unverified` does not. Spending the
+      // recheck-cap budget on a healthy PR whose CI just takes a while would park it — and burn API
+      // calls doing so — for no reason but the clock.
+      if (proofVerdict(proof) === "pending") {
+        await this.patchRun(run.id, { proof: { ...proof, attempts: prior?.attempts ?? 0 }, error: proof.gaps.join("; ") });
+        continue;
+      }
       if (attempts >= cap) {
         await this.patchRun(run.id, { proof });
         const fresh = this.store.get(run.id) ?? run;
+        // `courier` overwrites `published`/`landingMode` and is only for a landing the daemon
+        // never drove — a run beckett itself published via the outbox is not eligible for it
+        // (see `courier()`'s guard), so naming the command here would send the reader into a
+        // no-op. Its remedy is to fix the PR, then `beckett task resume`.
+        const remedy =
+          fresh.published?.via === "outbox" && fresh.published.prUrl
+            ? `check ${fresh.prUrl ?? fresh.proof?.pushUrl ?? "the landing"}, fix it, then \`beckett task resume ${fresh.id}\` ` +
+              `— or accept the landing by hand`
+            : `check ${fresh.prUrl ?? fresh.proof?.pushUrl ?? "the landing"} and either fix it or ` +
+              `\`beckett task courier ${fresh.id}\``;
         await this.hold(
           fresh,
           this.transientBlocker(
             fresh,
             `this run published but never earned a verified proof after ${attempts} re-check(s): ` +
               `${proof.gaps.join("; ")}`,
-            `check ${fresh.prUrl ?? fresh.proof?.pushUrl ?? "the landing"} and either fix it or ` +
-              `\`beckett task courier ${fresh.id}\``,
+            remedy,
           ),
         );
         held.push(run.id);
@@ -2203,7 +2232,9 @@ export class RunSupervisor {
       this.pump();
       return "already-terminal";
     }
-    await this.patchRun(runId, { state: "cancelled", error: reason, question: null });
+    // A cancel of a `parked` run must not leave its typed blocker behind — `blocker` is documented
+    // non-null iff `state === "parked"`, and a stale one can misroute a later `resume()`.
+    await this.patchRun(runId, { state: "cancelled", error: reason, question: null, blocker: null });
     this.pump();
     return "cancelled";
   }
@@ -2309,6 +2340,10 @@ export class RunSupervisor {
     }
     if (run.state === "done" || run.state === "failed" || run.state === "cancelled") return "already-terminal";
     if (run.state !== "publishing" && run.state !== "parked") return "not-eligible";
+    // A publish the daemon itself drove is not a courier landing — a human clearing a red PR did
+    // not re-publish anything, and rewriting `published`/`landingMode` here would erase the real
+    // PR URL and the mode the proof was assembled from.
+    if (run.published?.via === "outbox" && run.published.prUrl) return "already-terminal";
 
     // The row's exclusive publish ownership ends here — a human owns it now, and a stale retry
     // must never race their hand-push. Reuses the exact bookkeeping `cancel()` already relies on
@@ -2700,13 +2735,18 @@ export class RunSupervisor {
    */
   private async handleWorkerDeath(run: Run, stage: RunStage, handle: WorkerHandle): Promise<void> {
     if (stage === "implement") await this.commitWip(run, handle);
-    this.noteOwedResume(run, stage, handle);
 
     const kind = classifyDeath({
       timedOut: handle.result?.timedOut ?? false,
       shuttingDown: this.shuttingDown,
       errorClass: handle.result?.errorClass,
     });
+
+    // Only a self-inflicted death (beckett's own wall-clock cap, or the daemon draining) owes this
+    // run another try — the boot requeue re-dispatches ANY parked run with an owed row, no cause
+    // filter, so recording the debt for an external death (a bad credential, a launch failure)
+    // would re-staff straight into the same wall on the next restart.
+    if (kind === "self-inflicted") this.noteOwedResume(run, stage, handle);
 
     if (kind === "external") {
       const blocker = blockerFromDeath(
@@ -2764,6 +2804,9 @@ export class RunSupervisor {
             `minutes, mid-review. Nothing was written to the branch; re-review the diff from the top.`,
     );
     await this.patchRun(run.id, { state: stage === "implement" ? "implementing" : "reviewing" });
+    // Paid in-process — the boot requeue must not also re-dispatch this stage on a later restart.
+    this.owedResumes.delete(run.id);
+    this.persistRuntimeState();
     const next = this.store.get(run.id);
     if (next) this.spawnGuarded(next, stage);
   }
@@ -2880,6 +2923,10 @@ export class RunSupervisor {
         // The park reason described a worker that is gone; the run is live again and the timeline
         // above keeps the cause. Leaving it would make the next park unreadable.
         error: null,
+        // `Run.blocker` is documented non-null iff `state === "parked"` — leaving a stale typed
+        // blocker here would disagree with the state this same patch just set, and `resume()`
+        // keys `publish-blocked` off `blocker?.class`, so a stale one can misroute a later resume.
+        blocker: null,
       });
       if (!updated) continue;
       requeued.push(runId);
