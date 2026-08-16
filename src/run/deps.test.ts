@@ -114,6 +114,31 @@ describe("readiness", () => {
     expect(readiness(a, [a, b])).toEqual({ ready: true, waitsOn: [], autoDeps: [] });
   });
 
+  test("a failed sibling with overlapping files does not block — the auto edge is not a persisted dep", () => {
+    // Finding 22: the auto edge is recomputed from `run.files` on every call and never written
+    // into `run.deps`, so once the sibling leaves an in-flight state the overlap simply stops
+    // being reported — there is no stale persisted `deps` entry left to clear.
+    const a = run({ id: "run-a", state: "queued", files: ["src/run/supervisor.ts"] });
+    const b = run({ id: "run-b", state: "failed", files: ["src/run/"] });
+    expect(readiness(a, [a, b])).toEqual({ ready: true, waitsOn: [], autoDeps: [] });
+  });
+
+  test("a sibling `awaiting_input` with overlapping files blocks admission", () => {
+    const a = run({ id: "run-a", state: "queued", files: ["src/run/supervisor.ts"] });
+    const b = run({ id: "run-b", state: "awaiting_input", files: ["src/run/"] });
+    const result = readiness(a, [a, b]);
+    expect(result.ready).toBe(false);
+    expect(result.autoDeps).toEqual(["run-b"]);
+  });
+
+  test("a sibling `parked` with overlapping files blocks admission", () => {
+    const a = run({ id: "run-a", state: "queued", files: ["src/run/supervisor.ts"] });
+    const b = run({ id: "run-b", state: "parked", files: ["src/run/"] });
+    const result = readiness(a, [a, b]);
+    expect(result.ready).toBe(false);
+    expect(result.autoDeps).toEqual(["run-b"]);
+  });
+
   test("a dependency cycle is broken, newest run waits", () => {
     const older = run({ id: "run-a", createdAt: "2026-08-10T00:00:00.000Z", deps: ["run-b"] });
     const newer = run({ id: "run-b", createdAt: "2026-08-11T00:00:00.000Z", deps: ["run-a"] });

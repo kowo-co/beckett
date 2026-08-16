@@ -662,10 +662,13 @@ export class RunSupervisor {
 
   /**
    * Dependency gate (B9): a `queued` run whose `readiness()` is not yet `ready` stays queued
-   * rather than staffing. Persists any newly-discovered auto edge (a file overlap with an
-   * in-flight sibling), so the wait survives a restart, and traces "held: waits on …" exactly
-   * once per distinct wait list — not once per admit call. Re-pumped from `patchRun` whenever
-   * any run reaches `done` (see below).
+   * rather than staffing. The auto edge (a file overlap with an in-flight sibling) is NOT
+   * persisted into `run.deps` — it is recomputed from `run.files` on every call, so nothing is
+   * lost across a restart, and persisting it would turn a self-clearing soft edge into a
+   * permanent hard one that never clears once its sibling leaves IN_FLIGHT_FOR_OVERLAP without
+   * reaching `done`/`cancelled`. Traces "held: waits on …" exactly once per distinct wait list —
+   * not once per admit call. Re-pumped from `patchRun` whenever any run reaches `done` (see
+   * below).
    */
   private dependenciesReady(run: Run): boolean {
     if (run.deps.length === 0 && run.files.length === 0) return true; // opt-in: nothing to check
@@ -673,14 +676,10 @@ export class RunSupervisor {
     // The in-memory in-flight set covers the mid-spawn window (a run admitted but still `queued`
     // in the ledger while its worktree is cut) and the cap-held pending queue.
     const inFlight = new Set<string>([...this.staffing.keys(), ...this.workers.keys(), ...this.pending.map((p) => p.runId)]);
-    const { ready, waitsOn, autoDeps } = readiness(run, all, inFlight);
+    const { ready, waitsOn } = readiness(run, all, inFlight);
     if (ready) {
       this.waitingOn.delete(run.id);
       return true;
-    }
-    if (autoDeps.length > 0) {
-      const merged = [...run.deps, ...autoDeps.filter((id) => !run.deps.includes(id))];
-      void this.patchRun(run.id, { deps: merged });
     }
     const key = waitsOn.slice().sort().join(",");
     if (this.waitingOn.get(run.id) !== key) {

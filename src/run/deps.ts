@@ -14,8 +14,18 @@
 import type { Run, RunState } from "./types.ts";
 
 /** Sibling states an in-flight file overlap is checked against. A `queued` sibling has no files
- * "in flight" yet, so it is never itself a reason to wait — only the run trying to admit is. */
-const IN_FLIGHT_FOR_OVERLAP: ReadonlySet<RunState> = new Set(["implementing", "reviewing", "publishing", "unverified"]);
+ * "in flight" yet, so it is never itself a reason to wait — only the run trying to admit is.
+ * `awaiting_input` and `parked` are included: both hold a live worktree with real committed
+ * edits on their declared files (they ship as LIVE everywhere else — see store.ts LIVE_STATES,
+ * supervisor `live()`), so a sibling admitting against those files would still race them. */
+const IN_FLIGHT_FOR_OVERLAP: ReadonlySet<RunState> = new Set([
+  "implementing",
+  "reviewing",
+  "publishing",
+  "unverified",
+  "awaiting_input",
+  "parked",
+]);
 
 /** Strip a leading `./` so `./src/x.ts` and `src/x.ts` compare equal. */
 function normalizePath(path: string): string {
@@ -63,10 +73,11 @@ function isNewer(a: Run, b: Run): boolean {
  * - An explicit dep (`run.deps`) that has not reached `state === "done"` blocks admission — a
  *   FAILED dep still blocks: the dependent waits until a human resumes or cancels it, never
  *   auto-proceeds past a dep that didn't make it. A CANCELLED dep clears (it will never finish).
- * - A sibling on the SAME repo, currently `implementing|reviewing|publishing|unverified`, whose
- *   declared `files` overlap `run.files`, also blocks — and is reported back in `autoDeps` so the
- *   caller can persist the edge (the reason a run is waiting must survive a restart). Neither
- *   side declaring `files` means no auto edge is ever considered.
+ * - A sibling on the SAME repo, currently `implementing|reviewing|publishing|unverified|
+ *   awaiting_input|parked`, whose declared `files` overlap `run.files`, also blocks — and is
+ *   reported back in `autoDeps` for tracing only; it is recomputed from `run.files` on every
+ *   call, so nothing needs to be persisted for it to survive a restart. Neither side declaring
+ *   `files` means no auto edge is ever considered.
  * - CYCLE GUARD: when two runs name each other in `deps` (a human-authored `--needs` mistake, or
  *   two auto edges that happened to point both ways), the NEWER of the two waits and the OLDER
  *   proceeds — an edge back to a run that is itself waiting on us is ignored rather than

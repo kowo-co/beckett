@@ -958,7 +958,9 @@ describe("dependency edges (overhaul B9)", () => {
     await tick();
     expect(spawnCalls.map((c) => c.itemId)).toEqual([sib.id]);
     expect(store.get(dep.id)!.state).toBe("queued");
-    expect(store.get(dep.id)!.deps).toEqual([sib.id]);
+    // Finding 22: the auto edge is recomputed from `run.files` on every admit and is never
+    // persisted into `run.deps` — the trace ("held: waits on …") is the durable explanation.
+    expect(store.get(dep.id)!.deps).toEqual([]);
   });
 
   test("it starts by itself the moment the sibling reaches done", async () => {
