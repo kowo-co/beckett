@@ -26,7 +26,7 @@
  * runner stage several GB of weights and still have a working lane afterwards.
  */
 
-import { closeSync, constants, copyFileSync, existsSync, mkdirSync, openSync, readSync, writeSync } from "node:fs";
+import { closeSync, constants, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readSync, statSync, writeSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import { BetterWright, NetworkPolicy, piImageArtifacts } from "betterwright";
@@ -51,6 +51,12 @@ const MAX_EVENTS = 100;
 const MAX_ATTACHMENT_CANDIDATES = 32;
 /** Uploads one lease may stage. Bounds the bytes copied into BetterWright's artifact dir. */
 const MAX_STAGED_ATTACHMENTS = 32;
+/** Not-yet-staged files a permitted root's own reachable media pre-stages, per lease. */
+export const MAX_ROOT_PRESTAGED = 8;
+/** Directory entries examined while walking a root for pre-staging. Bounds the I/O cost. */
+const MAX_ROOT_SCAN_ENTRIES = 200;
+/** How deep pre-staging walks under a permitted root. */
+const MAX_ROOT_SCAN_DEPTH = 2;
 /** Default concurrent-lease cap. A real browser on a real machine, not a fleet. */
 const DEFAULT_MAX_LEASES = 3;
 /** Absolute upper bound on the cap regardless of configuration. */
@@ -125,6 +131,8 @@ interface ActiveLease extends BrowserLease {
   attachmentRefusals: Map<string, string>;
   /** Uploads copied for this lease, held under MAX_STAGED_ATTACHMENTS. */
   stagedAttachments: number;
+  /** Set once this lease's permitted roots have been walked for pre-staging. */
+  rootsPrestaged: boolean;
   /** Serializes this lease's own calls so they stay strictly ordered. */
   queue: Promise<void>;
   /** Shared-profile size observed when this lease acquired, its growth baseline. */
@@ -472,6 +480,47 @@ export function createBetterWrightRuntime(
   }
 
   /**
+   * Stage the lease's own reachable media once, so a path that was never spelled as a literal —
+   * interpolated, concatenated, or assembled entirely at runtime — still resolves through the same
+   * realpath/magic-byte gate as a named file. Bounded and best-effort: an unreadable directory (a
+   * permission error, a root that vanished) is skipped rather than thrown, and the walk stops well
+   * short of anything that could make a broad root configuration expensive to scan.
+   */
+  function prestageRootAttachments(lease: ActiveLease): void {
+    if (lease.rootsPrestaged) return;
+    lease.rootsPrestaged = true;
+    let entriesExamined = 0;
+    const found: Array<{ path: string; mtimeMs: number }> = [];
+    const walk = (dir: string, depth: number): void => {
+      if (entriesExamined >= MAX_ROOT_SCAN_ENTRIES) return;
+      let dirents;
+      try {
+        dirents = readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const dirent of dirents) {
+        if (entriesExamined >= MAX_ROOT_SCAN_ENTRIES) return;
+        entriesExamined++;
+        const full = join(dir, dirent.name);
+        if (dirent.isDirectory()) {
+          if (depth < MAX_ROOT_SCAN_DEPTH) walk(full, depth + 1);
+          continue;
+        }
+        if (!dirent.isFile() || !kindForExtension(full) || lease.attachments.has(full)) continue;
+        try {
+          found.push({ path: full, mtimeMs: statSync(full).mtimeMs });
+        } catch {
+          // Vanished between readdir and stat — skip it.
+        }
+      }
+    };
+    for (const root of permittedAttachmentRoots(lease)) walk(root, 1);
+    found.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    for (const entry of found.slice(0, MAX_ROOT_PRESTAGED)) prepareAttachment(lease, entry.path);
+  }
+
+  /**
    * Add the narrow file-upload primitive model snippets receive. The public path is a lookup key
    * for a host-validated BetterWright artifact, so it cannot turn into arbitrary filesystem read.
    */
@@ -481,6 +530,10 @@ export function createBetterWrightRuntime(
     // Naming the roots ends the loop this refusal used to start: an agent that saw only
     // "outside the approved roots" asked a human to widen config that already allowed the file.
     const roots = JSON.stringify(permittedAttachmentRoots(lease).join(", "));
+    // Naming a few approved paths too turns a dead end into a one-turn recovery: an agent that
+    // misspelled a path can see what actually resolved instead of guessing again blind.
+    const knownPaths = [...new Set(lease.attachments.keys())].slice(0, 10);
+    const known = knownPaths.length > 0 ? JSON.stringify(knownPaths.join(", ")) : null;
     return `
 const attachFile = async (target, sourcePath) => {
   if (typeof sourcePath !== "string") throw new Error("attachFile needs a file path");
@@ -489,8 +542,9 @@ const attachFile = async (target, sourcePath) => {
     const refusal = ${refusals}[sourcePath];
     throw new Error(
       "attachFile refuses paths outside this run's approved attachment roots"
-      + " (" + (refusal || "the host never saw this path; write it as a literal string, not a computed value") + ")"
-      + "; approved roots: " + ${roots},
+      + " (" + (refusal || "the host never saw this path; name it as a literal string so the host can validate it") + ")"
+      + "; approved roots: " + ${roots}
+      ${known ? `+ "; approved paths: " + ${known}` : ""},
     );
   }
   const input = typeof target === "string" ? page.locator(target) : target;
@@ -511,7 +565,10 @@ const attachFile = async (target, sourcePath) => {
     // not approve still fails closed, now with the reason and the roots that actually apply.
     const wantsAttachment = code.includes("attachFile");
     if (wantsAttachment) {
+      // Literals keep priority: a file the snippet named directly is never crowded out by the
+      // pre-staging cap below.
       for (const source of candidateAttachmentPaths(code)) prepareAttachment(lease, source);
+      prestageRootAttachments(lease);
     }
     // Do not alter ordinary program source until this lease attaches something or asks to.
     const bridgedCode = lease.attachments.size > 0 || wantsAttachment
@@ -617,6 +674,7 @@ const attachFile = async (target, sourcePath) => {
         attachments: new Map(),
         attachmentRefusals: new Map(),
         stagedAttachments: 0,
+        rootsPrestaged: false,
         queue: Promise.resolve(),
         profileBytesAtAcquire: 0,
         profileBudgetError: null,

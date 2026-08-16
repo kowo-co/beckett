@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   BrowserLeaseCapExceededError,
   createBetterWrightRuntime,
+  MAX_ROOT_PRESTAGED,
   type BetterWrightClient,
 } from "./betterwright.ts";
 import type { BrowserHostSettings, BrowserLease } from "./runtime.ts";
@@ -427,6 +428,75 @@ describe("attachFile honors the configured attachment roots", () => {
     mediaAt(join(images, "avatar.png"));
     const code = await bridgeFor("return await page.title()");
     expect(code).toBe("return await page.title()");
+  });
+
+  test("an interpolated path under an approved root resolves", async () => {
+    const avatar = mediaAt(join(images, "avatar.png"));
+    const snippet = [
+      `const dir = ${JSON.stringify(images)};`,
+      "return await attachFile('input[type=file]', " + "`" + "${dir}/avatar.png" + "`" + ")",
+    ].join("\n");
+    const code = await bridgeFor(snippet);
+    expect(bridgedApprovals(code)[avatar]).toBeString();
+  });
+
+  test("a path assembled entirely at runtime resolves", async () => {
+    const avatar = mediaAt(join(images, "avatar.png"));
+    const code = await bridgeFor(
+      `const dir = ${JSON.stringify(images)};\nconst n = ['ava', 'tar'].join('');\nreturn await attachFile('input[type=file]', dir + '/' + n + '.png')`,
+    );
+    expect(bridgedApprovals(code)[avatar]).toBeString();
+  });
+
+  test("pre-staging is bounded and prefers the newest files", async () => {
+    const paths: string[] = [];
+    for (let i = 0; i < 12; i++) {
+      const path = mediaAt(join(images, `pic-${i}.png`));
+      // Force distinct, increasing mtimes so "newest" is unambiguous regardless of filesystem
+      // timestamp resolution.
+      utimesSync(path, new Date(2020, 0, 1 + i), new Date(2020, 0, 1 + i));
+      paths.push(path);
+    }
+    const code = await bridgeFor("return await attachFile('input[type=file]', '/does/not/exist.png')");
+    const approved = bridgedApprovals(code);
+    const staged = paths.filter((path) => approved[path] !== undefined);
+    expect(staged.length).toBe(MAX_ROOT_PRESTAGED);
+    expect(approved[paths[11]!]).toBeString();
+  });
+
+  test("a file outside the roots is still refused after pre-staging", async () => {
+    mediaAt(join(images, "avatar.png"));
+    const stray = mediaAt(join(outside, "stray.png"));
+    const code = await bridgeFor(`return await attachFile('input[type=file]', ${JSON.stringify(stray)})`);
+    expect(bridgedApprovals(code)[stray]).toBeUndefined();
+    expect(code).toContain("escaped the permitted roots");
+  });
+
+  test("the refusal names approved paths as well as roots", async () => {
+    const avatar = mediaAt(join(images, "avatar.png"));
+    const stray = mediaAt(join(outside, "stray.png"));
+    const code = await bridgeFor(`return await attachFile('input[type=file]', ${JSON.stringify(stray)})`);
+    expect(code).toContain("approved paths: ");
+    expect(code).toContain(avatar);
+  });
+
+  test("pre-staging happens once per lease", async () => {
+    mediaAt(join(images, "avatar.png"));
+    const fake = new FakeBetterWright();
+    const runtime = createBetterWrightRuntime(settings, quietLog, { createBrowser: () => fake });
+    try {
+      await runtime.acquire(leaseFor("upload"));
+      await runtime.evaluate("upload", "return await attachFile('input[type=file]', '/does/not/exist.png')");
+      const artifactsDir = join(settings.profileDir, "betterwright", "artifacts");
+      const firstCount = readdirSync(artifactsDir, { recursive: true } as never)
+        .filter((entry) => String(entry).includes("beckett-attach-")).length;
+      await runtime.evaluate("upload", "return await attachFile('input[type=file]', '/does/not/exist.png')");
+      const secondCount = readdirSync(artifactsDir, { recursive: true } as never)
+        .filter((entry) => String(entry).includes("beckett-attach-")).length;
+      expect(secondCount).toBe(firstCount);
+    } finally {
+      await runtime.stop();
+    }
   });
 });
 
