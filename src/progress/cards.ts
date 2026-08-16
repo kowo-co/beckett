@@ -192,6 +192,12 @@ function verdictFor(event: DispatchEvent): Verdict | null {
   }
   if (base === "preview" || base === "dependency-promotion") return null;
 
+  // `askRunQuestion` traces `implement:question` / `held` — an `awaiting_input` run waiting on a
+  // human answer, otherwise indistinguishable from routine "held" churn in the switch below.
+  if (qualifier === "question" && event.outcome === "held") {
+    return { phase: "waiting on an answer", detail: clip(event.message), alert: true, terminal: false };
+  }
+
   // A worker stage: implement/review/design/design_check/rework, or one a future extension adds.
   switch (event.outcome) {
     case "started":

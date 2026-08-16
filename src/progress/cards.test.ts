@@ -159,6 +159,14 @@ describe("reduceProgressCard", () => {
     expect(state.terminal).toBe(true);
   });
 
+  test("askRunQuestion's implement:question is marked as waiting on a human, not generic held churn", () => {
+    const state = reduceProgressCard(null, ev("implement:question", "held", "which auth flow — PKCE or client secret?"), 0)!;
+    expect(state.phase).toBe("waiting on an answer");
+    expect(state.detail).toBe("which auth flow — PKCE or client secret?");
+    expect(state.alert).toBe(true);
+    expect(state.terminal).toBe(false);
+  });
+
   test("a restart interruption is not a failure", () => {
     const state = reduceProgressCard(null, ev("implement", "interrupted", "stopped by a daemon restart"), 0)!;
     expect(state.phase).toBe("interrupted by a restart");
