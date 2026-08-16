@@ -150,6 +150,8 @@ const gitFakes: Partial<RunGitOps> = {
     return { repoRoot: opts.repoRoot, workspace: opts.workspace, branch: opts.branch };
   },
   removeWorktree: async () => {},
+  deleteBranch: async () => {},
+  remoteBranchExists: async () => false,
   fetchRemote: async () => true,
   // Default: comparison unavailable → the generic push hand-off. Tests that assert case (a)/(b)/(c)
   // advice override this per-test to return the specific branch-vs-main shape.
@@ -2722,5 +2724,174 @@ describe("the live activity blurb", () => {
     onProgress(toolCall("Edit", { file_path: "/ws/a.ts" }), { stage: "design", workerId: "wk_1" });
     await tick();
     expect(blurbs()).toHaveLength(0);
+  });
+});
+
+// ── worktree sweep (Task 4) ────────────────────────────────────────────────────────────────
+describe("RunSupervisor worktree sweep", () => {
+  function seedTerminalRun(
+    store: RunStore,
+    repos: string,
+    over: Partial<Run> & { state: Run["state"] },
+  ): { run: Run; workspace: string } {
+    mkdirSync(repos, { recursive: true });
+    const workspace = mkdtempSync(join(repos, "wt-"));
+    const run = seedRun(
+      store,
+      makeRun({
+        workspace,
+        updatedAt: "2026-08-10T00:00:00.000Z",
+        ...over,
+      }),
+    );
+    return { run, workspace };
+  }
+
+  test("the sweep removes the worktree and the branch and nulls run.workspace", async () => {
+    const removed: { repoRoot: string; workspace: string }[] = [];
+    const branchesDeleted: { repoRoot: string; branch: string }[] = [];
+    const origRemove = gitFakes.removeWorktree!;
+    const origDelete = gitFakes.deleteBranch!;
+    const origPushed = gitFakes.remoteBranchExists!;
+    // Must be set BEFORE `newSupervisor()` — the constructor spreads `gitFakes` into `this.git`
+    // by value, so a swap after construction would silently miss (matches the createWorktree
+    // fixtures above).
+    gitFakes.removeWorktree = async (repoRoot, ws) => {
+      removed.push({ repoRoot, workspace: ws });
+      rmSync(ws, { recursive: true, force: true }); // a real remove — the sweep checks existsSync after
+    };
+    gitFakes.deleteBranch = async (repoRoot, branch) => {
+      branchesDeleted.push({ repoRoot, branch });
+    };
+    // Branch deletion is gated on durability — for a `done` run to have its branch removed too,
+    // the branch must be provably on origin.
+    gitFakes.remoteBranchExists = async () => true;
+    try {
+      const { supervisor, store, repos } = newSupervisor();
+      const { run, workspace } = seedTerminalRun(store, repos, { state: "done" });
+      // Ninety-six hours old — well past the 48h `done` TTL.
+      const nowMs = Date.parse("2026-08-10T00:00:00.000Z") + 96 * 60 * 60_000;
+      const swept: string[] = await (supervisor as any).sweepWorktrees(nowMs);
+      expect(swept).toEqual([run.id]);
+      expect(removed).toHaveLength(1);
+      expect(removed[0]!.workspace).toBe(workspace);
+      expect(branchesDeleted).toHaveLength(1);
+      expect(branchesDeleted[0]!.branch).toBe(run.branch);
+      expect(store.get(run.id)!.workspace).toBeNull();
+    } finally {
+      gitFakes.removeWorktree = origRemove;
+      gitFakes.deleteBranch = origDelete;
+      gitFakes.remoteBranchExists = origPushed;
+    }
+  });
+
+  test("a done run whose branch is not on origin loses its worktree but keeps its branch", async () => {
+    const removed: string[] = [];
+    const branchesDeleted: string[] = [];
+    const origRemove = gitFakes.removeWorktree!;
+    const origDelete = gitFakes.deleteBranch!;
+    const origPushed = gitFakes.remoteBranchExists!;
+    gitFakes.removeWorktree = async (_repoRoot, ws) => {
+      removed.push(ws);
+      rmSync(ws, { recursive: true, force: true }); // a real remove — the sweep checks existsSync after
+    };
+    gitFakes.deleteBranch = async (_repoRoot, branch) => {
+      branchesDeleted.push(branch);
+    };
+    gitFakes.remoteBranchExists = async () => false;
+    try {
+      const { supervisor, store, repos } = newSupervisor();
+      const { run, workspace } = seedTerminalRun(store, repos, { state: "done" });
+      const nowMs = Date.parse("2026-08-10T00:00:00.000Z") + 96 * 60 * 60_000; // past the 48h TTL
+      const swept: string[] = await (supervisor as any).sweepWorktrees(nowMs);
+      expect(swept).toEqual([run.id]);
+      expect(removed).toEqual([workspace]);
+      // The worktree is gone (harmless — objects live in repoRoot) but the local branch is the
+      // ONLY ref to this run's commits when it was never pushed, so it must survive.
+      expect(branchesDeleted).toHaveLength(0);
+      expect(store.get(run.id)!.workspace).toBeNull();
+    } finally {
+      gitFakes.removeWorktree = origRemove;
+      gitFakes.deleteBranch = origDelete;
+      gitFakes.remoteBranchExists = origPushed;
+    }
+  });
+
+  test("a removeWorktree failure is logged and never fails the staffing pass", async () => {
+    const origRemove = gitFakes.removeWorktree!;
+    gitFakes.removeWorktree = async () => {
+      throw new Error("worktree remove exploded");
+    };
+    try {
+      const { supervisor, store, repos } = newSupervisor();
+      const { run, workspace } = seedTerminalRun(store, repos, { state: "done" });
+      const nowMs = Date.parse("2026-08-10T00:00:00.000Z") + 96 * 60 * 60_000;
+      // Neither the private sweep nor the public staffing pass may throw.
+      await expect((supervisor as any).sweepWorktrees(nowMs)).resolves.toBeDefined();
+      // The removeWorktree fake above throws WITHOUT deleting the directory, so it is still on
+      // disk — the ledger must keep pointing at it so the next pass can retry, instead of
+      // orphaning it invisibly.
+      expect(store.get(run.id)!.workspace).toBe(workspace);
+      await expect(supervisor.reconcileStaffing(nowMs)).resolves.toBeDefined();
+    } finally {
+      gitFakes.removeWorktree = origRemove;
+    }
+  });
+
+  test("a parked run's workspace is never touched by the sweep", async () => {
+    const { supervisor, store, repos } = newSupervisor();
+    const { run, workspace } = seedTerminalRun(store, repos, {
+      state: "parked",
+      blocker: {
+        class: "transient",
+        actor: "human",
+        reversible: true,
+        remedy: "`beckett task resume …`",
+        detail: "test park",
+        defaultAnswer: null,
+        stage: "review",
+        at: "2026-08-10T00:00:00.000Z",
+      },
+      updatedAt: "2020-01-01T00:00:00.000Z", // absurdly old — TTL alone would sweep it
+    });
+    const removed: string[] = [];
+    const origRemove = gitFakes.removeWorktree!;
+    gitFakes.removeWorktree = async (_repoRoot, ws) => {
+      removed.push(ws);
+    };
+    try {
+      const nowMs = Date.parse("2026-08-10T00:00:00.000Z") + 365 * 24 * 60 * 60_000;
+      const swept: string[] = await (supervisor as any).sweepWorktrees(nowMs);
+      expect(swept).not.toContain(run.id);
+      expect(removed).not.toContain(workspace);
+      expect(store.get(run.id)!.workspace).toBe(workspace);
+      expect(existsSync(workspace)).toBe(true);
+    } finally {
+      gitFakes.removeWorktree = origRemove;
+    }
+  });
+
+  test("a done run younger than 48h is kept by the sweep", async () => {
+    const { supervisor, store, repos } = newSupervisor();
+    const { run, workspace } = seedTerminalRun(store, repos, { state: "done" });
+    const nowMs = Date.parse("2026-08-10T00:00:00.000Z") + 1 * 60 * 60_000; // 1h old
+    const swept: string[] = await (supervisor as any).sweepWorktrees(nowMs);
+    expect(swept).not.toContain(run.id);
+    expect(store.get(run.id)!.workspace).toBe(workspace);
+  });
+
+  test("a failed run whose branch is not on origin is kept even past 7 days", async () => {
+    const { supervisor, store, repos } = newSupervisor();
+    const { run, workspace } = seedTerminalRun(store, repos, { state: "failed" });
+    const origPushed = gitFakes.remoteBranchExists!;
+    gitFakes.remoteBranchExists = async () => false;
+    try {
+      const nowMs = Date.parse("2026-08-10T00:00:00.000Z") + 30 * 24 * 60 * 60_000; // 30d old
+      const swept: string[] = await (supervisor as any).sweepWorktrees(nowMs);
+      expect(swept).not.toContain(run.id);
+      expect(store.get(run.id)!.workspace).toBe(workspace);
+    } finally {
+      gitFakes.remoteBranchExists = origPushed;
+    }
   });
 });
