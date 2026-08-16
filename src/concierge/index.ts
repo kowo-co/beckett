@@ -8610,8 +8610,7 @@ function frameAmbientCandidate(
       `reply targets first. If the latest unresolved turn still addresses you and invites a response,\n` +
       `answer, riff back, or close it out warmly with ONE short message in your voice.\n` +
       `Use delivery decision "pass" if people pivoted to each other, a human already answered, the moment\n` +
-      `is settled, or the latest line is a natural closer. Never reply merely because you spoke earlier.\n` +
-      `Do not deploy any work yet. An offer is a question, not a commitment.`
+      `is settled, or the latest line is a natural closer. Never reply merely because you spoke earlier.`
     );
   }
   return (
@@ -8627,8 +8626,7 @@ function frameAmbientCandidate(
     `If on reflection this turn belongs to someone else (triage can misread the addressee), run\n` +
     `\`beckett discord decline --channel ${channelId}\` BEFORE you write anything — that quietly\n` +
     `drops the turn, posting nothing. Prefer it over posting a reply into a conversation that\n` +
-    `wasn't yours.\n` +
-    `Do not deploy any work yet. An offer is a question, not a commitment.`
+    `wasn't yours.`
   );
 }
 
