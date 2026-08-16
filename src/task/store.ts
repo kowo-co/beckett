@@ -255,7 +255,8 @@ export function branchStatusForRun(state: RunState): TaskBranchStatus {
     case "done": return "done";
     case "cancelled": return "cancelled";
     case "failed":
-    case "parked": return "blocked";
+    case "parked":
+    case "awaiting_input": return "blocked";
   }
 }
 

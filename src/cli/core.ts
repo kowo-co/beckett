@@ -1021,24 +1021,35 @@ export async function runTask(argv: string[]): Promise<void> {
           `branch ${run.branch} still holds everything this run committed.`,
       );
     }
+    // (B8) `awaiting_input` gets the same "steering outranks waiting" treatment: there is no live
+    // worker to nudge, so routing this to `run.steer` would silently buffer the note and let the
+    // question ride out its full `runs.question_wait_s` timer even though a human just answered it.
+    // `run.resume`'s `answer` path is the one exit that actually clears the question and re-spawns
+    // now.
     if (run.state === "parked") {
       await bus("run.resume", { runId: run.id, note });
+    } else if (run.state === "awaiting_input") {
+      await bus("run.resume", { runId: run.id, answer: note });
     } else {
       await bus("run.steer", { runId: run.id, note });
     }
   }
 
-  // v7 resume: clear a `parked` run's blocker and re-staff the stage it was held from. Like
-  // `steer`/`cancel` this goes through `bus()`, not `notifyBus()` — a resume the daemon never
-  // received must EXIT NON-ZERO, because "resumed it" reported off the back of this call has to be
-  // true. `--note` is optional steering delivered to the re-spawned worker's first turn.
+  // v7 resume: clear a `parked` run's blocker and re-staff the stage it was held from, OR (B8)
+  // answer an `awaiting_input` run's open question. Like `steer`/`cancel` this goes through
+  // `bus()`, not `notifyBus()` — a resume the daemon never received must EXIT NON-ZERO, because
+  // "resumed it" reported off the back of this call has to be true. `--note` is optional steering
+  // delivered to a parked run's re-spawned worker; `--answer` is the ONLY way out of
+  // `awaiting_input` short of its own timeout, and the two are mutually exclusive by construction
+  // (`RunSupervisor.resume` routes on `answer`'s presence before it ever looks at `note`).
   if (sub === "resume") {
     const ref = _[0];
-    if (!ref) fail('usage: beckett task resume <run-id|slug> [--note "<text>"]');
+    if (!ref) fail('usage: beckett task resume <run-id|slug> [--note "<text>"] [--answer "<text>"]');
     const note = typeof flags.note === "string" ? flags.note.trim() : undefined;
+    const answer = typeof flags.answer === "string" ? flags.answer : undefined;
     const run = ref.startsWith("run-") ? runStore().get(ref) : runStore().bySlug(ref);
     if (!run) fail(`no such run: ${ref}`);
-    await bus("run.resume", { runId: run.id, ...(note ? { note } : {}) });
+    await bus("run.resume", { runId: run.id, ...(note ? { note } : {}), ...(answer !== undefined ? { answer } : {}) });
   }
 
   // v7 cancellation: the ONE lever that stops work already running. Like `steer` it goes through

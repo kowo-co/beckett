@@ -33,6 +33,7 @@ function makeRun(over: Partial<Run> = {}): Run {
     prUrl: null,
     error: null,
     blocker: null,
+    question: null,
     published: null,
     ...over,
   };

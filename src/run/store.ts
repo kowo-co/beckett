@@ -28,14 +28,26 @@ const RUN_STATES = [
   "implementing",
   "reviewing",
   "publishing",
+  "awaiting_input",
   "done",
   "failed",
   "cancelled",
   "parked",
 ] as const;
 
-/** Non-terminal states — a run in one of these still has (or will have) a live worker. */
-const LIVE_STATES: ReadonlySet<RunState> = new Set(["queued", "implementing", "reviewing", "publishing", "parked"]);
+/**
+ * Non-terminal states — a run in one of these still has (or will have) a live worker.
+ * `awaiting_input` (B8) belongs here: the run is live, just waiting on a person's answer instead
+ * of a worker's turn — `beckett status` and the dashboard must keep showing it as in-flight.
+ */
+const LIVE_STATES: ReadonlySet<RunState> = new Set([
+  "queued",
+  "implementing",
+  "reviewing",
+  "publishing",
+  "awaiting_input",
+  "parked",
+]);
 
 // Deliberately NOT `.strict()` (matches `../task/store.ts`'s idiom): these schemas run in
 // strip mode, tolerating and dropping unknown fields rather than failing to parse. A ledger
@@ -122,6 +134,18 @@ const RunSchema = z.object({
   // Nullable + defaulted so an OLD persisted row (minted before blockers existed) still parses —
   // and so a run with no blocker (every non-parked state) round-trips without one.
   blocker: BlockerSchema.nullable().default(null),
+  // Nullable + defaulted so an OLD persisted row (minted before questions existed) still parses —
+  // and so a run with no open question (every non-`awaiting_input` state) round-trips without one.
+  question: z
+    .object({
+      stage: z.enum(["implement", "review"]),
+      text: z.string(),
+      defaultAnswer: z.string().nullable(),
+      askedAt: z.string(),
+      expiresAt: z.string(),
+    })
+    .nullable()
+    .default(null),
 });
 
 const LedgerSchema = z.object({
@@ -214,6 +238,7 @@ export class RunStore {
         error: null,
         published: null,
         blocker: null,
+        question: null,
       };
       ledger.runs.push(run);
       return structuredClone(run);

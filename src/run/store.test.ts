@@ -256,6 +256,32 @@ describe("durability", () => {
     expect(reloaded!.blocker).toBeNull();
     expect(reloaded!.state).toBe("parked");
   });
+
+  // B8 migration safety: a row written before `question` existed must still load, `question: null`.
+  test("a run row written before questions existed loads with question null", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "beckett-runs-"));
+    dirs.push(dir);
+    const path = join(dir, "runs.json");
+    const store = new RunStore(path, { now: CLOCK });
+    const run = await store.create({ title: "Pre-question", prompt: "…" });
+
+    const onDisk = JSON.parse(readFileSync(path, "utf8"));
+    delete onDisk.runs[0].question;
+    writeFileSync(path, JSON.stringify(onDisk), "utf8");
+
+    const reopened = new RunStore(path);
+    const reloaded = reopened.get(run.id);
+    expect(reloaded).not.toBeNull();
+    expect(reloaded!.question).toBeNull();
+  });
+
+  // B8: `awaiting_input` is LIVE — a worker asked a question, but the run has not left the board.
+  test("awaiting_input is a live state", async () => {
+    const { store } = makeStore(CLOCK);
+    const run = await store.create({ title: "Add oauth", prompt: "…" });
+    await store.update(run.id, { state: "awaiting_input" });
+    expect(store.live().map((r) => r.id)).toContain(run.id);
+  });
 });
 
 describe("backfillCourierPrUrl", () => {

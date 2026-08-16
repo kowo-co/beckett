@@ -26,6 +26,12 @@
  * to it would be a message into the void, and the concierge would sit out the whole ~90s doctrine
  * window before falling back. So `addressable` is reported separately, `sessionName` is null when
  * it is false, and the `hint` says plainly not to message anyone.
+ *
+ * `pendingQuestion` (B8) is a SEPARATE field from `question` on purpose — `question` means "what
+ * to ask the live worker" (concierge → worker); `pendingQuestion` means "what the worker is
+ * asking a human" (worker → concierge), non-null only when `state === "awaiting_input"`.
+ * Overloading `question` for both directions would make every caller's read of this output
+ * ambiguous, so the two never share a field.
  */
 import type { Run, RunState } from "../run/types.ts";
 import { fail, out, parse } from "./io.ts";
@@ -103,6 +109,12 @@ export interface TaskAskOutput {
   sessionName: string | null;
   /** The question to put to the worker (`--question`, else {@link DEFAULT_ASK_QUESTION}). */
   question: string;
+  /**
+   * The worker's OWN open question (B8) — non-null iff `state === "awaiting_input"`. Never the
+   * same field as `question` above (see the module header): this is worker → human, that is
+   * human → worker.
+   */
+  pendingQuestion: { text: string; defaultAnswer: string | null; expiresAt: string } | null;
   /** Origin channel — the concierge relays the answer back here with `beckett discord reply`. */
   channelId: string | null;
   branch: string;
@@ -167,6 +179,16 @@ function hintFor(
   sessionName: string | null,
   question: string,
 ): string {
+  if (run.state === "awaiting_input" && run.question) {
+    const q = run.question;
+    return (
+      `This run is waiting on an answer to: "${q.text}" — post it to the channel and then run ` +
+      `beckett task resume ${run.id} --answer "…".` +
+      (q.defaultAnswer
+        ? ` It defaults to "${q.defaultAnswer}" at ${q.expiresAt} if nobody replies.`
+        : ` There is no default — it parks for a human at ${q.expiresAt} if nobody replies.`)
+    );
+  }
   if (addressable) {
     return (
       `SendMessage to "${sessionName}": "${question}"` +
@@ -210,6 +232,9 @@ export function askRun(argv: string[], deps: TaskAskDeps): TaskAskOutput {
     addressable,
     sessionName,
     question,
+    pendingQuestion: run.question
+      ? { text: run.question.text, defaultAnswer: run.question.defaultAnswer, expiresAt: run.question.expiresAt }
+      : null,
     channelId: run.channelId,
     branch: run.branch,
     workspace: run.workspace,

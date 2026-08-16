@@ -251,6 +251,33 @@ test("task resume pings run.resume with the run id", async () => {
   }
 });
 
+// ── awaiting_input (overhaul B8) ────────────────────────────────────────────────────────────
+
+test("task resume --answer pings run.resume with the answer", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-task-resume-answer-"));
+  dirs.push(dir);
+  const store = new RunStore(join(dir, "runs.json"));
+  const run = await store.create({ title: "Add oauth", prompt: "…" });
+  await store.update(run.id, { state: "awaiting_input" });
+
+  const requests: BusRequest[] = [];
+  const stop = serveBus(join(dir, "control.sock"), (req) => {
+    requests.push(req);
+    return { ok: true, data: { runId: req.args.runId, resumed: true } };
+  });
+  try {
+    const result = (await cli(dir, ["task", "resume", run.id, "--answer", "use google oauth"])) as any;
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.cmd).toBe("run.resume");
+    expect(requests[0]!.args.runId).toBe(run.id);
+    expect(requests[0]!.args.answer).toBe("use google oauth");
+    expect(requests[0]!.args.note).toBeUndefined();
+    expect(result).toEqual({ runId: run.id, resumed: true });
+  } finally {
+    stop();
+  }
+});
+
 test("task steer on a parked run resumes it instead of failing", async () => {
   const dir = mkdtempSync(join(tmpdir(), "beckett-task-steer-parked-"));
   dirs.push(dir);
@@ -268,6 +295,29 @@ test("task steer on a parked run resumes it instead of failing", async () => {
     expect(requests).toHaveLength(1);
     expect(requests[0]!.cmd).toBe("run.resume");
     expect(requests[0]!.args.note).toBe("get past the credential");
+  } finally {
+    stop();
+  }
+});
+
+test("task steer on an awaiting_input run answers the question", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-task-steer-awaiting-"));
+  dirs.push(dir);
+  const store = new RunStore(join(dir, "runs.json"));
+  const run = await store.create({ title: "Add oauth", prompt: "…" });
+  await store.update(run.id, { state: "awaiting_input" });
+
+  const requests: BusRequest[] = [];
+  const stop = serveBus(join(dir, "control.sock"), (req) => {
+    requests.push(req);
+    return { ok: true, data: { runId: req.args.runId, resumed: true } };
+  });
+  try {
+    await cli(dir, ["task", "steer", run.id, "use google oauth"]);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.cmd).toBe("run.resume");
+    expect(requests[0]!.args.answer).toBe("use google oauth");
+    expect(requests[0]!.args.note).toBeUndefined();
   } finally {
     stop();
   }

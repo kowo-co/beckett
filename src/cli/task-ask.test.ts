@@ -45,6 +45,7 @@ function makeRun(over: Partial<Run> = {}): Run {
     prUrl: null,
     error: null,
     blocker: null,
+    question: null,
     published: null,
     ...over,
   };
@@ -146,6 +147,37 @@ test("states with no worker session report live:false and no address to message"
     expect(out.journalTail).toHaveLength(2);
     expect(out.hint).toContain("do NOT message");
   }
+});
+
+test("an awaiting_input run reports its pendingQuestion and the resume command", () => {
+  const run = makeRun({
+    state: "awaiting_input",
+    question: {
+      stage: "implement",
+      text: "Which OAuth provider should this integrate with?",
+      defaultAnswer: "google",
+      askedAt: "2026-08-10T12:00:00.000Z",
+      expiresAt: "2026-08-10T12:30:00.000Z",
+    },
+  });
+  const out = askRun(["oauth-middleware"], fakeDeps([run]));
+  expect(out.live).toBe(false);
+  expect(out.pendingQuestion).toEqual({
+    text: "Which OAuth provider should this integrate with?",
+    defaultAnswer: "google",
+    expiresAt: "2026-08-10T12:30:00.000Z",
+  });
+  expect(out.hint).toContain("Which OAuth provider should this integrate with?");
+  expect(out.hint).toContain(`beckett task resume ${run.id} --answer`);
+  expect(out.hint).toContain("google");
+});
+
+test("the worker-directed question field is unchanged for a live run", () => {
+  // `question` (--question, defaulting to the doctrine prompt) means "what to ask the worker" —
+  // it must stay exactly what it always was, never conflated with `pendingQuestion` (B8).
+  const out = askRun(["oauth-middleware", "--question", "how's it going?"], fakeDeps([makeRun()]));
+  expect(out.question).toBe("how's it going?");
+  expect(out.pendingQuestion).toBeNull();
 });
 
 test("a terminal run still carries the outcome fields the concierge answers from", () => {

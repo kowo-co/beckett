@@ -451,14 +451,22 @@ async function boot(): Promise<BootedSystem> {
       },
       {
         name: "run.resume",
-        summary: "clear a parked run's blocker and re-staff the stage it was held from",
+        summary:
+          "clear a parked run's blocker and re-staff the stage it was held from, or answer an awaiting_input run's question",
         handle: async (req) => {
           const runId = typeof req.args.runId === "string" ? req.args.runId.trim() : "";
           if (!runId) return { ok: false, error: "run.resume needs a runId" };
           const note = typeof req.args.note === "string" && req.args.note.trim() ? req.args.note.trim() : undefined;
-          const outcome = await runSupervisor.resume(runId, { note });
+          const answer = typeof req.args.answer === "string" ? req.args.answer : undefined;
+          const outcome = await runSupervisor.resume(runId, { note, answer });
           if (outcome === "unknown") return { ok: false, error: `no such run: ${runId}` };
           if (outcome === "not-parked") return { ok: false, error: `run ${runId} is not parked — nothing to resume` };
+          if (outcome === "not-awaiting") {
+            return {
+              ok: false,
+              error: `run ${runId} is not awaiting_input — nothing to answer (use --note instead of --answer)`,
+            };
+          }
           if (outcome === "publish-blocked") {
             return {
               ok: false,
