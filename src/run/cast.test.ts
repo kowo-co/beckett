@@ -117,6 +117,16 @@ describe("applySonnetFirst (issue #249 — the enforced default implement cast)"
     const explicit = { harness: "pi" as const, effort: "medium" as const };
     expect(applySonnetFirst(explicit)).toEqual({ spec: explicit });
   });
+
+  // Task 2 (overhaul B-P16): `task-deploy.ts#resolveCast` now strips any `reason` an opus
+  // implement cast arrives with unless a human supplied `--cast-quote`, so a reason-less opus
+  // cast reaching this gate is the NORMAL path, not a rare raw-API edge case — pin the
+  // end-to-end contract the CLI now relies on.
+  test("a reason-stripped opus cast is what applySonnetFirst now normally sees", () => {
+    const result = applySonnetFirst({ harness: "claude", model: "claude-opus-5", effort: "high" });
+    expect(result.spec).toEqual({ harness: "claude", model: "claude-sonnet-5", effort: "high" });
+    expect(result.downgradeNote).toBeTruthy();
+  });
 });
 
 describe("project slug safety", () => {

@@ -178,34 +178,76 @@ test("parseTaskDeployArgs: an invalid effort in --cast is rejected, not silently
   ).toThrow(TaskDeployUsageError);
 });
 
-// Sonnet-first (issue #249): `resolveCast` is the ONE call that mints a run's `cast`
-// (`task-deploy.ts`'s module doc comment), so a human-typed `--cast` naming opus IS "the
-// requester states otherwise" (issue #249 bullet a) — it must not silently downgrade at
-// `cast.ts#applySonnetFirst` for lack of a `reason` field nothing in the codebase has ever had a
-// way to type. Reviewed evidence: PR #252 finding 1.
-test("parseTaskDeployArgs: an explicit --cast naming opus with no reason gets one auto-stamped", () => {
+// Sonnet-first (issue #249) provenance (Task 2, overhaul B-P16): `resolveCast` is the ONE call
+// that mints a run's `cast` (`task-deploy.ts`'s module doc comment). A `--cast` reaching the CLI
+// no longer proves a human named it — only a `--cast-quote` does. Reviewed evidence: PR #252
+// finding 1.
+test("parseTaskDeployArgs: an explicit --cast naming opus with NO --cast-quote loses any reason it arrived with", () => {
+  const input = parseTaskDeployArgs([
+    "--prompt", "x",
+    "--cast", JSON.stringify({ implement: { harness: "claude", model: "claude-opus-5", reason: "preset says so" } }),
+  ]);
+  expect(input.cast?.implement?.model).toBe("claude-opus-5");
+  expect(input.cast?.implement?.reason).toBeUndefined();
+});
+
+test("parseTaskDeployArgs: an explicit --cast naming opus with a --cast-quote is stamped with the human's words", () => {
   const input = parseTaskDeployArgs([
     "--prompt", "x",
     "--cast", JSON.stringify({ implement: { harness: "claude", model: "claude-opus-5" } }),
+    "--cast-quote", "use opus for this one",
   ]);
-  expect(input.cast?.implement?.model).toBe("claude-opus-5");
-  expect(input.cast?.implement?.reason?.trim()).toBeTruthy();
+  expect(input.cast?.implement?.reason).toBe('human cast directive: "use opus for this one"');
 });
 
-test("parseTaskDeployArgs: an explicit --cast naming opus WITH a reason keeps it verbatim", () => {
+test("parseTaskDeployArgs: a --cast-quote never overwrites a reason the cast already carries", () => {
   const input = parseTaskDeployArgs([
     "--prompt", "x",
     "--cast", JSON.stringify({ implement: { harness: "claude", model: "claude-opus-5", reason: "gnarly debugging" } }),
+    "--cast-quote", "use opus for this one",
   ]);
   expect(input.cast?.implement?.reason).toBe("gnarly debugging");
 });
 
-test("parseTaskDeployArgs: a non-opus --cast is untouched (no reason stamped)", () => {
+test("parseTaskDeployArgs: a --cast-quote on a NON-opus cast changes nothing", () => {
   const input = parseTaskDeployArgs([
     "--prompt", "x",
     "--cast", JSON.stringify({ implement: { harness: "claude", model: "claude-sonnet-5" } }),
+    "--cast-quote", "use sonnet",
   ]);
   expect(input.cast?.implement?.reason).toBeUndefined();
+});
+
+test("parseTaskDeployArgs: a --cast naming opus for review is untouched by the quote rules", () => {
+  const withoutQuote = parseTaskDeployArgs([
+    "--prompt", "x",
+    "--cast", JSON.stringify({ review: { harness: "claude", model: "claude-opus-5", reason: "review deserves it" } }),
+  ]);
+  expect(withoutQuote.cast?.review?.reason).toBe("review deserves it");
+
+  const withQuote = parseTaskDeployArgs([
+    "--prompt", "x",
+    "--cast", JSON.stringify({ review: { harness: "claude", model: "claude-opus-5", reason: "review deserves it" } }),
+    "--cast-quote", "some human words",
+  ]);
+  expect(withQuote.cast?.review?.reason).toBe("review deserves it");
+});
+
+test("parseTaskDeployArgs: --cast-quote longer than 200 chars is truncated, and an empty --cast-quote is treated as absent", () => {
+  const long = "x".repeat(250);
+  const truncated = parseTaskDeployArgs([
+    "--prompt", "x",
+    "--cast", JSON.stringify({ implement: { harness: "claude", model: "claude-opus-5" } }),
+    "--cast-quote", long,
+  ]);
+  expect(truncated.cast?.implement?.reason).toBe(`human cast directive: "${"x".repeat(200)}"`);
+
+  const empty = parseTaskDeployArgs([
+    "--prompt", "x",
+    "--cast", JSON.stringify({ implement: { harness: "claude", model: "claude-opus-5" } }),
+    "--cast-quote", "",
+  ]);
+  expect(empty.cast?.implement?.reason).toBeUndefined();
 });
 
 // ── dry run ────────────────────────────────────────────────────────────────────────────────

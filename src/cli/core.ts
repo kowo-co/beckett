@@ -882,7 +882,7 @@ export async function runTask(argv: string[]): Promise<void> {
     const requestedRef = _[0] ?? (flags.branch ? String(flags.branch) : "");
     if (!requestedRef) {
       fail(
-        'usage: beckett task start <#N|#N.x> [--body <b>|--body-stdin] [--project <slug>] [--preset <name>] [--cast <json>] [--criteria "a;b"] [--channel <id>] [--ultracode] [--ping <target>]...',
+        'usage: beckett task start <#N|#N.x> [--body <b>|--body-stdin] [--project <slug>] [--preset <name>] [--cast <json>] [--cast-quote <text>] [--criteria "a;b"] [--channel <id>] [--ultracode] [--ping <target>]...',
       );
     }
     // `--ping` (issue #10, repeatable): a branch-level override of the task's default pings.
@@ -926,6 +926,9 @@ export async function runTask(argv: string[]): Promise<void> {
         ...(channel ? ["--channel", channel] : []),
         ...(project ? ["--repo", project] : []),
         ...(Object.keys(casting).length > 0 ? ["--cast", JSON.stringify(casting)] : []),
+        ...(typeof flags["cast-quote"] === "string" && flags["cast-quote"].trim()
+          ? ["--cast-quote", flags["cast-quote"]]
+          : []),
         ...(flags.ultracode ? ["--ultracode"] : []),
       ],
       {

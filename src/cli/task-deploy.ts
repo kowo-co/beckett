@@ -31,7 +31,10 @@ const TITLE_WORD_COUNT = 8;
 
 export const TASK_DEPLOY_USAGE =
   'usage: beckett task deploy --prompt <text>|--prompt-file <path> [--title <t>] [--channel <id>] ' +
-  '[--requester <id>] [--ultracode] [--cast <json>] [--repo <slug>] [--task <#N.x>] [--dry]';
+  '[--requester <id>] [--ultracode] [--cast <json>] [--cast-quote <text>] [--repo <slug>] [--task <#N.x>] [--dry]';
+
+/** `--cast-quote` is capped this long before it lands in `run.cast.implement.reason` — a directive, not a transcript. */
+const CAST_QUOTE_MAX_LEN = 200;
 
 /** A usage problem, raised so {@link runTaskDeploy} owns the single `fail()` (helpers stay testable). */
 export class TaskDeployUsageError extends Error {}
@@ -81,6 +84,8 @@ interface TaskDeployInput {
   repo: string | null;
   taskRef: string | null;
   dry: boolean;
+  /** Verbatim words a HUMAN used to name a model/preset this turn (`--cast-quote`). */
+  castQuote: string | null;
 }
 
 /** kebab-case a title into a run slug: lowercase, `[a-z0-9-]` only, ≤40 chars, no dangling dash. */
@@ -111,15 +116,18 @@ function defaultTitle(prompt: string): string {
  * returns per-path zod shape errors — instead of routing through the tolerant reader first.
  *
  * Sonnet-first (issue #249): this is the ONE call that mints a run's `cast` (see the module
- * doc comment), so a `--cast` that reaches here — whether typed directly at `run deploy`/`task
- * deploy`, or forwarded by `task start` after it already resolved `--preset`/`--cast` together
- * (`../cli/core.ts#castingFromFlags`) — IS "the requester states otherwise" (issue #249 bullet
- * a): a deliberate, named choice by whoever deployed THIS run, not an install's silent default.
- * An implement stage naming opus with no `reason` gets one auto-stamped here, so `cast.ts`'s
- * `applySonnetFirst` (which still downgrades a reason-less opus cast — the doctrine's actual
- * enforcement point, run at spawn time) keeps it instead of silently downgrading a directive
- * nothing in the codebase has ever had a way to type a `reason` onto. */
-function resolveCast(raw: string | boolean | undefined): Casting | null {
+ * doc comment). A `--cast` reaching the CLI — whether typed directly at `run deploy`/`task
+ * deploy`, forwarded by `task start` after it resolved `--preset`/`--cast` together
+ * (`../cli/core.ts#castingFromFlags`), or carried on a preset file nobody typed this session —
+ * is NOT by itself "the requester states otherwise" (issue #249 bullet a); it only proves a cast
+ * reached the CLI, not that a human named it. So an implement stage naming opus keeps its
+ * `reason` ONLY when a `--cast-quote` accompanies it: with a quote, the reason becomes `human
+ * cast directive: "<quote>"` (or is left verbatim if the cast already carried one); without a
+ * quote, any `reason` the cast arrived with is stripped. `cast.ts`'s `applySonnetFirst` — the
+ * doctrine's actual enforcement point, run at spawn time — then downgrades any reason-less opus
+ * cast to `claude-sonnet-5`, which is now the NORMAL path for an unaccompanied cast, not a rare
+ * raw-API edge case. */
+function resolveCast(raw: string | boolean | undefined, castQuote: string | null): Casting | null {
   if (raw === undefined) return null;
   let parsed: unknown;
   try {
@@ -141,13 +149,26 @@ function resolveCast(raw: string | boolean | undefined): Casting | null {
   }
   const casting = parsed as Casting;
   const implement = casting.implement;
-  if (implement && isOpusModel(implement.model) && !implement.reason?.trim()) {
-    casting.implement = {
-      ...implement,
-      reason: "explicit --cast/--preset directive at deploy time (issue #249 bullet a)",
-    };
+  if (implement && isOpusModel(implement.model)) {
+    if (castQuote) {
+      casting.implement = {
+        ...implement,
+        reason: implement.reason?.trim() || `human cast directive: "${castQuote}"`,
+      };
+    } else {
+      const { reason: _drop, ...rest } = implement;
+      casting.implement = rest;
+    }
   }
   return Object.keys(casting).length > 0 ? casting : null;
+}
+
+/** Trim, cap at {@link CAST_QUOTE_MAX_LEN} chars, empty string → null. */
+function resolveCastQuote(raw: string | boolean | undefined): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  return trimmed.slice(0, CAST_QUOTE_MAX_LEN);
 }
 
 function resolvePrompt(flags: Record<string, string | boolean>): string {
@@ -172,6 +193,7 @@ export function parseTaskDeployArgs(argv: string[]): TaskDeployInput {
   const title = typeof flags.title === "string" && flags.title.trim() ? flags.title.trim() : defaultTitle(prompt);
   if (!title) usage("could not derive a title from the prompt — pass --title explicitly");
   const taskRefRaw = flags.task !== undefined ? String(flags.task).trim() : "";
+  const castQuote = resolveCastQuote(flags["cast-quote"]);
   return {
     prompt,
     title,
@@ -179,10 +201,11 @@ export function parseTaskDeployArgs(argv: string[]): TaskDeployInput {
     channelId: flags.channel !== undefined ? String(flags.channel) : null,
     requesterId: flags.requester !== undefined ? String(flags.requester) : null,
     ultracode: Boolean(flags.ultracode),
-    cast: resolveCast(flags.cast),
+    cast: resolveCast(flags.cast, castQuote),
     repo: flags.repo !== undefined ? String(flags.repo) : null,
     taskRef: taskRefRaw ? (taskRefRaw.startsWith("#") ? taskRefRaw : `#${taskRefRaw}`) : null,
     dry: Boolean(flags.dry),
+    castQuote,
   };
 }
 

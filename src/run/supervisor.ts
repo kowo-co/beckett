@@ -40,7 +40,7 @@ import { dirname, join } from "node:path";
 
 import type { Config, Harness, Logger, WorkerEvent } from "../types.ts";
 import type { HarnessSpec } from "./cast.ts";
-import { applySonnetFirst, DEFAULT_IMPLEMENT_MODEL } from "./cast.ts";
+import { applySonnetFirst, DEFAULT_IMPLEMENT_MODEL, isOpusModel } from "./cast.ts";
 import type { WorkItem } from "./work-item.ts";
 import type { ProgressSink } from "../progress/journal.ts";
 import { formatEvent } from "../progress/journal.ts";
@@ -671,6 +671,10 @@ export class RunSupervisor {
         // reading the original opus request would make the ledger lie about what actually ran.
         // Patch it to the resolved (downgraded) spec so `runs.json` and the trace agree.
         await this.patchRun(run.id, { cast: { ...run.cast, implement: spec } });
+      } else if (isOpusModel(spec.model) && spec.reason) {
+        // A human-quoted opus cast (or one that already carried a reason) rode through
+        // unchanged — trace it so an install can grep for casts nobody typed at the CLI default.
+        this.trace(run, "implement:cast", "info", `opus implement kept — reason: ${spec.reason}`);
       }
       explicit = spec;
     }

@@ -45,11 +45,11 @@ export const SEED_PRESETS: PresetMap = {
   },
   // Mechanical grind — cheapest seat, one pass (design doc §4.1).
   "cheap-lane": { implement: { harness: "pi", model: "gpt-5.6-luna", effort: "low" } },
-  // Frontend / visual / taste — Opus implements, forced one-pass (design doc §4.4). Carries a
-  // `reason` (issue #249, sonnet-first) so this shipped opus cast clears `applySonnetFirst`'s
-  // bar on its own — a preset naming opus with no reason would otherwise silently implement on
-  // sonnet the moment it's deployed with no accompanying `--cast` to trigger the deploy-time
-  // auto-stamp (`../cli/task-deploy.ts#resolveCast`).
+  // Frontend / visual / taste — Opus implements, forced one-pass (design doc §4.4). The `reason`
+  // below is cosmetic only: it's a preset-supplied string, not a human's words, so
+  // `../cli/task-deploy.ts#resolveCast` strips it at deploy time unless the deploy also carries
+  // `--cast-quote`. Without a quote this preset implements on sonnet with a traced downgrade
+  // (issue #249, sonnet-first) — the reason here does not clear `applySonnetFirst`'s bar.
   "taste-lane": {
     implement: {
       harness: "claude",
