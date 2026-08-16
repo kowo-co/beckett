@@ -1,0 +1,2 @@
+# dead-exports census suppressions: one `path::symbol  # reason` per line.
+src/worker/worktree.ts::mergeBranchesIntoWorktree  # B9 (runs lane) calls it

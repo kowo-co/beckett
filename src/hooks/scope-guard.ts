@@ -78,7 +78,7 @@ function isAllowedSink(absPath: string): boolean {
 const SHELL_META = /[$~`]/;
 
 /** Whether a Bash redirection target uses shell expansion → un-evaluable, must DENY (S5). */
-export function hasShellMeta(target: string): boolean {
+function hasShellMeta(target: string): boolean {
   return SHELL_META.test(target);
 }
 
@@ -89,7 +89,7 @@ export function hasShellMeta(target: string): boolean {
  * targets (passes through). Targets using shell expansion are still captured here (verbatim) so
  * the caller can DENY them fail-closed via {@link hasShellMeta} (S5).
  */
-export function extractBashTargets(cmd: string): string[] {
+function extractBashTargets(cmd: string): string[] {
   const targets: string[] = [];
   // &>> | &> | >> | >| | > | -o file | --output file | --output=file | tee file
   // (longest redirection operators first so `&>>`/`>>`/`>|` win over `&>`/`>`).
