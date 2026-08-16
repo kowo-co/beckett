@@ -92,7 +92,7 @@ import {
 import { appendSpendRecord, readSpendLedger, spendForTicket, type SpendOutcome } from "../spend.ts";
 import { resolveProjectOwner, selfProjectSlug } from "../github/owner.ts";
 import { specGateSpec } from "../hooks/registry.ts";
-import { parseSpecChecklist, renderSpecScaffold, specRunId, type ParsedSpecChecklist } from "./spec-file.ts";
+import { parseSpecChecklist, renderSpecScaffold, specRunId, SPEC_FILE_REL, type ParsedSpecChecklist } from "./spec-file.ts";
 import { runAsWorkItem } from "./adapter.ts";
 import type { RunStore } from "./store.ts";
 import type { Run, RunStage, RunStateChange } from "./types.ts";
@@ -266,7 +266,7 @@ export function runSpecReader(
   return (runId) => {
     const run = store.get(runId);
     if (!run?.workspace) return null;
-    const path = join(run.workspace, "spec.md");
+    const path = join(run.workspace, SPEC_FILE_REL);
     if (!existsSync(path)) return null;
     try {
       const parsed = parseSpecChecklist(readFileSync(path, "utf8"));
@@ -693,7 +693,7 @@ export class RunSupervisor {
   /** Read the run's committed spec.md checklist, if it has one yet. */
   private readSpec(run: Run): ParsedSpecChecklist | undefined {
     if (!run.workspace) return undefined;
-    const path = join(run.workspace, "spec.md");
+    const path = join(run.workspace, SPEC_FILE_REL);
     if (!existsSync(path)) return undefined;
     try {
       const text = readFileSync(path, "utf8");
@@ -737,14 +737,30 @@ export class RunSupervisor {
     }
 
     // 3. The spec scaffold — written BEFORE the worker exists, so its very first read of
-    //    spec.md finds the goal and the placeholder the Stop hook will hold it to. "Already
-    //    exists" is NOT enough to skip the write: past runs committed their spec.md, so a fresh
-    //    worktree can be born holding the PREVIOUS run's spec — the bare existsSync guard here
-    //    is how two 2026-08-12 review stages got another run's acceptance criteria. Replace any
-    //    spec stamped with a different run id; leave a file stamped with THIS run (or unstamped —
-    //    possibly worker-authored, not provably foreign) alone.
-    const specPath = join(workspace, "spec.md");
+    //    .beckett/spec.md finds the goal and the placeholder the Stop hook will hold it to.
+    //    Lives under .beckett/ (SPEC_FILE_REL), never the worktree root: that dir is already
+    //    info/exclude'd and stripped from the index by the pre-commit scaffolding guard, so the
+    //    spec is structurally uncommittable — unlike the legacy root spec.md, which was tracked,
+    //    committed, and pushed to trunk. A legacy root spec.md stamped for THIS run is migrated
+    //    into place (a worker restarted after an older beckett wrote it there); one stamped for
+    //    another run — or unstamped — is left alone, it is not provably ours to move.
+    //    "Already exists" is NOT enough to skip the write: past runs committed their spec.md, so a
+    //    fresh worktree can be born holding the PREVIOUS run's spec — the bare existsSync guard
+    //    here is how two 2026-08-12 review stages got another run's acceptance criteria. Replace
+    //    any spec stamped with a different run id; leave a file stamped with THIS run (or
+    //    unstamped — possibly worker-authored, not provably foreign) alone.
+    const specPath = join(workspace, SPEC_FILE_REL);
     try {
+      mkdirSync(join(workspace, ".beckett"), { recursive: true });
+      const legacyPath = join(workspace, "spec.md");
+      if (!existsSync(specPath) && existsSync(legacyPath)) {
+        const legacyText = readFileSync(legacyPath, "utf8");
+        const legacyOwner = specRunId(legacyText);
+        if (legacyOwner === run.id) {
+          renameSync(legacyPath, specPath);
+          this.logger.info("migrated the run spec into .beckett/", { run: run.id });
+        }
+      }
       const existing = existsSync(specPath) ? readFileSync(specPath, "utf8") : undefined;
       const owner = existing === undefined ? undefined : specRunId(existing);
       const foreign = existing === undefined || (owner !== undefined && owner !== run.id);

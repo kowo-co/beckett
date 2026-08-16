@@ -148,6 +148,18 @@ describe("buildBlockReason", () => {
         "or move deliberately-dropped items to ## Notes with a reason, then finish.",
     );
   });
+
+  test("the missing-spec block reason names .beckett/spec.md", () => {
+    expect(buildBlockReason(null)).toBe(
+      "spec.md gate: .beckett/spec.md not found — write it with a ## Checklist section before finishing.",
+    );
+  });
+
+  test("the no-checklist-items block reason names .beckett/spec.md", () => {
+    expect(buildBlockReason({ items: [], total: 0, done: 0, hasPlaceholder: false })).toBe(
+      "spec.md gate: .beckett/spec.md has no checklist items — write a ## Checklist with concrete, verifiable items.",
+    );
+  });
 });
 
 describe("strike-count sidecar", () => {

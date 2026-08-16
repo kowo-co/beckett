@@ -570,6 +570,118 @@ test("loose work in a SHARED checkout is never committed by a publish — it isn
 }, 30_000); // real-git: many shell-outs; needs headroom over the 5s default under full-suite parallel load
 
 /**
+ * `spec.md` moved from `<workspace>/spec.md` to `.beckett/spec.md` (harness state, structurally
+ * uncommittable). A legacy tracked, run-stamped `spec.md` (a trunk poisoned by an older beckett, or
+ * a worker that force-added past the exclude) must never reach a remote — `stripHarnessState`
+ * strips it with a cleanup commit, same as `.beckett/` itself. Real git: the strip's deletion must
+ * actually land on the pushed tip, not just pass a fake's argv assertions.
+ */
+test("publish strips a tracked, run-stamped spec.md and pushes its deletion", async () => {
+  const root = await mkdtemp(join(tmpdir(), "beckett-publish-strip-spec-"));
+  try {
+    const remoteParent = join(root, "0xbeckett");
+    const remote = join(remoteParent, "beckett.git");
+    const seed = join(root, "seed");
+    const worker = join(root, "worker");
+    await mkdir(remoteParent, { recursive: true });
+    await git(root, "init", "--bare", remote);
+    await git(root, "init", "--initial-branch=main", seed);
+    await git(seed, "config", "user.email", "test@example.com");
+    await git(seed, "config", "user.name", "Test");
+    await writeFile(join(seed, "README.md"), "root\n");
+    await git(seed, "add", ".");
+    await git(seed, "commit", "-m", "root");
+    await git(seed, "remote", "add", "origin", `file://${remote}`);
+    await git(seed, "push", "origin", "main");
+
+    await git(root, "clone", "-b", "main", `file://${remote}`, worker);
+    await git(worker, "config", "user.email", "test@example.com");
+    await git(worker, "config", "user.name", "Test");
+    await writeFile(join(worker, "feature.ts"), "export const v = 1;\n");
+    await writeFile(
+      join(worker, "spec.md"),
+      "# Fixture\n> run: run-x · branch: beckett/run-x · created: yesterday\n\n## Checklist\n- [x] done\n",
+    );
+    await git(worker, "add", ".");
+    await git(worker, "commit", "-m", "run checkpoint (with a tracked, run-stamped spec.md)");
+
+    const calls: string[] = [];
+    const gh = new GitHubCli({
+      pat: "tok",
+      account: "0xbeckett",
+      apiBase: "https://api.github.com",
+      resolveRepoDir: () => worker,
+      logger: noopLog,
+      run: (async (cmd: string[], opts?: { cwd?: string; env?: Record<string, string | undefined> }) => {
+        calls.push(cmd.join(" "));
+        if (cmd[0] === "git") return realRun(cmd, opts);
+        if (cmd.join(" ").startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
+        if (cmd.join(" ").includes("api --method PATCH")) return ok();
+        if (cmd.join(" ").includes("--json defaultBranchRef")) return ok("main");
+        return fail(`unrouted: ${cmd.join(" ")}`);
+      }) as never,
+    });
+    (gh as unknown as { gitHost: () => string }).gitHost = () => `file://${root}`;
+
+    const result = await gh.ensurePublished({ slug: "beckett", sourceDir: worker, description: "run title", ticket: "run-x" });
+
+    expect(result.kind).toBe("pushed");
+    expect(await git(root, "--git-dir", remote, "show", "main:feature.ts")).toBe("export const v = 1;");
+    expect((await realRun(["git", "--git-dir", remote, "cat-file", "-e", "main:spec.md"])).code).not.toBe(0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30_000); // real-git: many shell-outs; needs headroom over the 5s default under full-suite parallel load
+
+/**
+ * A customer's own `spec.md` (no `> run:` stamp — never rendered by `renderSpecScaffold`) is not
+ * ours to delete: `stripHarnessState`/`assertNoHarnessState` only ever touch a spec.md they can
+ * PROVE is Beckett's own bookkeeping.
+ */
+test("a tracked spec.md with no run stamp is left alone", async () => {
+  const { gh, calls } = cli((j) => {
+    if (j.startsWith("git remote get-url origin")) return fail("no origin");
+    if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
+    if (j.includes("api --method PATCH")) return ok();
+    if (j.includes("--json defaultBranchRef")) return ok("main");
+    if (j.startsWith("git ls-files")) return ok("spec.md\n");
+    if (j.startsWith("git show HEAD:spec.md")) return ok("# A customer's own notes\nNo stamp here.\n");
+    if (j.startsWith("git fetch")) return ok();
+    if (j.startsWith("git rebase")) return ok();
+    if (j.startsWith("git push")) return ok();
+    return undefined;
+  });
+  const r = await gh.ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "OPS-25" });
+  expect(r.kind).toBe("pushed");
+  expect(calls.some((c) => c.startsWith("git rm"))).toBe(false);
+  const push = calls.find((c) => c.startsWith("git push"))!;
+  expect(push).toContain("HEAD:refs/heads/main");
+});
+
+/**
+ * `assertNoHarnessState` is the belt-and-suspenders check right after the strip: if `git rm` ran
+ * but the tree STILL reports the path tracked (a bug in the strip, or a filesystem the runner lied
+ * about), publish must refuse rather than ship it — `classifyPublishError` treats `needs a human`
+ * as permanent, so this parks on attempt 1 instead of burning the retry ladder.
+ */
+test("publish refuses when .beckett is still tracked after the strip", async () => {
+  const { gh, calls } = cli((j) => {
+    if (j.startsWith("git remote get-url origin")) return fail("no origin");
+    if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
+    if (j.includes("api --method PATCH")) return ok();
+    // `git rm` reports success, but ls-files STILL names the path — the strip didn't take.
+    if (j.startsWith("git ls-files")) return ok(".beckett/notes.md\n");
+    if (j.startsWith("git rm")) return ok();
+    if (j.startsWith("git -c commit.gpgsign=false commit")) return ok();
+    return undefined;
+  });
+  await expect(gh.ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "OPS-25" })).rejects.toThrow(
+    /needs a human/,
+  );
+  expect(calls.some((c) => c.startsWith("git push"))).toBe(false);
+});
+
+/**
  * The limit of "commit the loose work": loose means work no stage got around to committing, NOT a
  * half-finished merge. `git status --porcelain` reports an unmerged file as `UU`, and `git add -A`
  * stages it verbatim — conflict markers and all — so an unguarded auto-commit would have pushed

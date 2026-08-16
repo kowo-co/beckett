@@ -17,6 +17,7 @@ import type { DispatchEvent } from "../dispatch/events.ts";
 import { restartBlockingRunWorkers } from "../deploy/run-drain.ts";
 import type { RunGitOps } from "./supervisor.ts";
 import { RunStore } from "./store.ts";
+import { SPEC_FILE_REL } from "./spec-file.ts";
 import type { Run } from "./types.ts";
 import type { BranchVsMainRaw } from "../worker/worktree.ts";
 
@@ -352,25 +353,56 @@ describe("admission", () => {
     expect(spawnCalls).toHaveLength(1);
   });
 
-  test("the spec.md scaffold is written BEFORE the worker spawns", async () => {
+  test("the spec scaffold is written to .beckett/spec.md, never the worktree root", async () => {
     const { supervisor, store } = newSupervisor();
     const run = seedRun(store, makeRun());
     await supervisor.admit(run.id);
     await tick();
     const workspace = store.get(run.id)!.workspace!;
-    expect(existsSync(join(workspace, "spec.md"))).toBe(true);
-    const spec = readFileSync(join(workspace, "spec.md"), "utf8");
+    expect(existsSync(join(workspace, SPEC_FILE_REL))).toBe(true);
+    expect(existsSync(join(workspace, "spec.md"))).toBe(false);
+    const spec = readFileSync(join(workspace, SPEC_FILE_REL), "utf8");
     expect(spec).toContain("## Goal\nAdd OAuth middleware to the API gateway.");
     expect(spec).toContain("## Checklist");
     // The gate the worker will be held to is registered on the implement stage only. The hook
-    // takes the workspace ROOT (`--root`) and resolves `<root>/spec.md` itself — see
+    // takes the workspace ROOT (`--root`) and resolves `<root>/${SPEC_FILE_REL}` itself — see
     // `specGateSpec` in ../hooks/registry.ts and `resolveConfig` in ../hooks/spec-gate.ts.
     expect(spawnCalls[0]!.extraHooks?.[0]!.event).toBe("Stop");
     expect(spawnCalls[0]!.extraHooks?.[0]!.command).toContain("spec-gate.ts");
     expect(spawnCalls[0]!.extraHooks?.[0]!.command).toContain(`--root ${JSON.stringify(workspace)}`);
   });
 
-  test("a spec.md inherited from a previous run's commit is replaced by this run's scaffold", async () => {
+  test("a root spec.md stamped with THIS run is migrated into .beckett/ and the root copy is gone", async () => {
+    // Older beckett versions wrote spec.md at the worktree root; a worker restarted mid-run after
+    // an upgrade can still find one there, stamped for THIS run. It must move, not be replaced.
+    const runId = "run-20260810-oauth";
+    const orig = gitFakes.createWorktree!;
+    gitFakes.createWorktree = async (opts) => {
+      const made = await orig(opts);
+      writeFileSync(
+        join(opts.workspace, "spec.md"),
+        `# Fixture\n> run: ${runId} · branch: beckett/x · created: yesterday\n\n` +
+          "## Goal\nAdd OAuth middleware to the API gateway.\n\n## Checklist\n- [x] already done\n",
+        "utf8",
+      );
+      return made;
+    };
+    try {
+      const { supervisor, store } = newSupervisor();
+      const run = seedRun(store, makeRun({ id: runId }));
+      await supervisor.admit(run.id);
+      await tick();
+      const workspace = store.get(run.id)!.workspace!;
+      expect(existsSync(join(workspace, "spec.md"))).toBe(false);
+      const spec = readFileSync(join(workspace, SPEC_FILE_REL), "utf8");
+      expect(spec).toContain(`> run: ${run.id}`);
+      expect(spec).toContain("already done"); // migrated verbatim, not rescaffolded
+    } finally {
+      gitFakes.createWorktree = orig;
+    }
+  });
+
+  test("a root spec.md stamped with ANOTHER run is left alone and does not become this run's spec", async () => {
     // A worktree cut from a base that carries a committed spec.md is born holding the PREVIOUS
     // run's spec; the scaffold must replace anything stamped with a different run id, or review
     // briefs inherit a stranger's acceptance criteria (which happened twice on 2026-08-12).
@@ -390,7 +422,10 @@ describe("admission", () => {
       const run = seedRun(store, makeRun());
       await supervisor.admit(run.id);
       await tick();
-      const spec = readFileSync(join(store.get(run.id)!.workspace!, "spec.md"), "utf8");
+      const workspace = store.get(run.id)!.workspace!;
+      // Not provably ours to move — a foreign-stamped root spec.md is left exactly where it was.
+      expect(readFileSync(join(workspace, "spec.md"), "utf8")).toContain("stale criterion");
+      const spec = readFileSync(join(workspace, SPEC_FILE_REL), "utf8");
       expect(spec).toContain(`> run: ${run.id}`);
       expect(spec).not.toContain("stale criterion");
       expect(spec).toContain("Add OAuth middleware to the API gateway.");
@@ -1936,9 +1971,9 @@ describe("runSpecReader", () => {
     const dir = scratch();
     const store = new RunStore(join(dir, "runs.json"));
     const run = seedRun(store, makeRun({ workspace: join(dir, "ws") }));
-    mkdirSync(run.workspace!, { recursive: true });
+    mkdirSync(join(run.workspace!, ".beckett"), { recursive: true });
     writeFileSync(
-      join(run.workspace!, "spec.md"),
+      join(run.workspace!, SPEC_FILE_REL),
       "# t\n\n## Checklist\n- [x] one\n- [x] two\n- [ ] three\n",
     );
     expect(runSpecReader(store)(run.id)).toEqual({ done: 2, total: 3 });

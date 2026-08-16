@@ -565,7 +565,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerHandle> 
 
   // ── wire scope-guard into the project repo (already provisioned by the dispatcher), then launch ──
   try {
-    await excludeFromGit(workspace, [`${SCAFFOLDING_DIR}/`]);
+    // The legacy root spec.md path stays excluded too (belt-and-braces): a worker cutting from a
+    // trunk poisoned by an old run's committed spec.md must not be able to re-commit it.
+    await excludeFromGit(workspace, [`${SCAFFOLDING_DIR}/`, "spec.md"]);
     // Universal guard: strip the scaffolding from the index on every commit, whoever runs it — so a
     // worker's own `git add -f .beckett && git commit` can never sweep bookkeeping into the diff (OPS-61).
     await installScaffoldingGuardHook(workspace);

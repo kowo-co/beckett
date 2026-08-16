@@ -12,8 +12,8 @@ beckett task deploy \
 ```
 
 That returns and the work is queued. A supervisor picks it up within seconds: it clones or opens
-the repo, cuts a worktree and a branch, writes a `spec.md` into it, and spawns a worker. The
-worker's FIRST action is turning your prompt into a checklist in that `spec.md`; a hook won't let
+the repo, cuts a worktree and a branch, writes a `.beckett/spec.md` into it, and spawns a worker. The
+worker's FIRST action is turning your prompt into a checklist in that `.beckett/spec.md`; a hook won't let
 it end its turn with items still unchecked. When it finishes, a fresh reviewer grinds the diff
 against that same checklist, then the branch is pushed and a PR opens.
 
@@ -57,7 +57,7 @@ messages where the person explained what they actually meant. Whatever you leave
   is a constraint the worker will cheerfully violate.
 - **Spell out what done looks like**, concretely enough that the checklist writes itself: the
   observable behavior, the file or endpoint, the thing you could point at and say "that's it". The
-  worker turns those lines into its `spec.md` checklist, and **the reviewer gates on that
+  worker turns those lines into its `.beckett/spec.md` checklist, and **the reviewer gates on that
   checklist** — so a prompt that never says what done means produces a worker that grades its own
   homework.
 - **Hand over what you already know**: file paths, the repo layout, the URL, the error text, the

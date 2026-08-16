@@ -1,6 +1,18 @@
 import { describe, expect, test } from "bun:test";
-import { SPEC_CHECKLIST_PLACEHOLDER, parseSpecChecklist, renderSpecScaffold, specProgressLine, specRunId } from "./spec-file.ts";
+import { SCAFFOLDING_DIR } from "../worker/worktree.ts";
+import {
+  SPEC_CHECKLIST_PLACEHOLDER,
+  SPEC_FILE_REL,
+  parseSpecChecklist,
+  renderSpecScaffold,
+  specProgressLine,
+  specRunId,
+} from "./spec-file.ts";
 import type { Run } from "./types.ts";
+
+test("SPEC_FILE_REL lives under the scaffolding dir", () => {
+  expect(SPEC_FILE_REL).toBe(`${SCAFFOLDING_DIR}/spec.md`);
+});
 
 const RUN: Pick<Run, "id" | "title" | "branch" | "createdAt" | "prompt"> = {
   id: "run-20260810-oauth-middleware",

@@ -1,15 +1,25 @@
 /**
  * Beckett — spec.md codec (`src/run/spec-file.ts`)
  * =======================================================================================
- * `<workspace>/spec.md` is the enforced worker contract for a run (architecture.md "v7
- * architecture: ticketless runs"): a checklist the worker fills in as its FIRST action and ticks
- * off as it goes, gated on Stop by `../hooks/spec-gate.ts`. This module is the pure codec —
- * render the scaffold a fresh worktree starts with, and parse the `## Checklist` section back
- * out of whatever the worker leaves behind. No I/O here; the hook/CLI/supervisor own reading and
- * writing the file itself.
+ * `<workspace>/.beckett/spec.md` ({@link SPEC_FILE_REL}) is the enforced worker contract for a run
+ * (architecture.md "v7 architecture: ticketless runs"): a checklist the worker fills in as its
+ * FIRST action and ticks off as it goes, gated on Stop by `../hooks/spec-gate.ts`. This module is
+ * the pure codec — render the scaffold a fresh worktree starts with, and parse the `## Checklist`
+ * section back out of whatever the worker leaves behind. No I/O here; the hook/CLI/supervisor own
+ * reading and writing the file itself.
  */
 
 import type { Run } from "./types.ts";
+
+/**
+ * Where a run's spec lives, relative to the workspace root. Harness state, never the customer's
+ * tree: `.beckett/` is already `info/exclude`d and stripped from the index by the pre-commit
+ * scaffolding guard (`installScaffoldingGuardHook`, `../worker/worktree.ts`), so a spec written
+ * here is structurally uncommittable — unlike the legacy `<workspace>/spec.md`, which was tracked,
+ * committed, and pushed to trunk (the #1 conflicting path). MUST stay `.beckett/spec.md`; pinned
+ * by a test in `spec-file.test.ts`.
+ */
+export const SPEC_FILE_REL = ".beckett/spec.md";
 
 /** The literal placeholder line seeded into a fresh spec.md's Checklist section. */
 export const SPEC_CHECKLIST_PLACEHOLDER = "(worker fills this in as its FIRST action: concrete, verifiable items)";
