@@ -30,7 +30,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-/** What a proposal can be about. A dream never gets a fifth kind by writing one into a file. */
+/** What a proposal can be about. A dream never gets a new kind by writing one into a file. */
 export const PROPOSAL_KINDS = [
   "doctrine-change",
   "persona-change",
