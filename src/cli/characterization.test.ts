@@ -173,6 +173,17 @@ const CASES: Case[] = [
   { name: "identity: list starts empty without an owner configuration", argv: ["identity", "list"] },
   { name: "identity: unknown sub fails", argv: ["identity", "bogus"] },
 
+  // ── routine (overhaul B "surface-fixes" finding 20): `proactive-sweep`/`spend-report` are the
+  //    routine ACTION bodies, registered in spine.ts as two-word verbs above the bare `routine`
+  //    fallthrough. This pins that `routine proactive-sweep` reaches its own body — the
+  //    identity-resolution refusal INSIDE `runRoutineProactiveSweep` — instead of falling through
+  //    to the `usage: beckett routine list | …` cascade a spine mis-route would silently produce.
+  {
+    name: "routine: proactive-sweep reaches its body and refuses on an unresolved GitHub identity",
+    argv: ["routine", "proactive-sweep", "--repos", "foo/bar"],
+    env: { GITHUB_ACCOUNT: "" },
+  },
+
   // ── gh (dummy PAT gets past the env gate to the usage contract; no network) ────────────
   { name: "gh: without GitHub credentials is refused", argv: ["gh", "repo", "create", "x"] },
   { name: "gh: bare prints usage", argv: ["gh"], env: DUMMY_GH },
