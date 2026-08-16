@@ -47,7 +47,7 @@ import { clearPause, pauseRefusal, readPause, writePause, type PauseState } from
 import { runTaskAsk } from "./task-ask.ts";
 import { supportsNameFlag } from "../drivers/claude.ts";
 import { RunStore } from "../run/store.ts";
-import { RUN_TERMINAL } from "../run/types.ts";
+import { RUN_FINAL } from "../run/types.ts";
 import { parseSpecChecklist, SPEC_FILE_REL } from "../run/spec-file.ts";
 import { formatDispatchTrace, readDispatchEvents } from "../dispatch/events.ts";
 import {
@@ -1010,18 +1010,35 @@ export async function runTask(argv: string[]): Promise<void> {
     if (!ref || !note) fail('usage: beckett task steer <run-id|slug> "<note>" [--note <text>]');
     const run = ref.startsWith("run-") ? runStore().get(ref) : runStore().bySlug(ref);
     if (!run) fail(`no such run: ${ref}`);
-    // Refuse a run nothing will ever staff again. `RUN_TERMINAL` includes `parked` precisely
-    // because parking is where the machinery stops for a human: the supervisor never re-admits
-    // one, so a note here would buffer forever while the CLI reported success. Say so, and name
-    // the real move — a fresh deploy carrying what was learned, on a branch that kept the WIP.
-    if (RUN_TERMINAL.has(run.state)) {
+    // Refuse only a run nothing will EVER move again (`RUN_FINAL`). `parked` is no longer a wall —
+    // steering a parked run resumes it, carrying the note as the new worker's steering (B5: "steering
+    // outranks waiting", the browser lane's rule). A genuinely finished run still gets the old
+    // hand-off advice — a fresh deploy carrying what was learned, on a branch that kept the WIP.
+    if (RUN_FINAL.has(run.state)) {
       fail(
         `run ${run.id} is ${run.state} — steering only reaches a run that is still going. ` +
           `Deploy the new direction as fresh work (\`beckett task deploy --prompt "…" --repo ${run.repo ?? "<slug>"}\`); ` +
           `branch ${run.branch} still holds everything this run committed.`,
       );
     }
-    await bus("run.steer", { runId: run.id, note });
+    if (run.state === "parked") {
+      await bus("run.resume", { runId: run.id, note });
+    } else {
+      await bus("run.steer", { runId: run.id, note });
+    }
+  }
+
+  // v7 resume: clear a `parked` run's blocker and re-staff the stage it was held from. Like
+  // `steer`/`cancel` this goes through `bus()`, not `notifyBus()` — a resume the daemon never
+  // received must EXIT NON-ZERO, because "resumed it" reported off the back of this call has to be
+  // true. `--note` is optional steering delivered to the re-spawned worker's first turn.
+  if (sub === "resume") {
+    const ref = _[0];
+    if (!ref) fail('usage: beckett task resume <run-id|slug> [--note "<text>"]');
+    const note = typeof flags.note === "string" ? flags.note.trim() : undefined;
+    const run = ref.startsWith("run-") ? runStore().get(ref) : runStore().bySlug(ref);
+    if (!run) fail(`no such run: ${ref}`);
+    await bus("run.resume", { runId: run.id, ...(note ? { note } : {}) });
   }
 
   // v7 cancellation: the ONE lever that stops work already running. Like `steer` it goes through
@@ -1159,7 +1176,7 @@ export async function runTask(argv: string[]): Promise<void> {
     out(formatDispatchTrace(readDispatchEvents(tracePath, id), id));
   }
 
-  fail("usage: beckett task create|branch|start|deploy|ask|steer|cancel|courier|show|list|trace <...>");
+  fail("usage: beckett task create|branch|start|deploy|ask|steer|resume|cancel|courier|show|list|trace <...>");
 }
 
 // ── preset (in-process: inspect the user-defined cast presets in ~/.beckett/presets.json) ──

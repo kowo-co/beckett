@@ -266,6 +266,7 @@ export function previewRun(input: TaskDeployInput, now: Date): Run {
     prUrl: null,
     error: null,
     published: null,
+    blocker: null,
   };
 }
 

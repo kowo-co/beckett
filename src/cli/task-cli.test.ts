@@ -2,6 +2,9 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { serveBus } from "../shell/control-bus.ts";
+import { RunStore } from "../run/store.ts";
+import type { BusRequest } from "../shell/control-bus.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -220,4 +223,64 @@ test("task start --ping overrides the branch's pings independent of the task-lev
   const shown = await cli(dir, ["task", "show", "#1.1"]) as any;
   expect(shown.task.pings).toEqual([RO]);
   expect(shown.branch.pings).toEqual([ALICE]);
+});
+
+// ── resume (overhaul B5) ─────────────────────────────────────────────────────────────────────
+
+test("task resume pings run.resume with the run id", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-task-resume-"));
+  dirs.push(dir);
+  const store = new RunStore(join(dir, "runs.json"));
+  const run = await store.create({ title: "Add oauth", prompt: "…" });
+  await store.update(run.id, { state: "parked" });
+
+  const requests: BusRequest[] = [];
+  const stop = serveBus(join(dir, "control.sock"), (req) => {
+    requests.push(req);
+    return { ok: true, data: { runId: req.args.runId, resumed: true } };
+  });
+  try {
+    const result = (await cli(dir, ["task", "resume", run.id, "--note", "try again"])) as any;
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.cmd).toBe("run.resume");
+    expect(requests[0]!.args.runId).toBe(run.id);
+    expect(requests[0]!.args.note).toBe("try again");
+    expect(result).toEqual({ runId: run.id, resumed: true });
+  } finally {
+    stop();
+  }
+});
+
+test("task steer on a parked run resumes it instead of failing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-task-steer-parked-"));
+  dirs.push(dir);
+  const store = new RunStore(join(dir, "runs.json"));
+  const run = await store.create({ title: "Add oauth", prompt: "…" });
+  await store.update(run.id, { state: "parked" });
+
+  const requests: BusRequest[] = [];
+  const stop = serveBus(join(dir, "control.sock"), (req) => {
+    requests.push(req);
+    return { ok: true, data: { runId: req.args.runId, resumed: true } };
+  });
+  try {
+    await cli(dir, ["task", "steer", run.id, "get past the credential"]);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.cmd).toBe("run.resume");
+    expect(requests[0]!.args.note).toBe("get past the credential");
+  } finally {
+    stop();
+  }
+});
+
+test("task steer on a done run still fails", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-task-steer-done-"));
+  dirs.push(dir);
+  const store = new RunStore(join(dir, "runs.json"));
+  const run = await store.create({ title: "Add oauth", prompt: "…" });
+  await store.update(run.id, { state: "done" });
+
+  await expect(cli(dir, ["task", "steer", run.id, "one more thing"])).rejects.toThrow(
+    /is done — steering only reaches a run that is still going/,
+  );
 });

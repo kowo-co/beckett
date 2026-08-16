@@ -235,6 +235,27 @@ describe("durability", () => {
     expect(reloaded!.published).toBeNull();
     expect(reloaded!.state).toBe("cancelled");
   });
+
+  // B5 migration safety: a row written before `blocker` existed must still load, `blocker: null`.
+  test("a run row written before blockers existed loads with blocker null", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "beckett-runs-"));
+    dirs.push(dir);
+    const path = join(dir, "runs.json");
+    const store = new RunStore(path, { now: CLOCK });
+    const run = await store.create({ title: "Pre-blocker", prompt: "…" });
+
+    const onDisk = JSON.parse(readFileSync(path, "utf8"));
+    delete onDisk.runs[0].blocker;
+    onDisk.runs[0].state = "parked";
+    onDisk.runs[0].error = "old free-text park reason";
+    writeFileSync(path, JSON.stringify(onDisk), "utf8");
+
+    const reopened = new RunStore(path);
+    const reloaded = reopened.get(run.id);
+    expect(reloaded).not.toBeNull();
+    expect(reloaded!.blocker).toBeNull();
+    expect(reloaded!.state).toBe("parked");
+  });
 });
 
 describe("backfillCourierPrUrl", () => {
