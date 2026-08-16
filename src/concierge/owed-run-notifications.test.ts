@@ -106,6 +106,28 @@ test("a claim AFTER settle opens a genuinely new debt — a run can be parked, t
   expect(entry!.settledAt).toBeNull();
 });
 
+// overhaul B "surface-fixes" (finding 7): B5/B7 made `parked` a two-way door — a run can leave
+// `parked` and reach a DIFFERENT owed state while the original debt is still unsettled (the ping
+// was judged not worth sending). `claim` must refresh the entry's state in place rather than
+// no-op on the stale one, so a later replay reports what actually happened instead of a lie.
+test("claiming a still-open debt under a NEW state refreshes it in place (parked debt, later done)", () => {
+  const file = join(tempDir(), "owed.json");
+  let clock = 1_000;
+  const store = storeAt(file, () => clock);
+  store.claim(claim("run-1", { state: "parked" }));
+  // the parked debt is never settled (no confirmed post) — then the run resumes and finishes.
+
+  clock = 5_000;
+  store.claim(claim("run-1", { state: "done" }));
+
+  const owed = store.list();
+  expect(owed).toHaveLength(1);
+  expect(owed[0]!.state).toBe("done");
+  expect(owed[0]!.createdAt).toBe(1_000); // the debt's age is unchanged — it is still the same debt
+  expect(owed[0]!.settledAt).toBeNull();
+  expect(owed[0]!.phase).toBe("queued");
+});
+
 test("markDelivering is what a crash-between-post-and-settle looks like on disk", () => {
   const file = join(tempDir(), "owed.json");
   const store = storeAt(file);
