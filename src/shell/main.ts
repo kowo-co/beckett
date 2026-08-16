@@ -406,7 +406,7 @@ async function boot(): Promise<BootedSystem> {
         ...(run.channelId ? { channel: run.channelId } : {}),
       });
     },
-    onPublished: ({ url, kind, run }) => void taskSync.onPublished(run, { url, kind }),
+    onPublished: ({ url, kind, prUrl, run }) => void taskSync.onPublished(run, { url, kind, prUrl }),
     logger: logger.child("run"),
   });
   // `beckett task deploy` pings `run.deploy` on the control bus; `beckett task steer` pings
@@ -453,12 +453,15 @@ async function boot(): Promise<BootedSystem> {
         handle: async (req) => {
           const runId = typeof req.args.runId === "string" ? req.args.runId.trim() : "";
           if (!runId) return { ok: false, error: "run.courier needs a runId" };
+          const prUrl = typeof req.args.prUrl === "string" ? req.args.prUrl.trim() : "";
+          if (prUrl && !/\/pull\/\d+(?:$|[/?#])/.test(prUrl)) {
+            return { ok: false, error: `run.courier --pr-url must be a pull-request URL (…/pull/<n>), got: ${prUrl}` };
+          }
           const outcome = await runSupervisor.courier(runId);
           if (outcome === "unknown") return { ok: false, error: `no such run: ${runId}` };
           if (outcome === "not-eligible") {
             return { ok: false, error: `run ${runId} is not publishing or parked — nothing for a courier to have shipped` };
           }
-          const prUrl = typeof req.args.prUrl === "string" ? req.args.prUrl.trim() : "";
           if (prUrl && (outcome === "done" || outcome === "already-terminal")) {
             await runSupervisor.backfillCourierPrUrl(runId, prUrl);
           }

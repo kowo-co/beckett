@@ -193,4 +193,16 @@ describe("landBranch", () => {
     expect(err.message).toContain("branch protection on kowo-co/beckett");
     expect(err.message).toContain("./deploy/deploy-prod.sh");
   });
+
+  test("a merge conflict on a non-main base tells the operator to rebase onto THAT base, not main", async () => {
+    const { gh } = fakeClient([mergeability({ baseRefName: "v5-daemon" })], {
+      async mergePR() {
+        throw new Error("gh pr merge failed (1): Pull request is not mergeable");
+      },
+    });
+    const err = (await landBranch(gh, { ...OPTS, base: "v5-daemon", now: clock(1_000) }).catch((e) => e)) as LandError;
+    expect(err.stage).toBe("merge");
+    expect(err.message).toContain("git rebase origin/v5-daemon");
+    expect(err.message).not.toContain("git rebase origin/main");
+  });
 });
