@@ -177,7 +177,7 @@ test("a routines.json carrying a retired dream action loads, drops the row, and 
   expect(onDisk.removedBuiltins).toContain("nightly-dream");
 });
 
-test("a dropped retired routine does not reseed on the next load", async () => {
+test("a dropped retired routine does not reseed on the next load, even with builtin seeding on", async () => {
   const dir = mkdtempSync(join(tmpdir(), "beckett-routines-retired-noreseed-"));
   dirs.push(dir);
   const path = join(dir, "routines.json");
@@ -186,9 +186,10 @@ test("a dropped retired routine does not reseed on the next load", async () => {
   const first = new RoutineStore(path, { seedBuiltins: false });
   await first.list(); // drops + writes back
 
-  const second = new RoutineStore(path, { seedBuiltins: false });
+  const second = new RoutineStore(path); // default seedBuiltins: true
   const routines = await second.list();
   expect(routines.find((r) => r.id === "nightly-dream")).toBeUndefined();
+  expect(routines.length).toBeGreaterThan(0); // real builtins did seed
   const onDisk = JSON.parse(readFileSync(path, "utf8"));
   expect(onDisk.removedBuiltins).toContain("nightly-dream");
 });

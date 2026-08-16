@@ -177,4 +177,7 @@ test("the builtin weekly-free-time ships the [free_time] defaults, and takes a s
     cadence: { kind: "weekly", weekday: "wednesday" },
     window: { start: "01:00", end: "03:00", tz: "Europe/Berlin" },
   });
+  expect(overridden.find((r) => r.id === "daily-x-shitpost")!.schedule).toEqual(
+    builtinRoutineDefs().find((r) => r.id === "daily-x-shitpost")!.schedule,
+  );
 });

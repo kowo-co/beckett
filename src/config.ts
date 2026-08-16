@@ -153,8 +153,8 @@ function mergeProactivityOverride(rawConfig: unknown, overridePath: string): unk
  *   - `plane`   — the first tracker section, long since folded into `[tracker]` (itself now gone).
  *   - `tracker` — the out-of-process ticket queue. v7 has no board; the run ledger is the queue.
  *   - `progress`— `cards_as_code`, the ticket dispatcher's card switch. Runs use `[runs] cards`.
+ *   - `dream`   — the nightly dream pass, deleted whole in the v7 debt sweep (overhaul P16).
  */
-//   - `dream` — the nightly dream pass, deleted whole in the v7 debt sweep (overhaul P16).
 const RETIRED_CONFIG_SECTIONS = ["plane", "tracker", "progress", "dream"] as const;
 
 /**
