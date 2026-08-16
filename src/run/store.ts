@@ -109,6 +109,8 @@ const RunSchema = z.object({
   reviewCycles: z.number().int().nonnegative(),
   // Nullable-safe default so an OLD persisted row (minted before continuations existed) parses.
   continuations: z.number().int().nonnegative().default(0),
+  // Nullable-safe default so an OLD persisted row (minted before auto-resume existed) parses (B7).
+  autoResumes: z.number().int().nonnegative().default(0),
   prUrl: z.string().nullable(),
   error: z.string().nullable(),
   // Nullable + defaulted so an OLD persisted row (minted before `published` existed) still parses
@@ -207,6 +209,7 @@ export class RunStore {
         sessionName: `beckett-run-${slug}`,
         reviewCycles: 0,
         continuations: 0,
+        autoResumes: 0,
         prUrl: null,
         error: null,
         published: null,

@@ -576,7 +576,7 @@ export class PiDriver extends OneShotDriver implements HarnessDriver {
       this.log.info("agent_end with buffered steering — auto-resuming to apply it", {
         pending: this.bufferedNudges.length,
       });
-      this.finished = true; // this process is done; resume() relaunches
+      this.latch("turn-boundary"); // this process is done; resume() relaunches
       void this.resume().catch((err) => {
         this.log.error("auto-resume after steering failed", { err: String(err) });
         this.emit({
@@ -588,7 +588,7 @@ export class PiDriver extends OneShotDriver implements HarnessDriver {
           errorClass: classifyHarnessFailure(String(err)) ?? "crash",
           ts: Date.now(),
         });
-        this.finished = true;
+        this.latch("terminal-event");
         this.stopWatchdog();
         if (!this.isTerminal()) this.setState("failed");
       });
@@ -608,7 +608,7 @@ export class PiDriver extends OneShotDriver implements HarnessDriver {
         errorClass: classifyHarnessFailure(this.runError) ?? "crash",
         ts,
       });
-      this.finished = true;
+      this.latch("terminal-event");
       this.stopWatchdog();
       if (!this.isTerminal()) this.setState("failed");
       void this.killChild();
@@ -648,7 +648,7 @@ export class PiDriver extends OneShotDriver implements HarnessDriver {
         errorClass: classifyHarnessFailure(tail) ?? "crash",
         ts,
       });
-      this.finished = true;
+      this.latch("terminal-event");
       this.stopWatchdog();
       if (!this.isTerminal()) this.setState("failed");
       void this.killChild();
@@ -665,7 +665,7 @@ export class PiDriver extends OneShotDriver implements HarnessDriver {
       usage: { ...this.tokens },
       ts,
     });
-    this.finished = true;
+    this.latch("terminal-event");
     this.stopWatchdog();
     if (!this.isTerminal()) this.setState("review");
     // pi -p can linger after agent_end; free the slot deterministically.

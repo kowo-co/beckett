@@ -13,6 +13,7 @@ per_task_usd_cap = 0
 worker_hard_cap_s = 14400
 worker_stall_s = 300
 worker_checkpoint_s = 120
+wrap_up_lead_s = 300
 worker_slow_tool_s = 30
 worker_browser_shared_home = false
 staffing_watchdog_s = 120
@@ -71,6 +72,7 @@ gmail_address = ""
 max_live = 3
 review_cycles_max = 2
 continuation_max = 2
+auto_resume_max = 2
 budget_usd_per_run = 0
 cards = true
 

@@ -36,6 +36,8 @@ class TestDriver extends OneShotDriver {
 /** The private surface the tests reach into (same pattern as the per-driver tests). */
 interface Guts {
   finished: boolean;
+  latch(cause: "terminal-event" | "process-exit" | "wall-clock-cap" | "turn-boundary"): void;
+  lastLatch: string | null;
   capTripped: boolean;
   workerState: WorkerState;
   childGen: number;
@@ -78,7 +80,7 @@ test("one-shot nudges buffer with an honest will-restart receipt and drain FIFO"
 
 test("a nudge after the terminal finish is dropped, never silently eaten", async () => {
   const d = makeDriver();
-  d.finished = true;
+  d.latch("terminal-event");
   expect((await d.sendNudge("too late")).accepted).toBe("dropped");
   expect(d.takeBufferedPrompt()).toBe(DEFAULT_RESUME_PROMPT); // nothing was buffered
 });
@@ -146,7 +148,7 @@ test("an exit after a terminal finish does not double-emit", async () => {
   const d = makeDriver();
   const events: WorkerEvent[] = [];
   d.onEvent((e) => events.push(e));
-  d.finished = true;
+  d.latch("terminal-event");
   d.workerState = "failed";
 
   await d.onProcessExit(0, d.childGen, 12345, false);
@@ -205,6 +207,39 @@ test("a harness finish that races the wall-clock cap kill is dropped, not report
   if (finishes[0]?.kind !== "finished") throw new Error("unreachable");
   expect(finishes[0].subtype).toBe("error_wall_clock_cap");
   expect(finishes[0].errorClass).toBe("timeout");
+});
+
+// B7: the 12 hand-copied `this.finished` assignments are now one `latch(cause)` call. This is
+// the regression over that refactor — the cap's own latch must still win the race even though
+// every site now goes through the same method instead of its own inline assignment.
+test("the cap latch still suppresses a harness finish that races it", async () => {
+  const d = makeDriver();
+  const events: WorkerEvent[] = [];
+  d.onEvent((e) => events.push(e));
+  d.spec = { workspace: undefined };
+  d.workerState = "running";
+  d.spawnedAt = Date.now() - 3_601_000;
+
+  d.tickWatchdog();
+  expect(d.finished).toBe(true);
+  expect(d.lastLatch).toBe("wall-clock-cap");
+
+  d.emit({
+    kind: "finished",
+    status: "error",
+    subtype: "error_during_execution",
+    structuredOutput: null,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheCreate: 0 },
+    errorClass: "crash",
+    ts: Date.now(),
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+
+  const finishes = events.filter((e) => e.kind === "finished");
+  expect(finishes).toHaveLength(1);
+  if (finishes[0]?.kind !== "finished") throw new Error("unreachable");
+  expect(finishes[0].subtype).toBe("error_wall_clock_cap");
 });
 
 // The guard the ticket asked us to verify: `tickWatchdog` sets `finished` BEFORE the kill, so the

@@ -71,6 +71,7 @@ function run(overrides: Partial<Run> = {}): Run {
     sessionName: "beckett-run-healthz",
     reviewCycles: 0,
     continuations: 0,
+    autoResumes: 0,
     prUrl: null,
     error: null,
     blocker: null,

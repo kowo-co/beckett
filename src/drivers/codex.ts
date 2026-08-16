@@ -350,7 +350,7 @@ export class CodexDriver extends OneShotDriver implements HarnessDriver {
       this.log.info("turn completed with buffered steering — auto-resuming to apply it", {
         pending: this.bufferedNudges.length,
       });
-      this.finished = true; // this turn's process is done; resume() will relaunch
+      this.latch("turn-boundary"); // this turn's process is done; resume() will relaunch
       void this.resume().catch((err) => {
         this.log.error("auto-resume after steering failed", { err: String(err) });
         this.emit({
@@ -362,7 +362,7 @@ export class CodexDriver extends OneShotDriver implements HarnessDriver {
           errorClass: classifyHarnessFailure(String(err)) ?? "crash",
           ts: Date.now(),
         });
-        this.finished = true;
+        this.latch("terminal-event");
         this.stopWatchdog();
         if (!this.isTerminal()) this.setState("failed");
       });
@@ -378,7 +378,7 @@ export class CodexDriver extends OneShotDriver implements HarnessDriver {
       usage: { ...this.tokens },
       ts,
     });
-    this.finished = true;
+    this.latch("terminal-event");
     this.stopWatchdog(); // success sets the non-terminal "review" state, so clear the timer here
     if (!this.isTerminal()) this.setState("review"); // success → handed to GATE (Spec 11)
   }
@@ -397,7 +397,7 @@ export class CodexDriver extends OneShotDriver implements HarnessDriver {
       errorClass: classifyHarnessFailure(`${message}\n${this.stderrRing.tail()}`) ?? "crash",
       ts,
     });
-    this.finished = true;
+    this.latch("terminal-event");
     if (!this.isTerminal()) this.setState("failed");
   }
 

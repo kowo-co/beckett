@@ -100,6 +100,7 @@ import type { RunStore } from "./store.ts";
 import type { Blocker, Run, RunStage, RunStateChange } from "./types.ts";
 import { RUN_TERMINAL } from "./types.ts";
 import { blockerFromDoneSignal, makeBlocker, renderBlocker, stopsTheRun } from "./blocker.ts";
+import { blockerFromDeath, classifyDeath } from "./death.ts";
 
 // =======================================================================================
 // Collaborators
@@ -343,6 +344,8 @@ export class RunSupervisor {
    */
   private readonly publishStallClock = new Map<string, number>();
   private readonly watchdogRestaffed = new Set<string>();
+  /** Run ids already sent the wall-clock cap's one wrap-up steer (B7). Cleared on worker finish. */
+  private readonly wrapUpWarned = new Set<string>();
   private readonly budgetBlocked = new Set<string>();
   /**
    * The live activity blurb's whole state, per run: the tail of journal lines the worker produced,
@@ -957,7 +960,7 @@ export class RunSupervisor {
       pid: handle.pid ?? 0,
       workspace,
       harness: spec.harness,
-      spawnedAt: Date.now(),
+      spawnedAt: this.now(),
     });
     this.persistRuntimeState();
     const spendMeta: SpendStageMeta = {
@@ -1071,6 +1074,7 @@ export class RunSupervisor {
     if (this.liveLedger.delete(runId)) this.persistRuntimeState();
     // The blurb described THIS worker's tool calls; the next stage starts from a clean slate.
     this.forgetActivity(runId);
+    this.wrapUpWarned.delete(runId);
 
     // Steering the driver buffered but never applied — carry it into the next stage's brief.
     for (const note of handle.result?.unappliedNudges ?? []) this.bufferSteer(runId, note);
@@ -1094,9 +1098,7 @@ export class RunSupervisor {
     summary: string,
   ): Promise<void> {
     if (status !== "success") {
-      await this.commitWip(run, handle);
-      this.noteOwedResume(run, "implement", handle);
-      await this.hold(run, this.transientBlocker(run, this.workerDeathReason("implement", handle)));
+      await this.handleWorkerDeath(run, "implement", handle);
       return;
     }
     const signal = parseDoneSignal(handle.result?.structured);
@@ -1184,8 +1186,7 @@ export class RunSupervisor {
     // separate that from a reviewer that ran to completion and merely produced unparseable output
     // (#247: those two used to share a branch, and the dead one quoted the session's text).
     if (status !== "success") {
-      this.noteOwedResume(run, "review", handle);
-      await this.hold(run, this.transientBlocker(run, this.workerDeathReason("review", handle)));
+      await this.handleWorkerDeath(run, "review", handle);
       return;
     }
     const signal = parseDoneSignal(handle.result?.structured);
@@ -1951,10 +1952,45 @@ export class RunSupervisor {
         }
       }
       if (checkpointed > 0) this.persistRuntimeState();
+      await this.warnWrapUps();
     } finally {
       this.checkpointInFlight = false;
     }
     return checkpointed;
+  }
+
+  /**
+   * The wall-clock cap's SOFT EDGE (B7): every live worker within `supervise.wrap_up_lead_s` of
+   * `hardCapSeconds` gets exactly one steer telling it to stop, commit, and emit its done-signal —
+   * rather than finding out its own cap fired mid-thought. `wrapUpWarned` is the one-shot latch,
+   * cleared on the worker's actual finish (`onWorkerDone`), so a run that DOES get auto-resumed
+   * (its own fresh clock) can be warned again on its next pass.
+   */
+  private async warnWrapUps(): Promise<void> {
+    const leadS = this.config.supervise?.wrap_up_lead_s ?? 0;
+    if (leadS <= 0) return;
+    const capS = hardCapSeconds(this.config);
+    const nowMs = this.now();
+    for (const [runId, handle] of [...this.workers.entries()]) {
+      if (handle.result) continue; // finishing — nothing to warn
+      if (this.wrapUpWarned.has(runId)) continue;
+      const ledger = this.liveLedger.get(runId);
+      if (!ledger) continue;
+      const elapsedS = (nowMs - ledger.spawnedAt) / 1000;
+      if (elapsedS < capS - leadS) continue;
+      this.wrapUpWarned.add(runId);
+      const leadMinutes = Math.max(1, Math.round(leadS / 60));
+      try {
+        await this.steer(
+          runId,
+          `You are ~${leadMinutes} minute${leadMinutes === 1 ? "" : "s"} from beckett's wall-clock ` +
+            "backstop. Stop starting new work, commit what you have, and emit your done-signal now — " +
+            "done:false with a summary of what remains is the right answer if you are not finished.",
+        );
+      } catch (err) {
+        this.logger.warn("wrap-up steer failed", { run: runId, error: (err as Error).message });
+      }
+    }
   }
 
   // ── crash recovery ────────────────────────────────────────────────────────────────────
@@ -2000,6 +2036,92 @@ export class RunSupervisor {
   }
 
   // ── worker death + owed stages (#247 / #244) ──────────────────────────────────────────
+
+  /**
+   * ONE transition owner for a dead worker (B7) — `finishImplement` and `finishReview` both call
+   * this instead of each hand-rolling park logic. `classifyDeath` (`./death.ts`) splits it:
+   *
+   *   - self-inflicted (beckett stopped it: the wall-clock cap, or the daemon draining) — the
+   *     daemon owes this run another try. Commit WIP, keep the owed-resume row (the boot path
+   *     still needs it if the daemon goes down mid-resume), and — UNLESS the daemon is shutting
+   *     down — immediately re-spawn the same stage from that WIP, bounded by `runs.auto_resume_max`.
+   *     Shutting down still parks exactly as before; the boot requeue owns that case.
+   *   - external (something outside beckett's control killed it: a bad credential, a launch
+   *     failure, a rate limit, a real crash) — park with a typed blocker. Re-spawning into the
+   *     same missing credential would just burn another worker on the same wall.
+   *
+   * The review stage never commits WIP (a reviewer writes nothing to disk) — that asymmetry is
+   * preserved from the pre-B7 code, and {@link wallClockCapCause}'s copy stays honest about it.
+   */
+  private async handleWorkerDeath(run: Run, stage: RunStage, handle: WorkerHandle): Promise<void> {
+    if (stage === "implement") await this.commitWip(run, handle);
+    this.noteOwedResume(run, stage, handle);
+
+    const kind = classifyDeath({
+      timedOut: handle.result?.timedOut ?? false,
+      shuttingDown: this.shuttingDown,
+      errorClass: handle.result?.errorClass,
+    });
+
+    if (kind === "external") {
+      const blocker = blockerFromDeath(
+        {
+          timedOut: handle.result?.timedOut ?? false,
+          shuttingDown: this.shuttingDown,
+          errorClass: handle.result?.errorClass,
+        },
+        this.workerDeathReason(stage, handle),
+        run.id,
+        () => new Date(this.now()),
+      );
+      await this.hold(run, blocker);
+      return;
+    }
+
+    // self-inflicted. A shutdown death still parks — the boot requeue (`requeueOwedStages`) is
+    // what re-dispatches it, and racing that with an in-process resume here would double-spawn.
+    if (this.shuttingDown) {
+      await this.hold(run, this.transientBlocker(run, this.workerDeathReason(stage, handle)));
+      return;
+    }
+
+    const n = run.autoResumes + 1;
+    const cap = this.config.runs?.auto_resume_max ?? 2;
+    if (n > cap) {
+      await this.hold(
+        run,
+        this.transientBlocker(
+          run,
+          `${this.workerDeathReason(stage, handle)}\n\nauto-resume cap ${cap}/${cap} reached.`,
+        ),
+      );
+      return;
+    }
+
+    const capMinutes = Math.round(hardCapSeconds(this.config) / 60);
+    this.trace(
+      run,
+      "restart-restaff",
+      "started",
+      `auto-resume ${n}/${cap} — beckett's own wall-clock backstop stopped this worker, re-staffing from its WIP`,
+    );
+    await this.patchRun(run.id, { autoResumes: n, error: null });
+    // The implement stage commits WIP before this fires (top of this method); a reviewer writes
+    // nothing to disk, so promising a WIP commit there would be the exact dishonest-copy bug
+    // `wallClockCapCause` above guards against — keep the two stages' steering text honest about
+    // what actually happened.
+    this.bufferSteer(
+      run.id,
+      stage === "implement"
+        ? `The previous pass was stopped by beckett's own wall-clock backstop after ${capMinutes} minutes, ` +
+            `mid-work. Its work is committed as WIP on this branch. Continue from there; do not restart.`
+        : `The previous review pass was stopped by beckett's own wall-clock backstop after ${capMinutes} ` +
+            `minutes, mid-review. Nothing was written to the branch; re-review the diff from the top.`,
+    );
+    await this.patchRun(run.id, { state: stage === "implement" ? "implementing" : "reviewing" });
+    const next = this.store.get(run.id);
+    if (next) this.spawnGuarded(next, stage);
+  }
 
   /**
    * The LIFECYCLE cause of a worker that died instead of finishing (#247).
@@ -2074,8 +2196,9 @@ export class RunSupervisor {
    * Boot: re-dispatch every stage this daemon's predecessor owed (#244), following the publish
    * outbox's pattern — a durable row, drained once at start, consumed whether or not it lands.
    *
-   * IDEMPOTENCY is the run ledger's job, not a guess: an owed row is written ONLY on the park path,
-   * and a run that is no longer `parked` finished that stage (or a human moved it on) before the
+   * IDEMPOTENCY is the run ledger's job, not a guess: an owed row is written on every death
+   * (including one that auto-resumes in-process), and a run that is no longer `parked` at boot
+   * either finished that stage, was moved on by a human, or already resumed itself before the
    * kill. Re-dispatching that would double-run a completed stage, so it is dropped with a log line
    * instead. The entries are cleared BEFORE the loop, so a requeue that itself dies is never
    * replayed twice.
