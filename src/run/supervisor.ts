@@ -101,6 +101,8 @@ import type { Blocker, Run, RunStage, RunStateChange } from "./types.ts";
 import { RUN_TERMINAL } from "./types.ts";
 import { blockerFromDoneSignal, makeBlocker, renderBlocker, stopsTheRun } from "./blocker.ts";
 import { blockerFromDeath, classifyDeath } from "./death.ts";
+import type { CapabilityInventory, CapabilityTarget } from "../capability/preflight.ts";
+import { renderCapabilityGaps } from "../capability/preflight.ts";
 
 // =======================================================================================
 // Collaborators
@@ -162,6 +164,12 @@ export interface RunSupervisorDeps {
   spendLedgerPath?: string;
   /** Harness health probe (`preflightFor`); omitted → every harness is presumed healthy. */
   preflight?: (harness: Harness) => Promise<{ ok: boolean; problems: string[] }>;
+  /**
+   * Capability inventory at admission (`../capability/preflight.ts`) — NOT the harness
+   * {@link preflight} above. Runs once per run, at the top of the implement stage's first
+   * `doSpawn`, before any worktree or worker exists. Omitted → the gate is disabled entirely.
+   */
+  capabilityPreflight?: (target: CapabilityTarget) => Promise<CapabilityInventory>;
   /** Fired when a run's PR opens, so the GitHub poller watches it keyed by run id. */
   onPrOpened?: (info: { prUrl: string; run: Run }) => void | Promise<void>;
   /**
@@ -311,6 +319,9 @@ export class RunSupervisor {
   private readonly publishRepo?: RunSupervisorDeps["publishRepo"];
   private readonly progress?: ProgressSink;
   private readonly preflight?: RunSupervisorDeps["preflight"];
+  private readonly capabilityPreflight?: RunSupervisorDeps["capabilityPreflight"];
+  /** Runs guarded by {@link capabilityPreflight}'s once-per-run gate (`doSpawn` step 0). */
+  private readonly capabilityChecked = new Set<string>();
   private readonly onPrOpened?: RunSupervisorDeps["onPrOpened"];
   private readonly onStateChange?: RunSupervisorDeps["onStateChange"];
   private readonly onPublished?: RunSupervisorDeps["onPublished"];
@@ -400,6 +411,7 @@ export class RunSupervisor {
     this.publishRepo = deps.publishRepo;
     this.progress = deps.progress;
     this.preflight = deps.preflight;
+    this.capabilityPreflight = deps.capabilityPreflight;
     this.onPrOpened = deps.onPrOpened;
     this.onStateChange = deps.onStateChange;
     this.onPublished = deps.onPublished;
@@ -738,6 +750,52 @@ export class RunSupervisor {
   }
 
   private async doSpawn(run: Run, stage: RunStage, reservation: symbol): Promise<void> {
+    // 0. The capability inventory (overhaul B10) — ONCE per run, before any worktree or worker
+    //    exists. Only a definitively human-blocking GitHub gap (not-installed / no-such-owner)
+    //    holds the run; everything else is advisory (traced, never blocking), and a throwing
+    //    check staffs anyway — a preflight bug must never be the reason a run cannot start.
+    if (this.capabilityPreflight && stage === "implement" && !this.capabilityChecked.has(run.id)) {
+      this.capabilityChecked.add(run.id);
+      try {
+        const slug = runProjectSlug(run);
+        const inventory = await this.capabilityPreflight({
+          repo: `${this.projectOwner(slug)}/${slug}`,
+          prompt: run.prompt,
+        });
+        const blocking = inventory.gaps.filter((g) => g.severity === "blocking");
+        if (inventory.gaps.length > 0) {
+          this.trace(
+            run,
+            "capability",
+            blocking.length > 0 ? "failed" : "info",
+            renderCapabilityGaps(inventory.gaps),
+          );
+        }
+        if (blocking.length > 0) {
+          await this.hold(
+            run,
+            makeBlocker(
+              {
+                class: "credential",
+                reversible: true,
+                remedy: blocking.map((g) => g.fix).join("; "),
+                detail: renderCapabilityGaps(inventory.gaps),
+                defaultAnswer: null,
+                stage: null,
+              },
+              () => new Date(this.now()),
+            ),
+          );
+          return;
+        }
+      } catch (err) {
+        this.logger.warn("capability preflight failed — staffing anyway", {
+          run: run.id,
+          error: (err as Error).message,
+        });
+      }
+    }
+
     const stageStartedAt = Date.now();
     const repoRoot = this.resolveRepoRoot(run);
     const slug = runProjectSlug(run);

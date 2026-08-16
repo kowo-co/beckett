@@ -18,6 +18,7 @@ import { restartBlockingRunWorkers } from "../deploy/run-drain.ts";
 import type { RunGitOps } from "./supervisor.ts";
 import { RunStore } from "./store.ts";
 import { SPEC_FILE_REL } from "./spec-file.ts";
+import type { CapabilityInventory, CapabilityTarget } from "../capability/preflight.ts";
 import type { Run } from "./types.ts";
 import type { BranchVsMainRaw } from "../worker/worktree.ts";
 
@@ -260,6 +261,7 @@ function newSupervisor(
     summarizeActivity?: (lines: string[], opts: { provider?: string }) => Promise<string | null>;
     now?: () => number;
     preflight?: (harness: HarnessName) => Promise<{ ok: boolean; problems: string[] }>;
+    capabilityPreflight?: (target: CapabilityTarget) => Promise<CapabilityInventory>;
     pauseFilePath?: string;
   } = {},
 ): Harness {
@@ -302,6 +304,7 @@ function newSupervisor(
     ...(opts.spendLedgerPath ? { spendLedgerPath: opts.spendLedgerPath } : {}),
     ...(opts.publishOutboxPath ? { publishOutboxPath: opts.publishOutboxPath } : {}),
     ...(opts.preflight ? { preflight: opts.preflight } : {}),
+    ...(opts.capabilityPreflight ? { capabilityPreflight: opts.capabilityPreflight } : {}),
     ...(opts.pauseFilePath ? { pauseFilePath: opts.pauseFilePath } : {}),
   });
   return { supervisor, store, repos, publishCalls, events };
@@ -514,6 +517,128 @@ describe("admission", () => {
     await settle();
     expect(store.get(a.id)!.state).toBe("done");
     expect(spawnCalls.map((c) => c.itemId)).toContain(b.id);
+  });
+});
+
+describe("capability preflight (overhaul B10)", () => {
+  test("a blocking capability gap parks the run before any worktree or worker", async () => {
+    const { supervisor, store } = newSupervisor({
+      capabilityPreflight: async () => ({
+        checked: ["github"],
+        gaps: [
+          {
+            kind: "github-not-installed",
+            subject: "acme",
+            detail: "the GitHub App is not installed on `acme`",
+            fix: "https://github.com/apps/beckett/installations/new",
+            severity: "blocking",
+          },
+        ],
+      }),
+    });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await settle();
+    const after = store.get(run.id)!;
+    expect(after.state).toBe("parked");
+    expect(after.error ?? "").toContain("https://github.com/apps/beckett/installations/new");
+    expect(spawnCalls).toHaveLength(0);
+    expect(ensureCalls).toHaveLength(0);
+  });
+
+  test("a run parked on a blocking capability gap is resumable", async () => {
+    let calls = 0;
+    const { supervisor, store } = newSupervisor({
+      capabilityPreflight: async () => {
+        calls++;
+        return {
+          checked: ["github"],
+          gaps: [
+            {
+              kind: "github-not-installed",
+              subject: "acme",
+              detail: "the GitHub App is not installed on `acme`",
+              fix: "https://github.com/apps/beckett/installations/new",
+              severity: "blocking",
+            },
+          ],
+        };
+      },
+    });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await settle();
+    expect(store.get(run.id)!.state).toBe("parked");
+
+    const result = await supervisor.resume(run.id);
+    expect(result).toBe("resumed");
+    await settle();
+    expect(store.get(run.id)!.state).toBe("implementing");
+    expect(spawnCalls).toHaveLength(1);
+    expect(calls).toBe(1);
+  });
+
+  test("advisory-only gaps staff the run normally", async () => {
+    const { supervisor, store } = newSupervisor({
+      capabilityPreflight: async () => ({
+        checked: ["keychain"],
+        gaps: [
+          {
+            kind: "keychain-entry-missing",
+            subject: "huggingface",
+            detail: "the jingle entry `huggingface` is not in the vault yet",
+            fix: "add it to jingle",
+            severity: "advisory",
+          },
+        ],
+      }),
+    });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await settle();
+    expect(store.get(run.id)!.state).toBe("implementing");
+    expect(spawnCalls).toHaveLength(1);
+  });
+
+  test("a throwing preflight staffs the run", async () => {
+    const { supervisor, store } = newSupervisor({
+      capabilityPreflight: async () => {
+        throw new Error("network down");
+      },
+    });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await settle();
+    expect(store.get(run.id)!.state).toBe("implementing");
+    expect(spawnCalls).toHaveLength(1);
+  });
+
+  test("preflight runs once per run, not per stage", async () => {
+    let calls = 0;
+    const { supervisor, store } = newSupervisor({
+      capabilityPreflight: async () => {
+        calls++;
+        return { checked: [], gaps: [] };
+      },
+    });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await settle();
+    expect(calls).toBe(1);
+    // Finish implement successfully → the run advances to review, staffing a second stage.
+    created[0]!.finish("success", "done", doneSignal(true));
+    await settle();
+    expect(store.get(run.id)!.state).toBe("reviewing");
+    expect(calls).toBe(1);
+  });
+
+  test("no capabilityPreflight dep leaves admission byte-identical", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await settle();
+    expect(store.get(run.id)!.state).toBe("implementing");
+    expect(spawnCalls).toHaveLength(1);
   });
 });
 
