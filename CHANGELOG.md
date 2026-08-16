@@ -2,6 +2,51 @@
 
 ## Unreleased
 
+### Overhaul (Aug 15–16): parking is no longer a one-way door, publish emits a PR, and beckett can be paused
+
+- An overheard turn is not a smaller license — the ambient "do not deploy any work yet" injection
+  is gone; §Volition governs every turn the same way (#263).
+- An explicit `--cast` naming a heavier model is downgraded back to Sonnet unless it carries
+  `--cast-quote "<the human's own words>"` — no silent Fable/Opus casts (#264).
+- `src/dream/` is deleted. The nightly generative pass is gone; the proposal queue gets its own
+  verbs — `beckett proposals ls|show|accept|reject|expire`, `proposals file` (#265).
+- A worker that runs out of turn gets a continuation pass on the same stage, not a park — capped
+  by `runs.continuation_max` (#266).
+- A run's contract lives at `<workspace>/.beckett/spec.md`, never at the customer's tree root;
+  publish asserts it (#268).
+- `beckett pause [--reason "…"]` / `beckett resume` — a chat-only hold: chat keeps answering,
+  every command that starts outward work refuses with a named `paused:` reason until it lifts.
+  `beckett status` shows it (#269).
+- The Discord rich-presence daemon and its `rpc status` verb are deleted (#270).
+- Publish to an owned repo pushes `beckett/<run-id>` first (durability before any integration is
+  attempted), then opens or reuses a PR, waits on CI, and merges via the API with squash — no
+  local rebase onto trunk. A failure carries the PR URL; the remedy is clearing the PR, not
+  pushing by hand (#271, #277).
+- A run with a `credsEntry` can write a credential it minted straight into its own jingle entry
+  with `secrets.save(field, value)` — the value never returns to the transcript (#272).
+- The dev instance runway: token-independent `deploy/dev/seed.sh --dry-run --no-secrets` and
+  `docs/dev-instance.md` (#273).
+- `[proactive_sweep] repos = []` in config.toml is the one opt-in list for proactive sweeps; the
+  old chat verbs for adding/removing a repo from the routine are gone, and `beckett status` shows
+  a `sweep:` line (#274).
+- A parked run now carries a typed `run.blocker` (`{class, actor, reversible, remedy, detail}`);
+  only an `actor: "human"` blocker actually stops a run. `beckett task resume <run> [--note "…"]`
+  re-staffs the stage it parked from, and `beckett task steer` on a parked run resumes it instead
+  of refusing (#275).
+- Browser `attachFile` resolves a path however it was spelled, from a bounded pre-staged set —
+  no more exact-string matching (#276).
+- Worker deaths are classified: a self-inflicted one (the wall-clock cap, a drain) auto-resumes
+  from its own committed WIP (`runs.auto_resume_max`), with a "wrap up" steer at
+  `supervise.wrap_up_lead_s` before the cap; an external death parks with a typed blocker (#278).
+- Capability preflight at admission: a blocking GitHub gap parks the run BEFORE any worker spins
+  up, with a "needs you before this can land" list; advisory gaps are traced instead (#279).
+- An hourly TTL sweep retires terminal runs' worktrees and branches — done at 48h, failed/cancelled
+  at 7d if pushed to origin, parked never swept (#280).
+- `awaiting_input`: a worker with one open question asks it and holds live rather than guessing
+  or parking; `beckett task resume <run> --answer "<text>"` is the way out (#281).
+- `Proof`/`unverified`: a publish's CI verdict is reconciled after the fact — `done` means proven,
+  and a push URL alone is never treated as a merged PR (#282).
+
 ## v7.0.6 (2026-08-12)
 
 ### One voice: the chilltext gate's prompt is derived from persona.md

@@ -125,6 +125,19 @@ Say these plainly when they come up. Don't work around them, and don't promise a
   checks R. Anything outside that 403s. Widening them re-prompts *every* existing installation for
   approval, so it's a real decision, not a quick fix — file it, don't do it inline.
 
+## How a deployed run's work lands
+
+A `beckett task deploy` run against a repo you own does not stage a diff for you to merge by
+hand: the machinery pushes its branch, opens or reuses a PR against trunk, waits (bounded) on CI,
+and merges via the API with squash. There is no local rebase-and-push onto trunk for that path —
+the only direct push straight to a default branch is a brand-new, ref-less repo that has nothing
+to PR against yet. If it parks (steer/resume refuse this park by name), the blocker names the open
+PR; clear whatever's blocking it there (CI, conflicts, review) rather than pushing anything by
+hand, then `beckett task courier <run-id> --pr-url <url>` once it's merged — leave off `--pr-url`
+and the run lands `unverified`, not `done`, so pass the merged PR URL whenever you have it. This
+skill's own verbs below are for the PRs *you* drive directly from this seat — an inline fix,
+`beckett finish`, courier work.
+
 ## Spinning up a new project repo
 
 The common flow when a task means "make a thing and put it on GitHub":

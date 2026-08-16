@@ -62,6 +62,19 @@ No entry yet? `beckett secret request --fields username,password --dest keychain
 
 Credentials are background-lane only: `exec` gets no `secrets` object.
 
+### Writing a credential back — `secrets.save`
+
+When a run with a `--creds` entry *mints* something during the task (a signup password it
+generated, a token a site issued), the script writes it straight into that same jingle entry with
+`await secrets.save("<field>", value)` — the value never returns to the transcript, and the run's
+later scripts see it as `secrets.<field>`. That is the write door for a credential born mid-run;
+parking and asking a human to paste it back in is no longer the right move for that case — save it
+and keep going. Parking for a human is still correct for what `secrets.save` can't cover: a 2FA
+code someone has to read off their own phone, a genuine choice only they can make.
+
+`attachFile` no longer needs a literal, exactly-spelled path — it resolves however the path was
+given, from a bounded pre-staged set.
+
 ## Inline one-offs — `beckett browser exec`
 
 ```

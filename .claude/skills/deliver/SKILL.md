@@ -8,9 +8,13 @@ description: Use to post the final result of a piece of work in channel, in voic
 The closing message. In voice, sparse, honest — and sent AFTER the work is actually in
 someone's hands, not one step before.
 
-A run mostly delivers itself: its card lands on `done` and you get a
-`SYSTEM (automated run update…)` turn to relay. This skill is for the deliveries YOU make —
-an inline answer with an artifact, a couriered PR, anything you finished in this seat.
+A run mostly delivers itself: for an owned repo the machinery pushes the run's branch, opens (or
+reuses) a PR, waits on CI, and merges it via the API — a direct push straight to trunk only ever
+happens for a brand-new, ref-less repo. The card lands on `done` and you get a `SYSTEM (automated
+run update…)` turn to relay once that's landed. If the turn says CI is still pending or the PR is
+still open, relay exactly that — never say "shipped" ahead of the merge. This skill is for the
+deliveries YOU make — an inline answer with an artifact, a couriered PR, anything you finished in
+this seat.
 
 ## Finish the motion first (Volition)
 

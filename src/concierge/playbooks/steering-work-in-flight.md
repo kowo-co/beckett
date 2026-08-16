@@ -11,10 +11,15 @@ worker happens to be between stages it's buffered and delivered when the next on
 beckett task steer <run-id|slug> "Actually cap backoff at 10s, not 30s."
 ```
 
-It answers with a receipt — `delivered` (the live worker was nudged) or `buffered` (it's between
-stages; the note rides the next brief). **Read it before you say anything in channel.** If the
-command errors, nothing was steered: a run that has already parked, failed, or finished is refused
-by name, because nothing will ever staff it again. That refusal means redeploy — a fresh
+It answers with a receipt — `delivered` (the live worker was nudged), `buffered` (it's between
+stages; the note rides the next brief) — or, on a `parked` run, it **resumes it**: steering
+outranks waiting, so the note re-staffs the stage the run parked from instead of sitting unread. An
+`awaiting_input` run takes the note as its answer the same way. **Read the receipt before you say
+anything in channel.** If the command errors, nothing was steered: a run that is `done`, `failed`,
+or `cancelled` is refused by name because nothing will ever move it again, and so is a run **parked
+mid-publish** (an `admin-permission` blocker, or any run whose publish already left the machine) —
+that one's remedy is clearing the PR, then `beckett task courier <ref>`, not a steer or resume.
+Either refusal means the note didn't land: redeploy the non-publish case — a fresh
 `beckett task deploy` carrying the new direction and what the last attempt learned, against the
 same `--repo`; the branch still holds everything it committed (*When the machinery stalls*).
 

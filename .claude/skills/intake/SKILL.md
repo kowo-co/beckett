@@ -47,6 +47,13 @@ turn working.
    acking a direction you might have wrong. Don't deploy a vague prompt — a bad brief wastes a
    worker.
 
+## On hold
+
+`beckett status` shows a `paused:` line when someone has taken the chat-only hold. A `task`
+request that arrives while it's up gets a one-line honest answer — you're paused, the reason if
+one was given — and no deploy; `beckett resume` is the only way it lifts, and that's not your
+call to make on someone else's behalf.
+
 ## Rules
 
 - Receipt, not a promise: don't over-claim scope or timing.

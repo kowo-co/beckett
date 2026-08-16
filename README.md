@@ -272,8 +272,12 @@ Run on the box as the beckett user (`bun src/cli/beckett.ts <...>`, usually alia
 | `beckett reload` | Re-read `persona.md` and re-ground on a fresh session (live voice retune). |
 | `beckett task deploy --prompt "…" [--repo <slug>] [--ultracode]` | The one call that starts real work: files a run, the supervisor builds it. |
 | `beckett task ask <run>` | A run's state, its `spec.md` checklist progress, its journal tail, and the live worker's session name. |
-| `beckett task steer <run> "…"` | Send a mid-flight instruction to the running worker. |
+| `beckett task steer <run> "…"` | Send a mid-flight instruction to the running worker; on a `parked` or `awaiting_input` run this resumes it instead of being refused — except a run parked mid-publish, which refuses and names `task courier` instead. |
+| `beckett task resume <run> [--note "…"] [--answer "…"]` | Clear a parked run's blocker and re-staff the stage it parked from, or answer an `awaiting_input` run's open question. Refuses a run parked mid-publish the same way `task steer` does. |
+| `beckett task courier <run> [--pr-url <url>]` | Hand a run off to a human courier after its work was published outside the machinery. Without `--pr-url` it lands `unverified` (no PR for the proof to check); pass the merged PR URL to verify it to `done`. |
 | `beckett task create|branch|show|list …` | The public `#N` / `#N.x` registry: name work humans refer to, and inspect what's in flight. |
+| `beckett pause [--reason "…"]` / `beckett resume` | Take or lift the chat-only hold: chat keeps working, outward work refuses with a named `paused:` reason until it's lifted. |
+| `beckett proposals ls|show|accept|reject <id>` | Read and act on the proposal queue. |
 | `beckett finish -m "…"` | The whole landing motion from the branch's checkout: push, open/reuse the PR, wait for CI, merge to main, then run the guarded redeploy. Every stop names the blocker and its fix; re-running is safe. |
 | `beckett eval "author/model" [--short|--full]` | Run the curated coding prompt suite against any OpenRouter model and save a readable report. |
 | `beckett memory recall "…"` / `remember …` | Query / write Beckett's cross-conversation knowledge. |
