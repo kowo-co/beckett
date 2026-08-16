@@ -4,10 +4,10 @@
  * =======================================================================================
  * A STANDALONE Stop hook script that `claude` runs as a subprocess (v7 run architecture,
  * architecture.md): when a worker session tries to end its turn, this hook reads
- * `<workspace>/spec.md` and blocks the stop if the file is missing, still carries the seeded
- * placeholder checklist item, or has any unchecked `- [ ]` item under `## Checklist`. The block
- * reason lists the unresolved items so the worker can either finish them, tick them off, or move
- * a deliberately-dropped one to `## Notes` with a reason.
+ * `<workspace>/${SPEC_FILE_REL}` and blocks the stop if the file is missing, still carries the
+ * seeded placeholder checklist item, or has any unchecked `- [ ]` item under `## Checklist`. The
+ * block reason lists the unresolved items so the worker can either finish them, tick them off, or
+ * move a deliberately-dropped one to `## Notes` with a reason.
  *
  * A wedged worker must not be able to loop forever against this gate: once it has blocked the
  * SAME workspace {@link MAX_STRIKES} times, the next stop is allowed through (with a warning) no
@@ -29,7 +29,7 @@
 
 import { resolve, join } from "node:path";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { parseSpecChecklist, SPEC_CHECKLIST_PLACEHOLDER, type ParsedSpecChecklist } from "../run/spec-file.ts";
+import { parseSpecChecklist, SPEC_CHECKLIST_PLACEHOLDER, SPEC_FILE_REL, type ParsedSpecChecklist } from "../run/spec-file.ts";
 
 /** Env var fallback carrying the worker's workspace root (argv `--root` wins). */
 export const SPEC_PATH_ENV = "BECKETT_SPEC_PATH";
@@ -103,10 +103,10 @@ function unresolvedItems(parsed: ParsedSpecChecklist): string[] {
  */
 export function buildBlockReason(parsed: ParsedSpecChecklist | null): string {
   if (parsed === null) {
-    return "spec.md gate: spec.md not found — write it with a ## Checklist section before finishing.";
+    return `spec.md gate: ${SPEC_FILE_REL} not found — write it with a ## Checklist section before finishing.`;
   }
   if (parsed.total === 0) {
-    return "spec.md gate: spec.md has no checklist items — write a ## Checklist with concrete, verifiable items.";
+    return `spec.md gate: ${SPEC_FILE_REL} has no checklist items — write a ## Checklist with concrete, verifiable items.`;
   }
   const items = unresolvedItems(parsed);
   return (
@@ -198,7 +198,7 @@ if (import.meta.main) {
 
     let specText: string | null;
     try {
-      specText = readFileSync(join(cfg.workspace, "spec.md"), "utf8");
+      specText = readFileSync(join(cfg.workspace, SPEC_FILE_REL), "utf8");
     } catch {
       specText = null;
     }
