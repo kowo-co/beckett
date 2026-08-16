@@ -55,6 +55,8 @@ function run(overrides: Partial<Run> = {}): Run {
     blocker: null,
     question: null,
     published: null,
+    proof: null,
+    landingMode: null,
     ...overrides,
   };
 }

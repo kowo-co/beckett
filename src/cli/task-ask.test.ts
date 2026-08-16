@@ -47,6 +47,8 @@ function makeRun(over: Partial<Run> = {}): Run {
     blocker: null,
     question: null,
     published: null,
+    proof: null,
+    landingMode: null,
     ...over,
   };
 }

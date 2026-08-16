@@ -282,6 +282,34 @@ describe("durability", () => {
     await store.update(run.id, { state: "awaiting_input" });
     expect(store.live().map((r) => r.id)).toContain(run.id);
   });
+
+  // B12 migration safety: a row written before `proof`/`landingMode` existed must still load.
+  test("a run row written before proofs existed loads with proof and landingMode null", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "beckett-runs-"));
+    dirs.push(dir);
+    const path = join(dir, "runs.json");
+    const store = new RunStore(path, { now: CLOCK });
+    const run = await store.create({ title: "Pre-proof", prompt: "…" });
+
+    const onDisk = JSON.parse(readFileSync(path, "utf8"));
+    delete onDisk.runs[0].proof;
+    delete onDisk.runs[0].landingMode;
+    writeFileSync(path, JSON.stringify(onDisk), "utf8");
+
+    const reopened = new RunStore(path);
+    const reloaded = reopened.get(run.id);
+    expect(reloaded).not.toBeNull();
+    expect(reloaded!.proof).toBeNull();
+    expect(reloaded!.landingMode).toBeNull();
+  });
+
+  // B12: `unverified` is LIVE — a publish succeeded, but its proof has not earned `verified` yet.
+  test("unverified is a live state", async () => {
+    const { store } = makeStore(CLOCK);
+    const run = await store.create({ title: "Add oauth", prompt: "…" });
+    await store.update(run.id, { state: "unverified" });
+    expect(store.live().map((r) => r.id)).toContain(run.id);
+  });
 });
 
 describe("backfillCourierPrUrl", () => {

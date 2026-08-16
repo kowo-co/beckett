@@ -218,6 +218,8 @@ function makeRun(over: Partial<Run> = {}): Run {
     published: over.published === undefined ? null : over.published,
     blocker: over.blocker === undefined ? null : over.blocker,
     question: over.question === undefined ? null : over.question,
+    proof: over.proof === undefined ? null : over.proof,
+    landingMode: over.landingMode === undefined ? null : over.landingMode,
   };
 }
 
@@ -266,6 +268,8 @@ function newSupervisor(
     preflight?: (harness: HarnessName) => Promise<{ ok: boolean; problems: string[] }>;
     capabilityPreflight?: (target: CapabilityTarget) => Promise<CapabilityInventory>;
     pauseFilePath?: string;
+    verifyPr?: (prUrl: string) => Promise<{ resolves: boolean; ci: import("./types.ts").CiVerdict }>;
+    frontendProof?: (args: { run: Run; workspace: string; baseRef: string }) => Promise<string | null>;
   } = {},
 ): Harness {
   const dir = scratch();
@@ -309,6 +313,8 @@ function newSupervisor(
     ...(opts.preflight ? { preflight: opts.preflight } : {}),
     ...(opts.capabilityPreflight ? { capabilityPreflight: opts.capabilityPreflight } : {}),
     ...(opts.pauseFilePath ? { pauseFilePath: opts.pauseFilePath } : {}),
+    ...(opts.verifyPr ? { verifyPr: opts.verifyPr } : {}),
+    ...(opts.frontendProof ? { frontendProof: opts.frontendProof } : {}),
   });
   return { supervisor, store, repos, publishCalls, events };
 }
@@ -771,7 +777,12 @@ describe("stage flow", () => {
     await settle();
     created[1]!.finish("success", "pass", doneSignal(true));
     await settle();
-    expect(store.get(run.id)!.state).toBe("done");
+    const done = store.get(run.id)!;
+    expect(done.state).toBe("done");
+    // B12: local-only is verified-with-a-gap, not permanently unverified.
+    expect(done.landingMode).toBe("local");
+    expect(done.proof?.verified).toBe(true);
+    expect(done.proof?.gaps).toContain("local-only, nothing published");
   });
 
   test("a failed publish holds the run in publishing behind a durable retry row", async () => {
@@ -913,6 +924,122 @@ describe("stage flow", () => {
     // vs. the old free-text `park(run, "${detail}\n\n${summary}")`.
     expect(store.get(run.id)!.error).toContain("stuck on auth");
     expect(commitCalls.some((c) => c.message.includes("WIP"))).toBe(true);
+  });
+});
+
+// B12: `done` is a VERDICT `assembleProof` (`./proof.ts`) hands out, not a label `publishRun`
+// grants itself the instant `git push`/`gh pr create` returns.
+describe("proof gates done (overhaul B12)", () => {
+  test("a published run with a green PR reaches done and records landingMode pr", async () => {
+    const { supervisor, store } = newSupervisor({
+      publish: true,
+      verifyPr: async () => ({ resolves: true, ci: "success" }),
+    });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal(true));
+    await settle();
+    created[1]!.finish("success", "looks good", doneSignal(true));
+    await settle();
+    const done = store.get(run.id)!;
+    expect(done.state).toBe("done");
+    expect(done.landingMode).toBe("pr");
+    expect(done.prUrl).toBe("https://github.com/o/gateway/pull/7");
+    expect(done.proof?.verified).toBe(true);
+    expect(done.proof?.prResolves).toBe(true);
+    expect(done.proof?.ci).toBe("success");
+    expect(done.proof?.gaps).toEqual([]);
+  });
+
+  test("a direct push records landingMode direct-push and leaves prUrl null (the bare-repo-URL bug)", async () => {
+    const { supervisor, store } = newSupervisor({
+      publish: async () => ({ url: "https://github.com/o/gateway", kind: "pushed" as const }),
+    });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal(true));
+    await settle();
+    created[1]!.finish("success", "looks good", doneSignal(true));
+    await settle();
+    const done = store.get(run.id)!;
+    expect(done.state).toBe("done");
+    expect(done.landingMode).toBe("direct-push");
+    // The whole point of #228's fix: a push URL never lands in `prUrl` again.
+    expect(done.prUrl).toBeNull();
+    expect(done.proof?.pushUrl).toBe("https://github.com/o/gateway");
+    expect(done.proof?.verified).toBe(true);
+  });
+
+  test("a red CI leaves the run unverified with the gap on the run", async () => {
+    const { supervisor, store } = newSupervisor({
+      publish: true,
+      verifyPr: async () => ({ resolves: true, ci: "failed" }),
+    });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal(true));
+    await settle();
+    created[1]!.finish("success", "looks good", doneSignal(true));
+    await settle();
+    const unverified = store.get(run.id)!;
+    expect(unverified.state).toBe("unverified");
+    expect(unverified.landingMode).toBe("pr");
+    expect(unverified.error).toContain("CI is failed");
+    expect(unverified.proof?.verified).toBe(false);
+    expect(unverified.proof?.gaps).toContain("CI is failed, not green");
+  });
+
+  test("the watchdog re-checks an unverified run and promotes it to done when CI goes green", async () => {
+    let ci: "pending" | "success" = "pending";
+    const { supervisor, store } = newSupervisor({
+      publish: true,
+      verifyPr: async () => ({ resolves: true, ci }),
+    });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal(true));
+    await settle();
+    created[1]!.finish("success", "looks good", doneSignal(true));
+    await settle();
+    expect(store.get(run.id)!.state).toBe("unverified");
+    expect(store.get(run.id)!.proof?.ci).toBe("pending");
+
+    ci = "success";
+    await supervisor.reconcileProofs();
+    const done = store.get(run.id)!;
+    expect(done.state).toBe("done");
+    expect(done.proof?.ci).toBe("success");
+    expect(done.proof?.attempts).toBe(1);
+  });
+
+  test("an unverified run that exhausts proof_recheck_max parks with a transient blocker", async () => {
+    const { supervisor, store } = newSupervisor({
+      config: cfg({ runs: { max_live: 3, review_cycles_max: 2, budget_usd_per_run: 0, proof_recheck_max: 2 } }),
+      publish: true,
+      verifyPr: async () => ({ resolves: true, ci: "failed" }),
+    });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal(true));
+    await settle();
+    created[1]!.finish("success", "looks good", doneSignal(true));
+    await settle();
+    expect(store.get(run.id)!.state).toBe("unverified");
+
+    await supervisor.reconcileProofs(); // attempt 1 of 2 — still unverified
+    expect(store.get(run.id)!.state).toBe("unverified");
+
+    await supervisor.reconcileProofs(); // attempt 2 of 2 — cap reached
+    const parked = store.get(run.id)!;
+    expect(parked.state).toBe("parked");
+    expect(parked.blocker?.class).toBe("transient");
+    expect(parked.blocker?.actor).toBe("human");
+    expect(parked.error).toContain("2 re-check");
   });
 });
 
@@ -2627,17 +2754,23 @@ describe("cancel", () => {
 // terminal shape — never `cancel()`'s bookkeeping, which used to be reused here and threw the
 // run's own shipped outcome away (`state: "cancelled", error: "cancelled", prUrl: null`).
 describe("courier handoff (#228)", () => {
-  test("courier() ends a run done with published: {via: courier, prUrl: null} — not cancelled", async () => {
+  // B12: courier no longer grants `done` on the spot — it stamps `landingMode: "courier"` and
+  // assembles a proof same as any other landing. There is no synchronous PR URL to check, so the
+  // proof's courier rule (`./proof.ts`) is unverified on THIS call — #228's backfill hole, made
+  // visible instead of silently `done`. `published` is still recorded, `prUrl` is still null.
+  test("a courier-published run without a PR URL is unverified", async () => {
     const { supervisor, store, events } = newSupervisor();
     const run = seedRun(store, makeRun({ state: "publishing" }));
     expect(await supervisor.courier(run.id)).toBe("done");
     await tick(); // the live sink notifies off a microtask queued inside trace()
     const updated = store.get(run.id)!;
-    expect(updated.state).toBe("done");
-    expect(updated.error).toBeNull();
+    expect(updated.state).toBe("unverified");
+    expect(updated.error).toContain("no PR URL recorded");
     expect(updated.published).toEqual({ via: "courier", prUrl: null });
-    const doneEvent = events.find((e) => e.stage === "done:courier" && e.outcome === "passed");
-    expect(doneEvent).toBeTruthy();
+    expect(updated.landingMode).toBe("courier");
+    expect(updated.proof?.verified).toBe(false);
+    const heldEvent = events.find((e) => e.stage === "done:courier" && e.outcome === "held");
+    expect(heldEvent).toBeTruthy();
   });
 
   test("courier() drops the run's outbox row — a stale retry must never race the human's push", async () => {
@@ -2668,8 +2801,9 @@ describe("courier handoff (#228)", () => {
     const { supervisor, store } = newSupervisor();
     const run = seedRun(store, makeRun({ state: "parked", error: "parked for human courier" }));
     expect(await supervisor.courier(run.id)).toBe("done");
-    expect(store.get(run.id)!.state).toBe("done");
-    expect(store.get(run.id)!.error).toBeNull();
+    // Unverified, not `done`, until a PR URL is known — same B12 rule as the `publishing` case.
+    expect(store.get(run.id)!.state).toBe("unverified");
+    expect(store.get(run.id)!.error).toContain("no PR URL recorded");
   });
 
   test("courier() refuses a run that never reached publishing (a caller mistake, not a transition)", async () => {

@@ -382,6 +382,11 @@ export const configFragments = {
       // `class: "question"` blocker that parks the run for a human (B8, `./supervisor.ts`).
       // Default 1800 (30 minutes).
       question_wait_s: posInt.default(1800),
+      // Re-check passes an `unverified` run (a publish that succeeded but hasn't earned a verified
+      // `Proof` yet — a pending CI run, an un-backfilled courier PR URL) gets from the staffing
+      // watchdog's `reconcileProofs` before it stops re-assembling the proof and holds the run for
+      // a human instead (B12, `./proof.ts`).
+      proof_recheck_max: posInt.default(20),
       // Per-run USD ceiling, summed from the spend ledger over rows at/after the run's createdAt.
       // 0 (the default) falls back to `[budget] per_task_usd_cap`, so an install that already
       // tuned the task cap keeps exactly that behavior.

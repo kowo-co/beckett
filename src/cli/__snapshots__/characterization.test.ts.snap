@@ -1843,6 +1843,7 @@ review_cycles_max = 2
 continuation_max = 2
 auto_resume_max = 2
 question_wait_s = 1800
+proof_recheck_max = 20
 budget_usd_per_run = 0
 cards = true
 

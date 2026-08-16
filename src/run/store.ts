@@ -18,7 +18,7 @@ import { dirname } from "node:path";
 import { z } from "zod";
 import { log } from "../log.ts";
 import type { Logger } from "../types.ts";
-import type { BlockerClass, Run, RunState } from "./types.ts";
+import type { BlockerClass, CiVerdict, LandingMode, Run, RunState } from "./types.ts";
 
 const LOCK_STALE_MS = 30_000;
 const LOCK_ATTEMPTS = 200;
@@ -29,6 +29,7 @@ const RUN_STATES = [
   "reviewing",
   "publishing",
   "awaiting_input",
+  "unverified",
   "done",
   "failed",
   "cancelled",
@@ -39,6 +40,8 @@ const RUN_STATES = [
  * Non-terminal states — a run in one of these still has (or will have) a live worker.
  * `awaiting_input` (B8) belongs here: the run is live, just waiting on a person's answer instead
  * of a worker's turn — `beckett status` and the dashboard must keep showing it as in-flight.
+ * `unverified` (B12) belongs here for the identical reason: the run published, but its proof has
+ * not yet earned `verified` — the staffing watchdog keeps re-checking it, not a human.
  */
 const LIVE_STATES: ReadonlySet<RunState> = new Set([
   "queued",
@@ -46,6 +49,7 @@ const LIVE_STATES: ReadonlySet<RunState> = new Set([
   "reviewing",
   "publishing",
   "awaiting_input",
+  "unverified",
   "parked",
 ]);
 
@@ -97,6 +101,28 @@ const BlockerSchema = z.object({
   at: z.string(),
 });
 
+// Mirrors `./types.ts#LandingMode`/`CiVerdict` verbatim — literal lists, same idiom as
+// `BLOCKER_CLASSES` above (zod enums need the literal tuple).
+const LANDING_MODES = ["pr", "direct-push", "courier", "local"] as const satisfies readonly LandingMode[];
+const CI_VERDICTS = ["success", "failed", "pending", "none", "unknown"] as const satisfies readonly CiVerdict[];
+
+// Nullable + defaulted (both the object and every OLD persisted row without one) so a run minted
+// before proofs existed, or one that never reached `publishing`, still parses (B12 migration
+// safety — same posture as `BlockerSchema`/`published` above).
+const ProofSchema = z.object({
+  landingMode: z.enum(LANDING_MODES),
+  prUrl: z.string().nullable(),
+  pushUrl: z.string().nullable(),
+  prResolves: z.boolean().nullable(),
+  ci: z.enum(CI_VERDICTS),
+  uiWork: z.boolean(),
+  screenshotPath: z.string().nullable(),
+  verified: z.boolean(),
+  gaps: z.array(z.string()),
+  checkedAt: z.string(),
+  attempts: z.number().int().nonnegative(),
+});
+
 const RunSchema = z.object({
   id: z.string().min(1),
   slug: z.string().min(1),
@@ -146,6 +172,11 @@ const RunSchema = z.object({
     })
     .nullable()
     .default(null),
+  // Nullable + defaulted so an OLD persisted row (minted before proofs existed) still parses —
+  // and so a run that never reached `publishing` (every non-`unverified`/`done` state) round-trips
+  // without one (B12).
+  proof: ProofSchema.nullable().default(null),
+  landingMode: z.enum(LANDING_MODES).nullable().default(null),
 });
 
 const LedgerSchema = z.object({
@@ -239,6 +270,8 @@ export class RunStore {
         published: null,
         blocker: null,
         question: null,
+        proof: null,
+        landingMode: null,
       };
       ledger.runs.push(run);
       return structuredClone(run);
