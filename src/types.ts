@@ -1122,6 +1122,20 @@ export interface Config {
       /** Reserved for a future per-message override; the client-side ``` bypass is unconditional. */
       skip_code_blocks: boolean;
     };
+    /**
+     * Memory primer: a per-turn SYSTEM block of relevant memory-graph notes, auto-selected by
+     * relevance to the message via the fast lexical retriever (never an LLM call on the turn
+     * path). Self audience — owner-scoped facts ride along, dm-scoped facts never do.
+     */
+    memory_primer: {
+      enabled: boolean;
+      /** Notes injected per turn, before per-session change-suppression trims already-seen ones. */
+      max_notes: number;
+      /** Total rendered chars per turn; bodies truncate at a sentence boundary past this. */
+      max_chars: number;
+      /** Relevance gate: a fraction of the TOP hit's score (not an absolute) below which a hit is omitted. */
+      min_score: number;
+    };
   };
   /**
    * Quick agents — the NO-TICKET lane: short-lived specialist `claude -p` harnesses

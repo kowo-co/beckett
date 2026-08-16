@@ -1913,6 +1913,12 @@ bubble_delay_ms = 2500
 system_override = ""
 skip_code_blocks = true
 
+[concierge.memory_primer]
+enabled = true
+max_notes = 3
+max_chars = 1200
+min_score = 0.5
+
 [quick]
 enabled = true
 model = "claude-sonnet-5"

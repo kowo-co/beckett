@@ -573,6 +573,26 @@ export const configFragments = {
         })
         .strict()
         .default({}),
+      // Memory primer (overhaul B — memory-primer): a per-turn SYSTEM block of relevant
+      // memory-graph notes, auto-selected by relevance to the message. Fast lexical retriever
+      // only (search.ts's scorer, the same one `beckett recall` uses without `--agent`) — never
+      // an LLM call on the turn path. Self audience: owner-scoped facts are the concierge's own
+      // working knowledge and ride along; dm-scoped facts never do (SELF_AUDIENCE fails closed).
+      memory_primer: z
+        .object({
+          enabled: z.boolean().default(true),
+          // Notes injected per turn, before change-suppression trims already-seen ones.
+          max_notes: posInt.default(3),
+          // Total rendered chars per turn (bodies truncated at a sentence boundary past this).
+          max_chars: posInt.default(1200),
+          // Relevance gate, NOT the same scale as `cross_channel_min_score` above — recall's
+          // scorer (moss hybrid, bounded (0,1], or the unbounded lexical fallback) has no fixed
+          // absolute scale. This is a FRACTION OF THE TOP HIT'S score: only hits within min_score
+          // of the best match ride along. The block is omitted, not shrunk, when nothing clears it.
+          min_score: z.number().positive().default(0.5),
+        })
+        .strict()
+        .default({}),
     })
     .default({}),
   // Quick agents — the no-ticket lane. Sonnet at medium: these are errands where
