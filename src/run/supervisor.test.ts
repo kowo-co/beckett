@@ -9,7 +9,7 @@ import { describe, expect, test, beforeEach, afterEach, mock } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type { Config } from "../types.ts";
+import type { Config, DoneBlocker } from "../types.ts";
 import type { HarnessSpec } from "./cast.ts";
 import type { Harness as HarnessName } from "../types.ts";
 import { appendSpendRecord, type SpendRecord } from "../spend.ts";
@@ -207,6 +207,7 @@ function makeRun(over: Partial<Run> = {}): Run {
     sessionIds: {},
     sessionName: over.sessionName ?? `beckett-run-${slug}`,
     reviewCycles: over.reviewCycles ?? 0,
+    continuations: over.continuations ?? 0,
     prUrl: null,
     error: null,
     published: over.published === undefined ? null : over.published,
@@ -232,8 +233,8 @@ function seedRun(store: RunStore, run: Run): Run {
   return run;
 }
 
-function doneSignal(status: "complete" | "blocked" | "partial", summary: string = status) {
-  return { status, summary, filesChanged: ["src/app.ts"], checksRun: ["bun test"], blockedReason: null };
+function doneSignal(done: boolean, summary: string = done ? "complete" : "blocked", blocker: DoneBlocker | null = null) {
+  return { done, summary, filesChanged: ["src/app.ts"], checksRun: ["bun test"], blocker };
 }
 
 interface Harness {
@@ -417,7 +418,7 @@ describe("admission", () => {
     // is the only place a sibling reader can learn which session did which stage.
     expect(store.get(run.id)!.sessionIds).toEqual({ implement: "sess-1" });
 
-    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    created[0]!.finish("success", "implemented", doneSignal(true));
     await settle();
     expect(store.get(run.id)!.sessionIds).toEqual({ implement: "sess-1", review: "sess-2" });
   });
@@ -433,13 +434,13 @@ describe("admission", () => {
     expect(spawnCalls.map((c) => c.itemId)).toEqual([a.id]);
 
     // A's own next stage takes the freed slot first — b is still queued behind the cap.
-    created[0]!.finish("success", "done", doneSignal("complete"));
+    created[0]!.finish("success", "done", doneSignal(true));
     await settle();
     expect(spawnCalls.map((c) => c.itemId)).toEqual([a.id, a.id]);
     expect(spawnCalls[1]!.stage).toBe("review");
 
     // Once a is genuinely finished, the queue pumps and b starts.
-    created[1]!.finish("success", "pass", doneSignal("complete"));
+    created[1]!.finish("success", "pass", doneSignal(true));
     await settle();
     expect(store.get(a.id)!.state).toBe("done");
     expect(spawnCalls.map((c) => c.itemId)).toContain(b.id);
@@ -458,9 +459,9 @@ describe("the repo a run works in", () => {
     // …and under the self-project's own owner, or the clone would miss and `git init` a void.
     expect(ensureCalls[0]!.owner).toBe(resolveSelfProjectOwner());
 
-    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    created[0]!.finish("success", "implemented", doneSignal(true));
     await settle();
-    created[1]!.finish("success", "pass", doneSignal("complete"));
+    created[1]!.finish("success", "pass", doneSignal(true));
     await settle();
     expect(publishCalls[0]!.slug).toBe("beckett");
   });
@@ -482,14 +483,14 @@ describe("stage flow", () => {
     await supervisor.admit(run.id);
     await tick();
 
-    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    created[0]!.finish("success", "implemented", doneSignal(true));
     await settle();
     expect(store.get(run.id)!.state).toBe("reviewing");
     expect(spawnCalls[1]!.stage).toBe("review");
     // The reviewer is handed the diff rather than made to rediscover it.
     expect(spawnCalls[1]!.reviewDiff).toContain("diff --git");
 
-    created[1]!.finish("success", "looks good", doneSignal("complete"));
+    created[1]!.finish("success", "looks good", doneSignal(true));
     await settle();
     const done = store.get(run.id)!;
     expect(done.state).toBe("done");
@@ -513,7 +514,7 @@ describe("stage flow", () => {
     const run = seedRun(store, makeRun());
     await supervisor.admit(run.id);
     await tick();
-    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    created[0]!.finish("success", "implemented", doneSignal(true));
     await settle();
 
     const depth = events.find((e) => e.stage === "review:depth");
@@ -529,7 +530,7 @@ describe("stage flow", () => {
     const run = seedRun(store, makeRun());
     await supervisor.admit(run.id);
     await tick();
-    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    created[0]!.finish("success", "implemented", doneSignal(true));
     await settle();
     expect(events.find((e) => e.stage === "review:depth")?.message).toBe(
       "review depth: code (1 file, source/config: x.ts)",
@@ -544,7 +545,7 @@ describe("stage flow", () => {
     const run = seedRun(store, makeRun());
     await supervisor.admit(run.id);
     await tick();
-    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    created[0]!.finish("success", "implemented", doneSignal(true));
     await settle();
     expect(events.some((e) => e.stage === "review:depth")).toBe(false);
     expect(spawnCalls[1]!.stage).toBe("review");
@@ -555,9 +556,9 @@ describe("stage flow", () => {
     const run = seedRun(store, makeRun());
     await supervisor.admit(run.id);
     await tick();
-    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    created[0]!.finish("success", "implemented", doneSignal(true));
     await settle();
-    created[1]!.finish("success", "looks good", doneSignal("complete"));
+    created[1]!.finish("success", "looks good", doneSignal(true));
     await settle();
     const doneEvent = events.find((e) => e.stage === "done" && e.outcome === "passed");
     expect(doneEvent?.message).toBe("https://github.com/o/gateway/pull/7");
@@ -568,9 +569,9 @@ describe("stage flow", () => {
     const run = seedRun(store, makeRun());
     await supervisor.admit(run.id);
     await tick();
-    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    created[0]!.finish("success", "implemented", doneSignal(true));
     await settle();
-    created[1]!.finish("success", "pass", doneSignal("complete"));
+    created[1]!.finish("success", "pass", doneSignal(true));
     await settle();
     expect(store.get(run.id)!.state).toBe("done");
   });
@@ -587,9 +588,9 @@ describe("stage flow", () => {
     const run = seedRun(store, makeRun());
     await supervisor.admit(run.id);
     await tick();
-    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    created[0]!.finish("success", "implemented", doneSignal(true));
     await settle();
-    created[1]!.finish("success", "pass", doneSignal("complete"));
+    created[1]!.finish("success", "pass", doneSignal(true));
     await settle();
     expect(store.get(run.id)!.state).toBe("publishing");
     const rows = readFileSync(outbox, "utf8").trim().split("\n").map((l) => JSON.parse(l));
@@ -612,9 +613,9 @@ describe("stage flow", () => {
     const run = seedRun(store, makeRun());
     await supervisor.admit(run.id);
     await tick();
-    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    created[0]!.finish("success", "implemented", doneSignal(true));
     await settle();
-    created[1]!.finish("success", "pass", doneSignal("complete"));
+    created[1]!.finish("success", "pass", doneSignal(true));
     await settle();
     expect(store.get(run.id)!.state).toBe("publishing");
     expect(publishCalls).toHaveLength(1);
@@ -692,15 +693,24 @@ describe("stage flow", () => {
     expect(store.get(run.id)!.state).toBe("publishing");
   });
 
-  test("an implement worker that reports blocked parks the run with its WIP committed", async () => {
+  test("an implement worker that reports a blocker parks the run with its WIP committed", async () => {
     const { supervisor, store } = newSupervisor();
     const run = seedRun(store, makeRun());
     await supervisor.admit(run.id);
     await tick();
-    created[0]!.finish("success", "stuck on auth", doneSignal("blocked"));
+    created[0]!.finish(
+      "success",
+      "stuck on auth",
+      doneSignal(false, "stuck on auth", {
+        class: "credential",
+        detail: "needs a GitHub token with repo scope",
+        remedy: "provide a credential",
+        defaultAnswer: null,
+      }),
+    );
     await settle();
     expect(store.get(run.id)!.state).toBe("parked");
-    expect(store.get(run.id)!.error).toContain("blocked");
+    expect(store.get(run.id)!.error).toContain("needs a GitHub token with repo scope");
     expect(commitCalls.some((c) => c.message.includes("WIP"))).toBe(true);
   });
 });
@@ -722,9 +732,9 @@ describe("publish outbox backoff ladder (#227)", () => {
     const run = seedRun(store, makeRun());
     await supervisor.admit(run.id);
     await tick();
-    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    created[0]!.finish("success", "implemented", doneSignal(true));
     await settle();
-    created[1]!.finish("success", "pass", doneSignal("complete"));
+    created[1]!.finish("success", "pass", doneSignal(true));
     await settle();
 
     const readRow = () => JSON.parse(readFileSync(outbox, "utf8").trim());
@@ -794,9 +804,9 @@ describe("publish outbox backoff ladder (#227)", () => {
     const run = seedRun(store, makeRun());
     await supervisor.admit(run.id);
     await tick();
-    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    created[0]!.finish("success", "implemented", doneSignal(true));
     await settle();
-    created[1]!.finish("success", "pass", doneSignal("complete"));
+    created[1]!.finish("success", "pass", doneSignal(true));
     await settle();
 
     const row = JSON.parse(readFileSync(outbox, "utf8").trim());
@@ -833,9 +843,9 @@ describe("publishing never stalls silently", () => {
     const run = seedRun(store, makeRun());
     await supervisor.admit(run.id);
     await tick();
-    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    created[0]!.finish("success", "implemented", doneSignal(true));
     await settle();
-    created[1]!.finish("success", "pass", doneSignal("complete"));
+    created[1]!.finish("success", "pass", doneSignal(true));
     await settle();
 
     const held = store.get(run.id)!;
@@ -967,9 +977,9 @@ describe("publishing never stalls silently", () => {
     const run = seedRun(store, makeRun());
     await supervisor.admit(run.id);
     await tick();
-    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    created[0]!.finish("success", "implemented", doneSignal(true));
     await settle();
-    created[1]!.finish("success", "pass", doneSignal("complete"));
+    created[1]!.finish("success", "pass", doneSignal(true));
     await settle();
 
     // Exactly ONE publish attempt was made, and the run is already OUT of publishing — no sweeper,
@@ -998,9 +1008,9 @@ describe("publishing never stalls silently", () => {
     const run = seedRun(store, makeRun());
     await supervisor.admit(run.id);
     await tick();
-    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    created[0]!.finish("success", "implemented", doneSignal(true));
     await settle();
-    created[1]!.finish("success", "pass", doneSignal("complete"));
+    created[1]!.finish("success", "pass", doneSignal(true));
     await settle();
     expect(store.get(run.id)!.state).toBe("publishing"); // attempt 1 retried — still honest
 
@@ -1035,9 +1045,9 @@ describe("publishing never stalls silently", () => {
       const run = seedRun(store, makeRun());
       await supervisor.admit(run.id);
       await tick();
-      created[0]!.finish("success", "implemented", doneSignal("complete"));
+      created[0]!.finish("success", "implemented", doneSignal(true));
       await settle();
-      created[1]!.finish("success", "pass", doneSignal("complete"));
+      created[1]!.finish("success", "pass", doneSignal(true));
       await settle();
       return store.get(run.id)!;
     } finally {
@@ -1086,11 +1096,11 @@ describe("rework bounds", () => {
     const run = seedRun(store, makeRun());
     await supervisor.admit(run.id);
     await tick();
-    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    created[0]!.finish("success", "implemented", doneSignal(true));
     await settle();
 
     // Cycle 1: back to implement, carrying the review notes as steering.
-    created[1]!.finish("success", "missing error handling", doneSignal("blocked", "missing error handling"));
+    created[1]!.finish("success", "missing error handling", doneSignal(false, "missing error handling"));
     await settle();
     expect(store.get(run.id)!.state).toBe("implementing");
     expect(store.get(run.id)!.reviewCycles).toBe(1);
@@ -1098,9 +1108,9 @@ describe("rework bounds", () => {
     expect(rework.steering?.join("\n")).toContain("missing error handling");
 
     // Second implement → second review → cycle 2 hits the cap and parks.
-    created[2]!.finish("success", "fixed", doneSignal("complete"));
+    created[2]!.finish("success", "fixed", doneSignal(true));
     await settle();
-    created[3]!.finish("success", "still wrong", doneSignal("blocked", "still wrong"));
+    created[3]!.finish("success", "still wrong", doneSignal(false, "still wrong"));
     await settle();
     const parked = store.get(run.id)!;
     expect(parked.state).toBe("parked");
@@ -1113,13 +1123,13 @@ describe("rework bounds", () => {
     const run = seedRun(store, makeRun());
     await supervisor.admit(run.id);
     await tick();
-    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    created[0]!.finish("success", "implemented", doneSignal(true));
     await settle();
 
     // The rework spawn dies (harness hiccup). Its steering was already consumed and persisted-as-
     // removed, so without a give-back the re-staffed worker would run with no idea what to fix.
     spawnThrows = new Error("harness binary missing");
-    created[1]!.finish("success", "missing error handling", doneSignal("blocked", "missing error handling"));
+    created[1]!.finish("success", "missing error handling", doneSignal(false, "missing error handling"));
     await settle();
     expect(spawnCalls[2]!.stage).toBe("implement");
     expect(spawnCalls[2]!.steering?.join("\n")).toContain("missing error handling");
@@ -1144,6 +1154,61 @@ describe("rework bounds", () => {
     await settle();
     expect(store.get(run.id)!.state).toBe("parked");
     expect(store.get(run.id)!.error).toContain("schema-valid");
+  });
+});
+
+describe("continuation loop (overhaul B6)", () => {
+  test("done:false with no blocker re-spawns implement with the worker's summary as steering", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "ran out of turn, half done", doneSignal(false, "ran out of turn, half done"));
+    await settle();
+    expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(2);
+    expect(spawnCalls[1]!.steering?.join("\n")).toContain("ran out of turn, half done");
+    expect(store.get(run.id)!.state).toBe("implementing");
+    expect(commitCalls.some((c) => c.message.includes("WIP"))).toBe(true);
+  });
+
+  test("continuation stops at runs.continuation_max and parks with the cap named", async () => {
+    const { supervisor, store } = newSupervisor({
+      config: cfg({ runs: { max_live: 3, continuation_max: 2, budget_usd_per_run: 0 } }),
+    });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "pass 1, not done", doneSignal(false, "pass 1, not done"));
+    await settle();
+    expect(store.get(run.id)!.state).toBe("implementing");
+    created[1]!.finish("success", "pass 2, still not done", doneSignal(false, "pass 2, still not done"));
+    await settle();
+    const parked = store.get(run.id)!;
+    expect(parked.state).toBe("parked");
+    expect(parked.error).toContain("2/2");
+    expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(2);
+  });
+
+  test("a continuation pass does not consume a review cycle", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "ran out of turn", doneSignal(false, "ran out of turn"));
+    await settle();
+    expect(store.get(run.id)!.reviewCycles).toBe(0);
+    expect(store.get(run.id)!.continuations).toBe(1);
+  });
+
+  test("a done:true signal still goes straight to review", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal(true));
+    await settle();
+    expect(store.get(run.id)!.state).toBe("reviewing");
+    expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(1);
   });
 });
 
@@ -1422,7 +1487,7 @@ describe("a worker killed by the daemon's own shutdown", () => {
     expect(typeof blocking[0]!.startedAt).toBe("number");
 
     // Once the stage finishes the run keeps living (publishing) but blocks no deploy.
-    created[0]!.finish("success", "looks good", doneSignal("complete"));
+    created[0]!.finish("success", "looks good", doneSignal(true));
     await settle();
     expect(restartBlockingRunWorkers({ runs: supervisor.live() })).toEqual([]);
     supervisor.stop();
@@ -1719,7 +1784,7 @@ describe("review tier", () => {
     );
     await supervisor.admit(run.id);
     await tick();
-    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    created[0]!.finish("success", "implemented", doneSignal(true));
     await settle();
     expect(spawnCalls.map((c) => c.stage)).toEqual(["implement"]);
     expect(store.get(run.id)!.state).toBe("done");
@@ -1734,7 +1799,7 @@ describe("review tier", () => {
       const run = seedRun(store, makeRun({ slug: `tier-${effort}`, cast: { implement: { harness: "pi", effort } } }));
       await supervisor.admit(run.id);
       await tick();
-      created[0]!.finish("success", "implemented", doneSignal("complete"));
+      created[0]!.finish("success", "implemented", doneSignal(true));
       await settle();
       expect(spawnCalls.map((c) => c.stage)).toEqual([...expected]);
     }
@@ -1745,7 +1810,7 @@ describe("review tier", () => {
     const plain = seedRun(store, makeRun({ slug: "tier-none" }));
     await supervisor.admit(plain.id);
     await tick();
-    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    created[0]!.finish("success", "implemented", doneSignal(true));
     await settle();
     expect(spawnCalls.map((c) => c.stage)).toEqual(["implement", "review"]);
   });
@@ -1763,7 +1828,7 @@ describe("review tier", () => {
       tokens: { input: 10, output: 5, cacheRead: 0, cacheCreate: 0 },
       usdEstimate: 0.01,
     });
-    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    created[0]!.finish("success", "implemented", doneSignal(true));
     await settle();
     const rows = readFileSync(ledger, "utf8").trim().split("\n").map((l) => JSON.parse(l) as SpendRecord);
     expect(rows).toHaveLength(1);
@@ -1793,7 +1858,7 @@ describe("cancel", () => {
 
     // And the run is genuinely off the engine: a late worker finish must not resurrect it into
     // review, publish it, or spawn anything else.
-    worker.finish("success", "implemented", doneSignal("complete"));
+    worker.finish("success", "implemented", doneSignal(true));
     await settle();
     expect(spawnCalls).toHaveLength(1);
     expect(store.get(run.id)!.state).toBe("cancelled");
@@ -2127,7 +2192,7 @@ describe("the live activity blurb", () => {
     // The implement worker finishes while the model is still thinking. Its phrase describes a
     // stage that is over by the time it arrives, so it must be dropped rather than stamped onto
     // the card the run has moved on to.
-    created[0]!.finish("success", "implemented", doneSignal("complete"));
+    created[0]!.finish("success", "implemented", doneSignal(true));
     await settle();
     release("polishing the hero styles");
     await settle();

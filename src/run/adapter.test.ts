@@ -28,6 +28,7 @@ function makeRun(over: Partial<Run> = {}): Run {
     sessionIds: {},
     sessionName: "beckett-run-oauth-middleware",
     reviewCycles: 0,
+    continuations: 0,
     prUrl: null,
     error: null,
     published: null,

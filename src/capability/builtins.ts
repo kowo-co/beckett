@@ -362,6 +362,10 @@ export const configFragments = {
       max_live: posInt.default(3),
       // Implement↔review round-trips before the supervisor stops reworking and parks for a human.
       review_cycles_max: posInt.default(2),
+      // Implement passes an out-of-turn worker (`done:false, blocker:null`) gets before the
+      // supervisor stops re-spawning it and parks for a human. Independent of `review_cycles_max`
+      // — running out of turn is not a review failure.
+      continuation_max: posInt.default(2),
       // Per-run USD ceiling, summed from the spend ledger over rows at/after the run's createdAt.
       // 0 (the default) falls back to `[budget] per_task_usd_cap`, so an install that already
       // tuned the task cap keeps exactly that behavior.

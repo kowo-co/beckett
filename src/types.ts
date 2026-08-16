@@ -176,13 +176,36 @@ export type WorkerEvent =
   /** Forward-compat fallthrough: any raw line we recognized but don't model (Spec 02 §7). */
   | { kind: "unknown"; raw: unknown; ts: number };
 
+/**
+ * A worker's own classification of what stopped it, mirrored by `../run/types.ts#BlockerClass`
+ * (this file must not import from `src/run/` — nothing else here does — so the union is
+ * re-declared verbatim; `src/run/types.ts` re-derives `BlockerClass` from this one).
+ */
+export type DoneBlockerClass =
+  | "credential"
+  | "admin-permission"
+  | "product-decision"
+  | "money"
+  | "question"
+  | "transient"
+  | "continuation";
+
+export interface DoneBlocker {
+  class: DoneBlockerClass;
+  detail: string;
+  remedy: string;
+  /** class "question" only: what should happen on silence. */
+  defaultAnswer: string | null;
+}
+
 /** The structured "done-signal" both harnesses fill in when finished (Spec 02 §6). */
 export interface DoneSignal {
-  status: "complete" | "blocked" | "partial";
+  done: boolean;
   summary: string;
   filesChanged: string[];
   checksRun?: string[];
-  blockedReason?: string;
+  /** Non-null ⇒ something outside the worker's reach stopped it. */
+  blocker: DoneBlocker | null;
 }
 
 // =======================================================================================
@@ -937,6 +960,8 @@ export interface Config {
     max_live: number;
     /** Implement↔review round-trips before the supervisor parks the run for a human. Default 2. */
     review_cycles_max: number;
+    /** Implement passes an out-of-turn worker gets before the supervisor parks it. Default 2. */
+    continuation_max: number;
     /** Per-run USD ceiling; 0 falls back to `[budget] per_task_usd_cap`. Default 0. */
     budget_usd_per_run: number;
     /**

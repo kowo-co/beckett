@@ -332,9 +332,20 @@ export class PiDriver extends OneShotDriver implements HarnessDriver {
     );
   }
 
-  /** pi reports crash exits as a blocked done-signal so the dispatcher sees a reason. */
+  /** pi reports crash exits as a transient-blocker done-signal so the dispatcher sees a reason. */
   protected override exitFinishStructuredOutput(message: string): unknown {
-    return { status: "blocked", summary: message, filesChanged: [], checksRun: [], blockedReason: message };
+    return {
+      done: false,
+      summary: message,
+      filesChanged: [],
+      checksRun: [],
+      blocker: {
+        class: "transient",
+        detail: message,
+        remedy: "retry the run once the harness is healthy",
+        defaultAnswer: null,
+      },
+    };
   }
 
   protected override launchLogFields(): Record<string, unknown> {
@@ -644,7 +655,7 @@ export class PiDriver extends OneShotDriver implements HarnessDriver {
       return;
     }
 
-    // A completed run (no pending steering) IS success; the done-signal's own status drives the
+    // A completed run (no pending steering) IS success; the done-signal's own `done` drives the
     // dispatcher's pass/fail verdict downstream.
     this.emit({
       kind: "finished",

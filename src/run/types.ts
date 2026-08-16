@@ -106,6 +106,8 @@ export interface Run {
   /** "beckett-run-<slug>" — the cross-session address. */
   sessionName: string;
   reviewCycles: number;
+  /** Implement passes spent on "ran out of turn" (`done:false, blocker:null`). */
+  continuations: number;
   prUrl: string | null;
   error: string | null;
   /** How a `done` run got published — null until it does (see {@link PublishRecord}). */

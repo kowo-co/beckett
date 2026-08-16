@@ -63,7 +63,7 @@ export interface WorkerResult {
   status: "success" | "error";
   /** A short human summary (done-signal `summary`, else the last assistant text). */
   summary: string;
-  /** The raw structured done-signal (`{ status, summary, filesChanged, ... }`), if any. */
+  /** The raw structured done-signal (`{ done, summary, filesChanged, blocker, ... }`), if any. */
   structured: unknown | null;
   /**
    * True when this run ended because it tripped the generous backstop wall-clock cap (the driver's
@@ -229,15 +229,35 @@ export interface SpawnWorkerArgs {
 // NOTE: codex's `--output-schema` enforces OpenAI strict mode — EVERY property must appear in
 // `required`, and "optional" fields are expressed as nullable unions (type: [..., "null"]).
 // Claude accepts this form too, so one schema serves both harnesses.
+const DONE_BLOCKER_CLASSES = [
+  "credential",
+  "admin-permission",
+  "product-decision",
+  "money",
+  "question",
+  "transient",
+  "continuation",
+] as const;
+
 const DONE_SCHEMA = {
   type: "object",
-  required: ["status", "summary", "filesChanged", "checksRun", "blockedReason"],
+  required: ["done", "summary", "filesChanged", "checksRun", "blocker"],
   properties: {
-    status: { type: "string", enum: ["complete", "blocked", "partial"] },
+    done: { type: "boolean" },
     summary: { type: "string" },
     filesChanged: { type: "array", items: { type: "string" } },
     checksRun: { type: ["array", "null"], items: { type: "string" } },
-    blockedReason: { type: ["string", "null"] },
+    blocker: {
+      type: ["object", "null"],
+      required: ["class", "detail", "remedy", "defaultAnswer"],
+      properties: {
+        class: { type: "string", enum: DONE_BLOCKER_CLASSES },
+        detail: { type: "string" },
+        remedy: { type: "string" },
+        defaultAnswer: { type: ["string", "null"] },
+      },
+      additionalProperties: false,
+    },
   },
   additionalProperties: false,
 } as const;

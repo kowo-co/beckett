@@ -82,6 +82,8 @@ const RunSchema = z.object({
   sessionIds: z.record(z.string(), z.string()).default({}),
   sessionName: z.string().min(1),
   reviewCycles: z.number().int().nonnegative(),
+  // Nullable-safe default so an OLD persisted row (minted before continuations existed) parses.
+  continuations: z.number().int().nonnegative().default(0),
   prUrl: z.string().nullable(),
   error: z.string().nullable(),
   // Nullable + defaulted so an OLD persisted row (minted before `published` existed) still parses
@@ -176,6 +178,7 @@ export class RunStore {
         sessionIds: {},
         sessionName: `beckett-run-${slug}`,
         reviewCycles: 0,
+        continuations: 0,
         prUrl: null,
         error: null,
         published: null,
