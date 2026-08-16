@@ -2010,12 +2010,15 @@ export class RunSupervisor {
         const fresh = this.store.get(run.id) ?? run;
         // `courier` overwrites `published`/`landingMode` and is only for a landing the daemon
         // never drove — a run beckett itself published via the outbox is not eligible for it
-        // (see `courier()`'s guard), so naming the command here would send the reader into a
-        // no-op. Its remedy is to fix the PR, then `beckett task resume`.
+        // (see `courier()`'s guard). Nor is `resume`: it refuses any run with `published !== null`
+        // (publish-blocked), which every outbox-published run always is. Naming either command
+        // here would send the reader into a two-command dead-end loop, so name neither — the truth
+        // is that this is beckett's own landing and needs a human to look at it directly.
         const remedy =
           fresh.published?.via === "outbox" && fresh.published.prUrl
-            ? `check ${fresh.prUrl ?? fresh.proof?.pushUrl ?? "the landing"}, fix it, then \`beckett task resume ${fresh.id}\` ` +
-              `— or accept the landing by hand`
+            ? `check ${fresh.prUrl ?? fresh.proof?.pushUrl ?? "the landing"} — beckett already published ` +
+              `this run, so neither \`task resume\` (publish-blocked) nor \`task courier\` (already ` +
+              `terminal) applies; confirm the PR landed and accept it by hand, or re-deploy the change`
             : `check ${fresh.prUrl ?? fresh.proof?.pushUrl ?? "the landing"} and either fix it or ` +
               `\`beckett task courier ${fresh.id}\``;
         await this.hold(

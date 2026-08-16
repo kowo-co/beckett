@@ -1169,8 +1169,10 @@ describe("proof gates done (overhaul B12)", () => {
     expect(parked.blocker?.actor).toBe("human");
     expect(parked.error).toContain("2 re-check");
     // A run the daemon itself published via the outbox is not eligible for `courier` (it would
-    // erase the real PR URL/landing mode) — its remedy is `resume` after the PR is fixed.
-    expect(parked.error).toContain(`beckett task resume ${run.id}`);
+    // erase the real PR URL/landing mode) — and `resume` refuses it too (publish-blocked), so the
+    // remedy must name neither command, only the truth: confirm and accept by hand.
+    expect(parked.error).toContain("beckett already published this run");
+    expect(parked.error).not.toContain("beckett task resume");
     expect(parked.error).not.toContain("beckett task courier");
   });
 
