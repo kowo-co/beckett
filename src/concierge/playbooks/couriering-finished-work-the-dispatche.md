@@ -4,16 +4,19 @@ For an owned repo, publish already did the pushing and PR-opening itself: the ru
 commit leaves the machine as `beckett/<run-id>` before any trunk integration is even attempted, a
 PR opens (or is reused) against trunk, CI is awaited, and GitHub merges it via the API. When a run
 PARKS on a publish failure, the work is almost never stranded — it is on GitHub, and the blocker
-names exactly what's stopping the merge. **You are the courier for whatever's left**, never a
-rebuilder.
+names exactly what's stopping the merge. This is the one park `beckett task steer`/`task resume`
+refuse by name (an `admin-permission` blocker, or any run whose publish already left the machine)
+— **you are the courier for whatever's left**, never a rebuilder.
 
-1. **Read the blocker** (`beckett task ask <ref>` / `task show`) before touching anything. It
-   tells you which of these you're in:
+1. **Read the blocker** before touching anything: `beckett task ask <ref>` gives you its rendered
+   text as `error`; `beckett task show <ref>` gives you the typed object when `class`/`actor`
+   matters. It tells you which of these you're in:
    - **A PR is open and something's blocking it** (CI red, merge conflicts, a missing review) —
      the blocker names the PR URL. Clear it *on the PR* — push a fix, resolve the conflict, get the
      review — never push a fresh branch or open a second PR. Once it merges (its own CI-gated API
      merge, or a human clearing the last blocker by hand), close the bookkeeping:
-     `beckett task courier <ref> [--pr-url <url>]`.
+     `beckett task courier <ref> --pr-url <url>`. Leave off `--pr-url` and the run lands
+     `unverified`, not `done` — always pass the merged PR URL when you have it.
    - **The work already landed** (a retry after an earlier attempt's PR already merged) — don't
      push again, that would open a duplicate PR of work that's already on trunk. Just courier it:
      `beckett task courier <ref> --pr-url <the PR that merged it>`.
