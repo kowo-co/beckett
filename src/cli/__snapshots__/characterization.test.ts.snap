@@ -504,6 +504,17 @@ exports[`cli: identity: unknown sub fails 1`] = `
 }
 `;
 
+exports[`cli: routine: proactive-sweep reaches its body and refuses on an unresolved GitHub identity 1`] = `
+{
+  "exit": 1,
+  "stderr": 
+"error: proactive-sweep cannot resolve Beckett's GitHub identity: GitHub account is not configured — set GITHUB_ACCOUNT or identity.github_user in config.toml
+"
+,
+  "stdout": "",
+}
+`;
+
 exports[`cli: gh: without GitHub credentials is refused 1`] = `
 {
   "exit": 1,
@@ -1913,6 +1924,12 @@ bubble_delay_ms = 2500
 system_override = ""
 skip_code_blocks = true
 
+[concierge.memory_primer]
+enabled = true
+max_notes = 3
+max_chars = 1200
+min_score = 0.5
+
 [quick]
 enabled = true
 model = "claude-sonnet-5"
@@ -2085,17 +2102,6 @@ exports[`cli: persona: daemon down fails on the bus 1`] = `
   "exit": 1,
   "stderr": 
 "error: shell not running (socket <BECKETT_DIR>/control.sock): <CONNECT_ERROR>
-"
-,
-  "stdout": "",
-}
-`;
-
-exports[`cli: routine: proactive-sweep reaches its body and refuses on an unresolved GitHub identity 1`] = `
-{
-  "exit": 1,
-  "stderr": 
-"error: proactive-sweep cannot resolve Beckett's GitHub identity: GitHub account is not configured — set GITHUB_ACCOUNT or identity.github_user in config.toml
 "
 ,
   "stdout": "",
