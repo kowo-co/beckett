@@ -694,10 +694,6 @@ export function planFreeTimeProposals(
   for (const [i, entry] of entries.entries()) {
     const claim = trimLine(entry.claim ?? "");
     const label = claim || `idea ${i + 1}`;
-    if (keep.length >= opts.max) {
-      dropped.push(`${label} (over the ${opts.max}-per-session cap)`);
-      continue;
-    }
     if (!claim) {
       dropped.push(`idea ${i + 1} (empty claim)`);
       continue;
@@ -709,6 +705,10 @@ export function planFreeTimeProposals(
     const why = trimLine(entry.why ?? "");
     if (!why) {
       dropped.push(`${label} (empty why)`);
+      continue;
+    }
+    if (keep.length >= opts.max) {
+      dropped.push(`${label} (over the ${opts.max}-per-session cap)`);
       continue;
     }
     const key = normalizeClaim(claim);

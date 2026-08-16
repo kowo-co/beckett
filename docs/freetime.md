@@ -84,7 +84,7 @@ having died mid-thought, which is more useful than a clean absence.
 ### The CTO seat's slice
 
 Part of every session belongs to the company, not to Beckett's own bugs
-([the CTO seat](concierge/playbooks/the-cto-seat.md)). Before the prompt is built the runner reads
+([the CTO seat](../src/concierge/playbooks/the-cto-seat.md)). Before the prompt is built the runner reads
 `~/.beckett/company.md` (`src/company.ts`) and hands it in verbatim, capped at 4,000 tail-trimmed
 characters so a long brief cannot eat the session's budget; when the file is still unanswered or
 missing, the prompt says so plainly instead of asking the session to guess.
