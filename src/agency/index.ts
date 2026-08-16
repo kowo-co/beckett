@@ -933,10 +933,11 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
     await this.ensureCreds("publish repo");
     // Clean the source tree once up front (OPS-61) so NO publish path — including the brand-new-repo
     // `gh repo create --push`, which bypasses gitPush — can leak Beckett's internal harness state.
-    // Then assert it actually took: a strip that silently failed to remove a tracked harness path
-    // must never publish quietly (publish-path only — never called from gitPush).
+    // The assertion that the strip actually took runs later, once the tree that will be PUSHED is
+    // final (after commitStrayWorkingTree/squashLocalCommits in case 2, right before the push in
+    // case 3) — asserting here, before those steps can reintroduce a tracked harness path (e.g. a
+    // stray root `spec.md` picked up by commitStrayWorkingTree), would let it slip through unseen.
     await this.stripHarnessState(p.sourceDir);
-    await this.assertNoHarnessState(p.sourceDir);
     const ref = (p.ticket ?? p.slug).toLowerCase().replace(/[^a-z0-9._-]+/g, "-");
     const branch = `beckett/${ref}`;
     const title = p.description?.trim() || `beckett: ${p.slug}`;
@@ -1003,6 +1004,9 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
       // has to touch (#261/#246 stay correct under the push-first order).
       await this.commitStrayWorkingTree(p.sourceDir, commitSummary);
       await this.squashLocalCommits(p.sourceDir, p.baseSha, commitSummary);
+      // The tree that will be pushed is final now — assert no harness path is tracked in it. Any
+      // later than this and the assertion can't see what it exists to catch.
+      await this.assertNoHarnessState(p.sourceDir);
       // Resolve + validate the trunk before any network action — refuses outright if the repo's
       // default branch is itself a sibling run's branch (`kowo-co/babble`, 2026-08-14).
       const trunk = await this.resolveTrunk(repo, p.targetBranch);
@@ -1059,6 +1063,8 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
       private: false, // project repos are public so links Beckett hands out actually resolve
       description: p.description,
     });
+    // The tree that will be pushed is final now — assert no harness path is tracked in it.
+    await this.assertNoHarnessState(p.sourceDir);
     await this.gitPush(p.sourceDir, created.nameWithOwner, "HEAD", "main");
     // Leave a plain (credential-free) origin behind: gitPush authenticates via an ad-hoc URL, so
     // without this the freshly created project has NO origin remote at all — and `beckett finish`
@@ -1210,7 +1216,14 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
         const prUrl = err.message.match(/https?:\/\/\S+\/pull\/\d+/)?.[0] ?? "";
         throw new Error(`publish: still waiting on CI for ${prUrl} — ${err.message}`);
       }
-      if (err.stage === "pr" && /no commits between/i.test(err.message)) {
+      // land.ts translates the raw "no commits between" gh failure into a friendlier
+      // "has no commits that <base> does not already have" message (src/cli/land.ts:263-270) before
+      // it ever reaches here — matching the raw phrase alone left this branch unreachable.
+      if (err.stage === "pr" && /no commits (?:between|that .+ does not already have)/i.test(err.message)) {
+        // An earlier attempt already merged this branch's PR (and GitHub deleted the branch). The
+        // landing WAS a PR — report it as one rather than degrading to a bare commit URL.
+        const merged = await this.findMergedPR(p.repo, p.branch);
+        if (merged) return { prUrl: merged.url };
         return { prUrl: "", sha: await this.currentSha(p.cwd) };
       }
       // A `read` stage failure is a `gh pr view` network/5xx blip, not a GitHub verdict — and a
@@ -1279,10 +1292,10 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
       cwd,
       paths: dirty.slice(0, 20),
     });
-    const add = await this.runner(["git", "add", "-A", "--", ".", `:(exclude)${SCAFFOLDING_DIR}`], {
-      cwd,
-      env: this.gitEnv(),
-    });
+    const add = await this.runner(
+      ["git", "add", "-A", "--", ".", ...GitHubCli.HARNESS_PATHS.map((p) => `:(exclude)${p}`)],
+      { cwd, env: this.gitEnv() },
+    );
     if (add.code !== 0) {
       this.opts.logger.warn("could not stage the loose publish work (rebase will report the dirty tree)", {
         cwd,
@@ -1506,6 +1519,27 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
     const branch = head.includes(":") ? (head.split(":").pop() ?? head) : head;
     const r = await this.runner(
       ["gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "open", "--json", "number,url", "--limit", "1"],
+      { env: this.ghEnv() },
+    );
+    if (r.code !== 0) return null;
+    try {
+      const arr = JSON.parse(r.stdout) as Array<{ number: number; url: string }>;
+      const first = arr[0];
+      return first ? { number: first.number, url: first.url } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The already-MERGED PR for `head` on `repo` — for the retry case where an earlier attempt
+   * merged the PR via the API (which deletes the head branch), leaving no open PR to find. Same
+   * shape as {@link findOpenPR}, `--state merged` instead of `--state open`.
+   */
+  private async findMergedPR(repo: string, head: string): Promise<{ number: number; url: string } | null> {
+    const branch = head.includes(":") ? (head.split(":").pop() ?? head) : head;
+    const r = await this.runner(
+      ["gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "merged", "--json", "number,url", "--limit", "1"],
       { env: this.ghEnv() },
     );
     if (r.code !== 0) return null;
