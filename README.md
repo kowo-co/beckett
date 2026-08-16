@@ -325,7 +325,6 @@ src/
   worker/       the coding-agent harness (worktree, scope-guard, casting)
   drivers/      claude / codex / pi process drivers
   memory/       cross-conversation knowledge graph
-  rpc/          Discord Rich Presence daemon (separate service)
   cli/          the `beckett` CLI (one entrypoint, beckett.ts)
   config.ts     strict, fully-defaulted config schema
 deploy/         systemd units, install.sh, deploy-prod.sh, host-setup.md

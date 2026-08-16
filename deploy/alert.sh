@@ -23,8 +23,8 @@ if [ "${MODE}" = "stop" ] && [ "${SERVICE_RESULT:-success}" = "success" ]; then 
 WEBHOOK="${DISCORD_ALERT_WEBHOOK_URL:-}"
 [ -z "${WEBHOOK}" ] && exit 0
 
-# Rate limit per unit so a crash loop is one alert a minute, not one per RestartSec. The rpc
-# daemon is cosmetic (it flaps when no Discord desktop is around) — throttle it much harder.
+# Rate limit per unit so a crash loop is one alert a minute, not one per RestartSec. Non-prod
+# units are lower-stakes — throttle them much harder.
 WINDOW=60
 [ "${UNIT}" != "beckett-v4" ] && WINDOW=3600
 STAMP="${HOME}/.beckett/alert-${UNIT}.stamp"

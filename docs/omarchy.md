@@ -159,7 +159,7 @@ identically on Arch since `systemd/User` behavior isn't distro-specific. Once li
 Omarchy's own background services (battery monitor, SwayOSD server, fcitx5) are ordinary
 `~/.config/systemd/user/*.service` units following the shape `After=graphical-session.target` /
 `ExecStart=%h/.local/share/omarchy/bin/…` / `WantedBy=graphical-session.target` — the same
-primitive Beckett already uses (`beckett-v4.service`, `beckett-rpc.service` in `deploy/systemd/`).
+primitive Beckett already uses (`beckett-v4.service`, `beckett-dev.service` in `deploy/systemd/`).
 No unit-format change is needed for the Arch port; the one thing worth reconsidering is that
 `After=graphical-session.target` dependency, since that target only fires for a real logged-in
 graphical session — which beckett's account, by design, may never have if it skips §3 entirely.

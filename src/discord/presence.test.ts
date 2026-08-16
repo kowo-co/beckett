@@ -101,10 +101,9 @@ test("initialPresenceData is the nothing-running state", () => {
   });
 });
 
-/** Collect what the two sinks received, with a controllable clock. */
+/** Collect what the sink received, with a controllable clock. */
 function harness(startMs = 1_000) {
   const presences: PresenceData[] = [];
-  const statuses: Array<{ details: string; state: string }> = [];
   let clock = startMs;
   const controller = new PresenceController({
     logger: silentLogger,
@@ -112,13 +111,11 @@ function harness(startMs = 1_000) {
     minSendIntervalMs: 15_000,
     sinks: {
       setPresence: (data) => { presences.push(data); },
-      writeStatus: (payload) => { statuses.push(payload); },
     },
   });
   return {
     controller,
     presences,
-    statuses,
     advance: (ms: number) => { clock += ms; },
   };
 }
@@ -128,7 +125,16 @@ describe("PresenceController — change-only + rate floor", () => {
     const h = harness();
     await h.controller.update(NOTHING);
     expect(h.presences).toHaveLength(1);
-    expect(h.statuses).toEqual([{ details: "an empty board", state: "beckett" }]);
+    expect(h.presences[0]?.activities?.[0]?.state).toBe("an empty board");
+  });
+
+  test("a presence update with only the gateway sink still emits on change", async () => {
+    const h = harness();
+    await h.controller.update(NOTHING);
+    h.advance(60_000);
+    await h.controller.update({ ...NOTHING, branchesInFlight: 2 });
+    expect(h.presences).toHaveLength(2);
+    expect(h.presences[1]?.activities?.[0]?.state).toBe("2 branches build");
   });
 
   test("does not re-emit when the derived line is unchanged", async () => {
@@ -137,7 +143,6 @@ describe("PresenceController — change-only + rate floor", () => {
     h.advance(60_000);
     await h.controller.update({ ...NOTHING, branchesInFlight: 0 }); // same line
     expect(h.presences).toHaveLength(1);
-    expect(h.statuses).toHaveLength(1);
   });
 
   test("emits again when the line actually changes", async () => {
@@ -147,7 +152,6 @@ describe("PresenceController — change-only + rate floor", () => {
     await h.controller.update({ ...NOTHING, branchesInFlight: 2 });
     expect(h.presences).toHaveLength(2);
     expect(h.presences[1]?.activities?.[0]?.state).toBe("2 branches build");
-    expect(h.statuses[1]).toEqual({ details: "2 branches build", state: "beckett" });
   });
 
   test("a change inside the 15s floor is suppressed, then re-sent after the floor", async () => {
@@ -180,27 +184,12 @@ describe("PresenceController — change-only + rate floor", () => {
 });
 
 describe("PresenceController — failures are contained", () => {
-  test("a throwing setPresence sink still writes the status file and never throws", async () => {
-    const statuses: Array<{ details: string; state: string }> = [];
+  test("a throwing setPresence sink never throws out of update", async () => {
     const controller = new PresenceController({
       logger: silentLogger,
       now: () => 1_000,
       sinks: {
         setPresence: () => { throw new Error("gateway down"); },
-        writeStatus: (payload) => { statuses.push(payload); },
-      },
-    });
-    await controller.update(NOTHING); // must resolve, not reject
-    expect(statuses).toEqual([{ details: "an empty board", state: "beckett" }]);
-  });
-
-  test("both sinks throwing is swallowed", async () => {
-    const controller = new PresenceController({
-      logger: silentLogger,
-      now: () => 1_000,
-      sinks: {
-        setPresence: () => { throw new Error("boom"); },
-        writeStatus: () => { throw new Error("disk full"); },
       },
     });
     await expect(controller.update(NOTHING)).resolves.toBeUndefined();

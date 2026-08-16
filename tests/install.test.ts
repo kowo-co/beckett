@@ -625,7 +625,7 @@ describe("systemd unit installer staging", () => {
   });
 
   test("service units resolve Bun from the declared daemon PATH", () => {
-    for (const name of ["beckett-v4.service", "beckett-rpc.service"]) {
+    for (const name of ["beckett-v4.service", "beckett-dev.service"]) {
       const unit = readFileSync(join(REPO, "deploy/systemd", name), "utf8");
       expect(unit).toContain("ExecStart=/usr/bin/env bun");
       expect(unit).toContain(".bun/bin");
