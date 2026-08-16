@@ -52,7 +52,7 @@ const MAX_ATTACHMENT_CANDIDATES = 32;
 /** Uploads one lease may stage. Bounds the bytes copied into BetterWright's artifact dir. */
 const MAX_STAGED_ATTACHMENTS = 32;
 /** Not-yet-staged files a permitted root's own reachable media pre-stages, per lease. */
-const MAX_ROOT_PRESTAGED = 8;
+export const MAX_ROOT_PRESTAGED = 8;
 /** Directory entries examined while walking a root for pre-staging. Bounds the I/O cost. */
 const MAX_ROOT_SCAN_ENTRIES = 200;
 /** How deep pre-staging walks under a permitted root. */
@@ -542,7 +542,7 @@ const attachFile = async (target, sourcePath) => {
     const refusal = ${refusals}[sourcePath];
     throw new Error(
       "attachFile refuses paths outside this run's approved attachment roots"
-      + " (" + (refusal || "the host never saw this path; write it as a literal string, not a computed value") + ")"
+      + " (" + (refusal || "the host never saw this path; name it as a literal string so the host can validate it") + ")"
       + "; approved roots: " + ${roots}
       ${known ? `+ "; approved paths: " + ${known}` : ""},
     );

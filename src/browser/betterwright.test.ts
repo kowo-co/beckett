@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   BrowserLeaseCapExceededError,
   createBetterWrightRuntime,
+  MAX_ROOT_PRESTAGED,
   type BetterWrightClient,
 } from "./betterwright.ts";
 import type { BrowserHostSettings, BrowserLease } from "./runtime.ts";
@@ -459,7 +460,7 @@ describe("attachFile honors the configured attachment roots", () => {
     const code = await bridgeFor("return await attachFile('input[type=file]', '/does/not/exist.png')");
     const approved = bridgedApprovals(code);
     const staged = paths.filter((path) => approved[path] !== undefined);
-    expect(staged.length).toBe(8);
+    expect(staged.length).toBe(MAX_ROOT_PRESTAGED);
     expect(approved[paths[11]!]).toBeString();
   });
 
