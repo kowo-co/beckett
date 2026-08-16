@@ -7620,7 +7620,14 @@ export class Concierge {
       return "";
     }
 
-    const fresh = hits.filter((h) => h.score >= minScore && !seen.names.has(h.node.name)).slice(0, maxNotes);
+    // min_score is a fraction of the TOP hit's score, not an absolute — recall's scorer (moss
+    // hybrid (0,1], or unbounded lexical on the fallback path) has no fixed scale, so an absolute
+    // floor either admits everything or excludes everything depending on the query. Keeping only
+    // hits within `minScore` of the best match enforces the real bar: "an irrelevant block is
+    // worse than no block" (spec) means competitive-with-the-best, not merely "matched at all".
+    const topScore = hits.length > 0 ? hits[0]!.score : 0;
+    const floor = topScore * minScore;
+    const fresh = hits.filter((h) => h.score >= floor && !seen.names.has(h.node.name)).slice(0, maxNotes);
     if (fresh.length === 0) return "";
 
     const lines: string[] = [];
@@ -8706,6 +8713,8 @@ function crossChannelQueryTerms(text: string): string[] {
 const MEMORY_PRIMER_STOPLIST = new Set([
   "ok", "okay", "thanks", "thank you", "thx", "ty", "yes", "no", "sure", "cool", "nice", "k",
   "np", "lol", "got it", "great", "perfect", "awesome", "yep", "yup", "nope", "gotcha",
+  "thanks a lot", "thank you so much", "sounds good to me", "got it, thanks", "ok sounds good",
+  "perfect, thank you", "great, thanks a lot",
 ]);
 
 /**

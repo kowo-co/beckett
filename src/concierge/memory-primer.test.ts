@@ -227,9 +227,13 @@ test("a short or command-like message never calls recall", async () => {
 
   await c.onMessage(message({ userId: ALICE, content: "ok thanks!", messageId: "m1" }));
   await c.onMessage(message({ userId: ALICE, content: "short one", messageId: "m2" }));
+  // "sounds good to me" is 18 chars — clears the length gate on its own, so this only skips
+  // recall if the stoplist itself is actually consulted (it used to be dead code below the gate).
+  await c.onMessage(message({ userId: ALICE, content: "sounds good to me", messageId: "m3" }));
   expect(calls).toBe(0);
   expect(stamp(asks[0]!)).not.toContain("SYSTEM (helpful memories");
   expect(stamp(asks[1]!)).not.toContain("SYSTEM (helpful memories");
+  expect(stamp(asks[2]!)).not.toContain("SYSTEM (helpful memories");
 });
 
 test("max_chars caps the injected block", async () => {

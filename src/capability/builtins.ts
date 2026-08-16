@@ -585,9 +585,10 @@ export const configFragments = {
           max_notes: posInt.default(3),
           // Total rendered chars per turn (bodies truncated at a sentence boundary past this).
           max_chars: posInt.default(1200),
-          // Relevance gate, same scale and default as `cross_channel_min_score` above: a hit
-          // below this is not worth a turn's attention. The block is omitted, not shrunk, when
-          // nothing clears it.
+          // Relevance gate, NOT the same scale as `cross_channel_min_score` above — recall's
+          // scorer (moss hybrid, bounded (0,1], or the unbounded lexical fallback) has no fixed
+          // absolute scale. This is a FRACTION OF THE TOP HIT'S score: only hits within min_score
+          // of the best match ride along. The block is omitted, not shrunk, when nothing clears it.
           min_score: z.number().positive().default(0.5),
         })
         .strict()

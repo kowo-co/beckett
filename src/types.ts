@@ -1133,7 +1133,7 @@ export interface Config {
       max_notes: number;
       /** Total rendered chars per turn; bodies truncate at a sentence boundary past this. */
       max_chars: number;
-      /** Relevance gate below which a hit is omitted rather than shown. */
+      /** Relevance gate: a fraction of the TOP hit's score (not an absolute) below which a hit is omitted. */
       min_score: number;
     };
   };
