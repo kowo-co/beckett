@@ -52,3 +52,15 @@ test("the shipped concierge default is claude-sonnet-5 at medium effort", () => 
   // Guardrail: the swap must not have touched the (already-Sonnet) quick lane.
   expect(config.quick.model).toBe("claude-sonnet-5");
 });
+
+// overhaul B-P16 (Task 4) — [proactive_sweep] repos is the sweep's ONE explicit opt-in list.
+test("[proactive_sweep] repos defaults to empty", () => {
+  const config = defaultConfig();
+  expect(config.proactive_sweep.repos).toEqual([]);
+});
+
+test("a repo entry that isn't owner/name is refused at config load", () => {
+  expect(() => validateConfig({ proactive_sweep: { repos: ["not-owner-slash-name"] } })).toThrow(
+    /owner\/name/,
+  );
+});

@@ -983,6 +983,15 @@ export interface Config {
       throttle_secs: number;
     };
   };
+  /**
+   * Proactive rot sweep: the EXPLICIT repo opt-in list, `owner/name`. Empty (the default) sweeps
+   * nothing — there is no "all my repos" switch. This list is config-authoritative on every
+   * routine-store load (not seed-only), so it is the ONE source of truth for which repos are
+   * ever touched.
+   */
+  proactive_sweep: {
+    repos: string[];
+  };
   /** OPS-124 — GitHub PR poller. The credential lives in env; active only when one is set. */
   github: {
     /** How often to re-read watched PRs' review/CI/merge signal (seconds). */

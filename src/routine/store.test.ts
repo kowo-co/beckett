@@ -267,16 +267,34 @@ test("removing a built-in sticks across a restart (not re-seeded)", async () => 
   expect(JSON.parse(readFileSync(path, "utf8")).removedBuiltins).toContain("daily-x-shitpost");
 });
 
-test("setProactiveRepos edits the built-in sweep's opt-in list (de-duped, order-stable)", async () => {
-  const { store } = makeStore();
-  // Ships enabled but with an EMPTY list — dormant until a repo is opted in.
-  const seeded = await store.get("proactive-sweep");
+test("the sweep's repo list comes from the config override, on every load", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-routines-sweep-"));
+  dirs.push(dir);
+  const path = join(dir, "routines.json");
+
+  const storeA = new RoutineStore(path, { builtins: { proactiveSweep: { repos: ["me/a"] } } });
+  const seeded = await storeA.get("proactive-sweep");
   expect(seeded!.action.kind).toBe("proactive-sweep");
-  if (seeded!.action.kind === "proactive-sweep") expect(seeded!.action.repos).toEqual([]);
+  if (seeded!.action.kind === "proactive-sweep") expect(seeded!.action.repos).toEqual(["me/a"]);
 
-  const updated = await store.setProactiveRepos("proactive-sweep", ["me/a", " me/b ", "me/a"]);
-  if (updated.action.kind === "proactive-sweep") expect(updated.action.repos).toEqual(["me/a", "me/b"]);
+  // A second store, pointed at the SAME file, with a DIFFERENT config override — config wins over
+  // whatever is already on disk; there is no lingering "me/a" from the first load.
+  const storeB = new RoutineStore(path, { builtins: { proactiveSweep: { repos: ["me/b"] } } });
+  const reloaded = await storeB.get("proactive-sweep");
+  if (reloaded!.action.kind === "proactive-sweep") expect(reloaded!.action.repos).toEqual(["me/b"]);
+});
 
-  // It refuses to write repos onto a non-sweep routine.
-  await expect(store.setProactiveRepos("daily-x-shitpost", ["me/a"])).rejects.toThrow(/not a "proactive-sweep"/);
+test("an omitted proactiveSweep override leaves an existing list untouched", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-routines-sweep-noop-"));
+  dirs.push(dir);
+  const path = join(dir, "routines.json");
+
+  const storeA = new RoutineStore(path, { builtins: { proactiveSweep: { repos: ["me/a"] } } });
+  await storeA.get("proactive-sweep");
+
+  // No `builtins` override at all this time — the config-authoritative reconcile is a no-op, and
+  // the list from the prior load survives untouched.
+  const storeB = new RoutineStore(path);
+  const reloaded = await storeB.get("proactive-sweep");
+  if (reloaded!.action.kind === "proactive-sweep") expect(reloaded!.action.repos).toEqual(["me/a"]);
 });

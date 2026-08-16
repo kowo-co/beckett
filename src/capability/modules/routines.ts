@@ -650,10 +650,10 @@ export const createRoutinesExtension =
     }
 
     /**
-     * Seed-time schedule for the built-ins that read config — free time only. Both store
-     * constructions (daemon + CLI) go through this so a fresh routines.json is seeded with the
-     * SAME window whichever process happens to create it first. A weekday config typo fails the
-     * config schema, not here.
+     * The built-in overrides sourced from config. Free time's window is seed-only (applied once,
+     * so a fresh routines.json is seeded with the SAME window whichever process happens to create
+     * it first — a weekday config typo fails the config schema, not here). The proactive sweep's
+     * repo list is applied on every load — see `RoutineStore.reconcileProactiveSweep`.
      */
     function builtinOverrides(): BuiltinRoutineOverrides {
       const ft = ctx.config.free_time;
@@ -662,6 +662,7 @@ export const createRoutinesExtension =
           weekday: WeekdaySchema.parse(ft.weekday),
           window: { start: ft.window_start, end: ft.window_end, tz: ft.tz },
         },
+        proactiveSweep: { repos: ctx.config.proactive_sweep.repos },
       };
     }
 
@@ -1027,41 +1028,39 @@ export const createRoutinesExtension =
         }
       }
 
-      // Manage the proactive rot sweep's EXPLICIT opt-in repo list (issue #79) — the config the sweep
-      // gates on. `list` shows it; `add`/`remove` opt a repo in / out. This is the ONLY way a repo
-      // gets swept: there is no "all repos" switch. The `--routine` flag targets a non-default sweep
-      // routine; it defaults to the built-in `proactive-sweep`.
+      // Show the proactive rot sweep's EXPLICIT opt-in repo list (issue #79) — the config the sweep
+      // gates on. This is a READ ONLY: the list itself is declared in `[proactive_sweep] repos` in
+      // config.toml and applied on every routine-store load, so there is exactly one source of
+      // truth for an allow-list. The `--routine` flag targets a non-default sweep routine; it
+      // defaults to the built-in `proactive-sweep`. Note: reconcileProactiveSweep forces the SAME
+      // config list onto every proactive-sweep routine on every load, so `--routine` only changes
+      // which routine's enabled/id fields are shown — the repos list is identical across all of them.
       if (sub === "proactive") {
         const { _, flags } = parse(rest);
-        const [op, ...repoArgs] = _;
+        const [op] = _;
         const targetId = flags.routine ? String(flags.routine) : PROACTIVE_SWEEP_ID;
-        const routine = await store.get(targetId);
-        if (!routine) fail(`no such routine: ${targetId}`);
-        if (routine!.action.kind !== "proactive-sweep") fail(`routine ${targetId} is not a proactive-sweep routine`);
-        const current = (routine!.action as { repos: string[] }).repos;
 
         if (!op || op === "list") {
-          out({ routine: targetId, enabled: routine!.enabled, repos: current });
-        } else if (op === "add" || op === "remove") {
-          if (repoArgs.length === 0) fail(`usage: beckett routine proactive ${op} <owner/name> [<owner/name>...]`);
-          const next =
-            op === "add"
-              ? [...current, ...repoArgs]
-              : current.filter((r) => !repoArgs.includes(r));
-          try {
-            const updated = await store.setProactiveRepos(targetId, next);
-            out({ routine: targetId, enabled: updated.enabled, repos: (updated.action as { repos: string[] }).repos });
-          } catch (err) {
-            fail((err as Error).message);
-          }
+          const routine = await store.get(targetId);
+          if (!routine) fail(`no such routine: ${targetId}`);
+          if (routine!.action.kind !== "proactive-sweep") fail(`routine ${targetId} is not a proactive-sweep routine`);
+          out({
+            routine: targetId,
+            enabled: routine!.enabled,
+            repos: (routine!.action as { repos: string[] }).repos,
+            source: "config.toml [proactive_sweep] repos",
+          });
         } else {
-          fail("usage: beckett routine proactive list | add <owner/name>... | remove <owner/name>...");
+          fail(
+            "beckett routine proactive list  (repos are declared in config.toml under [proactive_sweep] repos — " +
+              "edit that, then restart the daemon)",
+          );
         }
       }
 
       fail(
         "usage: beckett routine list | inspect <id> | add <id> ... | remove <id> | enable <id> | disable <id> | " +
-          "fire <id> [--dry-run|--force] | watch-mode <id> live|dry-run | proactive list|add|remove <owner/name>",
+          "fire <id> [--dry-run|--force] | watch-mode <id> live|dry-run | proactive list",
       );
     }
 

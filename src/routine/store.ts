@@ -74,10 +74,11 @@ export interface RoutineStoreOptions {
   /** Seed the built-in routines on load (default true; tests disable for a clean slate). */
   seedBuiltins?: boolean;
   /**
-   * Seed-time schedule overrides for the built-ins that read config (free time only —
-   * {@link BuiltinRoutineOverrides}). Applied ONLY when a definition is first written; a routine
-   * already on disk keeps whatever timing it has, because the store, not config, is the source of
-   * truth once a routine exists.
+   * Config overrides for the built-ins ({@link BuiltinRoutineOverrides}). Schedules (free time)
+   * are seed-only — applied ONLY when a definition is first written, because the store, not
+   * config, is the source of truth for timing once a routine exists. The sweep's repo list is the
+   * exception: it is config-authoritative on EVERY load, because it is an allow-list and two
+   * sources of truth for an allow-list is how you sweep a repo nobody opted in.
    */
   builtins?: BuiltinRoutineOverrides;
   /** Injectable for tests; defaults to `log.child("routine.store")`. */
@@ -175,26 +176,6 @@ export class RoutineStore {
     });
   }
 
-  /**
-   * Replace a `proactive-sweep` routine's opt-in repo list (issue #79) — the "opt a repo in / out"
-   * lever. This IS the explicit config list the sweep gates on: nothing off it is ever touched. The
-   * list is de-duplicated and order-stable so the persisted config reads cleanly. Throws if `id`
-   * isn't a proactive-sweep routine, so a typo can never quietly write repos onto the wrong action.
-   */
-  async setProactiveRepos(id: string, repos: string[]): Promise<Routine> {
-    return this.mutate((reg) => {
-      const routine = reg.routines.find((r) => r.id === id);
-      if (!routine) throw new Error(`no such routine: ${id}`);
-      if (routine.action.kind !== "proactive-sweep") {
-        throw new Error(`routine ${id} is not a "proactive-sweep" routine`);
-      }
-      const cleaned = [...new Set(repos.map((r) => r.trim()).filter(Boolean))];
-      routine.action = { ...routine.action, repos: cleaned };
-      routine.updatedAt = this.now().toISOString();
-      return structuredClone(routine);
-    });
-  }
-
   /** Replace a routine's runtime state (the scheduler's persist path). */
   async setState(id: string, state: Routine["state"]): Promise<void> {
     await this.mutate((reg) => {
@@ -266,6 +247,30 @@ export class RoutineStore {
     return changed;
   }
 
+  /**
+   * Force the `proactive-sweep` routine's `action.repos` to the config override, on EVERY load —
+   * unlike {@link seed}, which only runs once. Config is the sole source of truth for this
+   * allow-list: a value written to `routines.json` by any other means (a stale CLI write, a
+   * hand-edited file) is overwritten here, never merged. No-op when no override was supplied
+   * (tests that construct a store without `builtins.proactiveSweep` keep whatever is on disk).
+   * Returns true if it changed anything.
+   */
+  private reconcileProactiveSweep(reg: RoutineRegistry): boolean {
+    const override = this.builtinOverrides.proactiveSweep;
+    if (!override) return false;
+    let changed = false;
+    for (const routine of reg.routines) {
+      if (routine.action.kind !== "proactive-sweep") continue;
+      const current = routine.action.repos;
+      const next = [...new Set(override.repos.map((r) => r.trim()).filter(Boolean))];
+      if (current.length === next.length && current.every((r, i) => r === next[i])) continue;
+      routine.action = { ...routine.action, repos: next };
+      routine.updatedAt = this.now().toISOString();
+      changed = true;
+    }
+    return changed;
+  }
+
   private async mutate<T>(change: (reg: RoutineRegistry) => T): Promise<T> {
     await this.acquireLock();
     try {
@@ -277,9 +282,10 @@ export class RoutineStore {
       }
       const migrated = this.migrateCredsEntry(reg);
       const seeded = this.seed(reg);
+      const reconciled = this.reconcileProactiveSweep(reg);
       const before = JSON.stringify(reg);
       const result = change(reg);
-      if (droppedRetired || migrated || seeded || JSON.stringify(reg) !== before) this.write(reg);
+      if (droppedRetired || migrated || seeded || reconciled || JSON.stringify(reg) !== before) this.write(reg);
       return result;
     } finally {
       rmSync(this.lockPath, { recursive: true, force: true });

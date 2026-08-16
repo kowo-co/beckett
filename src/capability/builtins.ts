@@ -391,6 +391,18 @@ export const configFragments = {
     })
     .strict()
     .default({}),
+  // Proactive rot sweep (issue #79): the EXPLICIT repo opt-in list. Empty (the default) sweeps
+  // nothing — there is no "all my repos" switch, and this list is the ONLY way a repo is ever
+  // touched. Config-authoritative on every routine-store load (`src/routine/store.ts`), not
+  // seed-only, so editing this table (and restarting the daemon) is the one way to change it.
+  proactive_sweep: z
+    .object({
+      repos: z
+        .array(z.string().regex(/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/, "must be owner/name"))
+        .default([]),
+    })
+    .strict()
+    .default({}),
   // OPS-124 — GitHub PR sense: the poller that watches the PRs Beckett opened on the kowo-co
   // org and relays review/CI/merge signal. The credential (the GitHub App key, or a legacy PAT)
   // lives in env, not here; the poller is active only when one is configured. GitHub's REST API
@@ -697,6 +709,7 @@ const BUILTIN_CAPABILITY_INFO: {
   paths: { id: "paths", summary: "Filesystem layout: beckett dir, db, logs, events, socket." },
   identity: { id: "identity", summary: "Beckett's external identities (GitHub user, Gmail address)." },
   runs: { id: "runs", summary: "v7 runs: live cap, rework cap, per-run budget." },
+  proactive_sweep: { id: "proactive-sweep", summary: "Proactive rot sweep: the explicit repo opt-in list." },
   github: { id: "github", summary: "GitHub sense: PR review/CI/merge poller + external-activity relay." },
   proactivity: { id: "proactivity", summary: "Ambient interjection policy (burst triage, cooldowns, channel modes)." },
   shared_context: { id: "shared-context", summary: "Channel-scoped shared context: attributed transcripts + server memory." },

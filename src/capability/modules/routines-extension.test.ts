@@ -683,3 +683,48 @@ test("asCapability projects the carried v5 facets into the pinned CLI spine slot
   expect(spine.resolveCliVerb(["routine", "deps-update", "--base", "main"])!.verb.name)
     .toBe("routine deps-update");
 });
+
+// ── overhaul B-P16 (Task 4): the sweep's repo list is config-only, `add`/`remove` are gone ──
+
+/** Spawns the real `beckett` CLI (task-cli.test.ts's pattern) — `runRoutine` calls `out`/`fail`
+ *  (`process.exit`), so this is the only way to observe its stdout/stderr/exit code in-process. */
+async function beckett(
+  dir: string,
+  args: string[],
+): Promise<{ stdout: string; stderr: string; code: number }> {
+  const proc = Bun.spawn(
+    [process.execPath, join(import.meta.dir, "..", "..", "cli", "beckett.ts"), ...args],
+    {
+      cwd: join(import.meta.dir, "..", "..", ".."),
+      env: { ...process.env, BECKETT_DIR: dir, BECKETT_HOME: dir },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { stdout, stderr, code };
+}
+
+test("beckett routine proactive add is gone and points at config.toml", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-routines-cli-"));
+  dirs.push(dir);
+
+  const list = await beckett(dir, ["routine", "proactive", "list"]);
+  expect(list.code).toBe(0);
+  const listed = JSON.parse(list.stdout);
+  expect(listed).toMatchObject({ routine: "proactive-sweep", repos: [], source: "config.toml [proactive_sweep] repos" });
+
+  const add = await beckett(dir, ["routine", "proactive", "add", "kowo-co/beckett"]);
+  expect(add.code).toBe(1);
+  expect(add.stderr).toContain("[proactive_sweep] repos");
+  expect(add.stderr).toContain("config.toml");
+
+  const remove = await beckett(dir, ["routine", "proactive", "remove", "kowo-co/beckett"]);
+  expect(remove.code).toBe(1);
+  expect(remove.stderr).toContain("[proactive_sweep] repos");
+}, 20_000);

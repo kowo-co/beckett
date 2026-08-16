@@ -561,6 +561,7 @@ async function boot(): Promise<BootedSystem> {
     githubPr: prPoller ? prPoller.stats() : null,
     githubActivity: activityPoller ? { repo: activityConfig.repo, branch: activityConfig.branch } : null,
     paused: readPause(paths.pauseFile),
+    proactiveSweep: { repos: config.proactive_sweep.repos },
   }));
 
   // Start the Concierge FIRST (of the live parts) so a bad claude launch fails the whole boot
