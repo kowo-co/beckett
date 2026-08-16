@@ -101,7 +101,12 @@ import { runAsWorkItem } from "./adapter.ts";
 import type { RunStore } from "./store.ts";
 import type { Blocker, Run, RunStage, RunStateChange } from "./types.ts";
 import { RUN_TERMINAL } from "./types.ts";
-import { planWorktreeSweep, type SweepCandidate } from "./worktree-sweep.ts";
+import {
+  planWorktreeSweep,
+  SWEEP_TTL_ABANDONED_MS,
+  SWEEP_TTL_DONE_MS,
+  type SweepCandidate,
+} from "./worktree-sweep.ts";
 import { blockerFromDoneSignal, makeBlocker, renderBlocker, stopsTheRun } from "./blocker.ts";
 import { blockerFromDeath, classifyDeath } from "./death.ts";
 import type { CapabilityInventory, CapabilityTarget } from "../capability/preflight.ts";
@@ -304,6 +309,9 @@ const WATCHDOG_MIN_INTERVAL_MS = 15_000;
 const PUBLISH_DRAIN_INTERVAL_MS = PUBLISH_RETRY_DELAYS_MS[0];
 /** How often {@link RunSupervisor.sweepWorktrees} may run — rate-limits it off the 60s watchdog tick. */
 const SWEEP_INTERVAL_MS = 60 * 60_000;
+/** Cap on candidates resolved (and `git ls-remote` calls made) per sweep pass — the backlog drains
+ *  over successive hourly passes instead of blocking staffing recovery on a stalled remote. */
+const MAX_SWEEP_PER_PASS = 10;
 /**
  * The longest a run may sit in `publishing` with nothing scheduled to move it before
  * {@link RunSupervisor.reconcilePublishing} parks it. Comfortably longer than the whole retry
@@ -1595,9 +1603,9 @@ export class RunSupervisor {
       const ageMs = Number.isFinite(entered) ? nowMs - entered : 0;
       // The TTL check comes before any network call — `pushed` is only resolved for a candidate
       // already past its own TTL, so a normal hourly tick costs zero remote round-trips for the
-      // (common) case where nothing is old enough to sweep yet.
-      const pastTtl =
-        run.state === "done" ? ageMs >= 48 * 60 * 60_000 : ageMs >= 7 * 24 * 60 * 60_000;
+      // (common) case where nothing is old enough to sweep yet. Sourced from `./worktree-sweep.ts`
+      // so this gate can never drift from the policy it is guarding network calls for.
+      const pastTtl = run.state === "done" ? ageMs >= SWEEP_TTL_DONE_MS : ageMs >= SWEEP_TTL_ABANDONED_MS;
       const repoRoot = this.resolveRepoRoot(run);
       const pushed = pastTtl ? await this.git.remoteBranchExists(repoRoot, run.branch).catch(() => false) : false;
       candidates.push({
@@ -1609,6 +1617,11 @@ export class RunSupervisor {
         ageMs,
         pushed,
       });
+      // Bound the per-pass work: the first pass after a daemon start can face the real backlog
+      // (58 orphaned worktrees at write time), all past TTL, each costing a `git ls-remote`
+      // round-trip above. A disk-cleanup pass must never be able to wedge staffing recovery — the
+      // backlog drains over successive hourly passes instead.
+      if (candidates.length >= MAX_SWEEP_PER_PASS) break;
     }
     const decisions = planWorktreeSweep(candidates);
     const byId = new Map(candidates.map((c) => [c.runId, c]));
@@ -1621,10 +1634,28 @@ export class RunSupervisor {
       } catch (err) {
         this.logger.warn("worktree sweep: removeWorktree failed", { run: c.runId, workspace: c.workspace, error: (err as Error).message });
       }
-      try {
-        await this.git.deleteBranch(c.repoRoot, c.branch);
-      } catch (err) {
-        this.logger.warn("worktree sweep: deleteBranch failed", { run: c.runId, branch: c.branch, error: (err as Error).message });
+      if (existsSync(c.workspace)) {
+        // The fs fallback inside removeWorktree can also fail (permissions, busy mount). Leave
+        // `run.workspace` set so the NEXT pass still sees this candidate — nulling it here would
+        // make the orphan invisible to every future sweep, which is the bug this fix is for.
+        this.logger.warn("worktree sweep: workspace still on disk — leaving run.workspace set for the next pass", {
+          run: c.runId,
+          workspace: c.workspace,
+        });
+        continue;
+      }
+      if (c.pushed) {
+        try {
+          await this.git.deleteBranch(c.repoRoot, c.branch);
+        } catch (err) {
+          this.logger.warn("worktree sweep: deleteBranch failed", { run: c.runId, branch: c.branch, error: (err as Error).message });
+        }
+      } else {
+        // The worktree is gone but the branch is not provably on origin — for a `done` run with
+        // no publish target (courier hand-off, or no publishRepo wired) this local
+        // `beckett/run-<slug>` branch is the ONLY ref to the work. Deleting it would make those
+        // commits unreachable and a later `git gc` would destroy them, so it is kept.
+        this.logger.info("worktree sweep: keeping the local branch (not on origin)", { run: c.runId, branch: c.branch });
       }
       this.logger.info("worktree sweep: freed", { run: c.runId, workspace: c.workspace, reason: decision.reason });
       await this.patchRun(c.runId, { workspace: null });
