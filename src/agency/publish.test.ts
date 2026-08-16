@@ -172,6 +172,7 @@ test("case 2 — repo we already own: integrate remote (fetch+rebase) then push 
     if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}'); // exists
     if (j.includes("api --method PATCH")) return ok(); // setPublic
     if (j.includes("--json defaultBranchRef")) return ok("main");
+    if (j.startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
     if (j.startsWith("git fetch")) return ok(); // remote tip present
     if (j.startsWith("git rebase")) return ok(); // clean rebase
     if (j.startsWith("git push")) return ok();
@@ -179,12 +180,139 @@ test("case 2 — repo we already own: integrate remote (fetch+rebase) then push 
   });
   const r = await gh.ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "OPS-25" });
   expect(r.kind).toBe("pushed"); // owned repos ship straight to main
-  // Fetched + rebased the remote tip FIRST (fixes the OPS-25/27 non-fast-forward reject), then pushed main.
+  const pushes = calls.filter((c) => c.startsWith("git push"));
+  // The run's OWN branch is pushed FIRST — durability, unconditional, before trunk is even fetched.
+  expect(pushes[0]).toContain("HEAD:refs/heads/beckett/ops-25");
+  expect(calls.indexOf(pushes[0]!)).toBeLessThan(calls.findIndex((c) => c.startsWith("git fetch")));
+  // Fetched + rebased the remote tip (fixes the OPS-25/27 non-fast-forward reject), then pushed main.
   expect(calls.some((c) => c.startsWith("git fetch"))).toBe(true);
   expect(calls.some((c) => c.startsWith("git rebase FETCH_HEAD"))).toBe(true);
-  const push = calls.find((c) => c.startsWith("git push"))!;
-  expect(push).toContain("HEAD:refs/heads/main");
+  expect(pushes[1]).toContain("HEAD:refs/heads/main");
   expect(calls.some((c) => c.startsWith("gh pr create"))).toBe(false); // owned repo → no PR
+});
+
+test("case 2 pushes the run branch BEFORE it touches trunk", async () => {
+  const { gh, calls } = cli((j) => {
+    if (j.startsWith("git remote get-url origin")) return fail("no origin");
+    if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
+    if (j.includes("api --method PATCH")) return ok();
+    if (j.includes("--json defaultBranchRef")) return ok("main");
+    if (j.startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
+    if (j.startsWith("git fetch")) return ok();
+    if (j.startsWith("git rebase")) return ok();
+    if (j.startsWith("git push")) return ok();
+    return undefined;
+  });
+  await gh.ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "run-x" });
+  const branchPushIdx = calls.findIndex((c) => c.startsWith("git push") && c.includes("refs/heads/beckett/run-x"));
+  const firstFetchIdx = calls.findIndex((c) => c.startsWith("git fetch"));
+  const firstRebaseIdx = calls.findIndex((c) => c.startsWith("git rebase"));
+  expect(branchPushIdx).toBeGreaterThanOrEqual(0);
+  expect(branchPushIdx).toBeLessThan(firstFetchIdx);
+  expect(branchPushIdx).toBeLessThan(firstRebaseIdx);
+});
+
+test("the run branch is pushed even when the trunk push then fails", async () => {
+  const { gh, calls } = cli((j) => {
+    if (j.startsWith("git remote get-url origin")) return fail("no origin");
+    if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
+    if (j.includes("api --method PATCH")) return ok();
+    if (j.includes("--json defaultBranchRef")) return ok("main");
+    if (j.startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
+    if (j.startsWith("git fetch")) return ok();
+    if (j.startsWith("git rebase")) return ok(); // clean rebase, so the real push is what fails
+    // The run-branch (durability) push succeeds; the trunk push to `main` fails.
+    if (j.startsWith("git push") && j.includes("refs/heads/beckett/run-x")) return ok();
+    if (j.startsWith("git push") && j.includes("refs/heads/main")) return fail("remote rejected the push", 1);
+    return undefined;
+  });
+  await expect(gh.ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "run-x" })).rejects.toThrow(
+    /remote rejected the push/,
+  );
+  // The branch push happened...
+  expect(calls.some((c) => c.startsWith("git push") && c.includes("refs/heads/beckett/run-x"))).toBe(true);
+  // ...and the thrown error is the trunk push's own failure, not swallowed by the branch push.
+  const pushes = calls.filter((c) => c.startsWith("git push"));
+  expect(pushes.length).toBe(2);
+  expect(pushes[1]).toContain("refs/heads/main");
+});
+
+test("a default branch that is itself a beckett/run-* branch is refused, and nothing is pushed", async () => {
+  const { gh, calls } = cli((j) => {
+    if (j.startsWith("git remote get-url origin")) return fail("no origin");
+    if (j.startsWith("gh repo view kowo-co/babble --json name")) return ok('{"name":"babble"}');
+    if (j.includes("api --method PATCH")) return ok();
+    if (j.includes("--json defaultBranchRef")) return ok("beckett/run-20260814-oauth");
+    if (j.startsWith("git push")) return ok("SHOULD-NOT-PUSH");
+    return undefined;
+  }, { owner: "kowo-co" });
+  await expect(
+    gh.ensurePublished({ slug: "babble", sourceDir: "/src", ticket: "OPS-25" }),
+  ).rejects.toThrow(/needs a human/);
+  expect(calls.some((c) => c.startsWith("git push"))).toBe(false);
+});
+
+test("an integration target branch is used as the trunk without consulting the repo default (OPS-185)", async () => {
+  const { gh, calls } = cli((j) => {
+    if (j.startsWith("git remote get-url origin")) return fail("no origin");
+    if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
+    if (j.includes("api --method PATCH")) return ok();
+    if (j.includes("--json defaultBranchRef")) return ok("main"); // must never be consulted
+    if (j.startsWith("gh api repos/0xbeckett/beckett/branches/v5-daemon")) return ok("v5-daemon");
+    if (j.startsWith("git fetch")) return ok();
+    if (j.startsWith("git rebase")) return ok();
+    if (j.startsWith("git push")) return ok();
+    return undefined;
+  });
+  await gh.ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "OPS-180", targetBranch: "v5-daemon" });
+  expect(calls.some((c) => c.includes("--json defaultBranchRef"))).toBe(false);
+  expect(calls.some((c) => c.startsWith("gh api repos/0xbeckett/beckett/branches/v5-daemon"))).toBe(true);
+});
+
+// Review finding (must, 2026-08-15): on a branchless repo (`trunk.exists === false`), pushing the
+// run branch FIRST would make GitHub set it as the repo's new default — the same kowo-co/babble
+// misconfiguration `resolveTrunk` exists to refuse. The trunk push must land first in that case.
+test("case 2 — when the trunk does not exist yet, the trunk is pushed BEFORE the run branch", async () => {
+  const { gh, calls } = cli((j) => {
+    if (j.startsWith("git remote get-url origin")) return fail("no origin");
+    if (j.startsWith("gh repo view 0xbeckett/babble --json name")) return ok('{"name":"babble"}');
+    if (j.includes("api --method PATCH")) return ok();
+    if (j.includes("--json defaultBranchRef")) return ok("main");
+    if (j.startsWith("gh api repos/0xbeckett/babble/branches/main")) return fail("gh: Not Found (HTTP 404)", 1);
+    if (j.startsWith("git fetch")) return fail("fatal: couldn't find remote ref main", 128); // no base yet
+    if (j.startsWith("git push")) return ok();
+    return undefined;
+  });
+  await gh.ensurePublished({ slug: "babble", sourceDir: "/src", ticket: "run-y" });
+  const pushes = calls.filter((c) => c.startsWith("git push"));
+  expect(pushes[0]).toContain("HEAD:refs/heads/main");
+  expect(pushes[1]).toContain("HEAD:refs/heads/beckett/run-y");
+});
+
+// Review finding (should, 2026-08-15): a retry after a partial success can find the run branch
+// already at an earlier tip on the remote — a plain non-force push then rejects non-fast-forward.
+// That must read as "durability already satisfied", not a hard failure that wedges the retry ladder
+// before the trunk push is ever reattempted.
+test("a non-fast-forward reject on the durability push is swallowed, and the trunk push still happens", async () => {
+  const { gh, calls } = cli((j) => {
+    if (j.startsWith("git remote get-url origin")) return fail("no origin");
+    if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
+    if (j.includes("api --method PATCH")) return ok();
+    if (j.includes("--json defaultBranchRef")) return ok("main");
+    if (j.startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
+    if (j.startsWith("git fetch")) return ok();
+    if (j.startsWith("git rebase")) return ok();
+    if (j.startsWith("git push") && j.includes("refs/heads/beckett/run-x")) {
+      return fail("! [rejected] refs/heads/beckett/run-x -> refs/heads/beckett/run-x (non-fast-forward)", 1);
+    }
+    if (j.startsWith("git push") && j.includes("refs/heads/main")) return ok();
+    return undefined;
+  });
+  const r = await gh.ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "run-x" });
+  expect(r.kind).toBe("pushed");
+  const pushes = calls.filter((c) => c.startsWith("git push"));
+  expect(pushes.length).toBe(2);
+  expect(pushes[1]).toContain("refs/heads/main");
 });
 
 test("#246 — a run's raw checkpoint commits squash into ONE before push, and prUrl is a real commit URL (never the bare repo root)", async () => {
@@ -232,6 +360,7 @@ test("case 2 — a non-main target branch publishes to THAT branch and never tou
     if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}'); // exists
     if (j.includes("api --method PATCH")) return ok(); // setPublic
     if (j.includes("--json defaultBranchRef")) return ok("main"); // MUST NOT be consulted for a non-main target
+    if (j.startsWith("gh api repos/0xbeckett/beckett/branches/v5-daemon")) return ok("v5-daemon"); // integration branch exists
     if (j.startsWith("git fetch")) return ok(); // integration branch tip present
     if (j.startsWith("git rebase")) return ok(); // clean rebase onto v5-daemon
     if (j.startsWith("git push")) return ok();
@@ -244,12 +373,13 @@ test("case 2 — a non-main target branch publishes to THAT branch and never tou
     targetBranch: "v5-daemon",
   });
   expect(r.kind).toBe("pushed");
-  // Integrated + pushed the INTEGRATION branch, not main.
+  // The run's own branch is pushed first (durability), THEN the integration branch is integrated.
+  const pushes = calls.filter((c) => c.startsWith("git push"));
+  expect(pushes[0]).toContain("HEAD:refs/heads/beckett/ops-180");
   const fetch = calls.find((c) => c.startsWith("git fetch"))!;
   expect(fetch).toContain("v5-daemon");
   expect(calls.some((c) => c.startsWith("git rebase FETCH_HEAD"))).toBe(true);
-  const push = calls.find((c) => c.startsWith("git push"))!;
-  expect(push).toContain("HEAD:refs/heads/v5-daemon");
+  expect(pushes[1]).toContain("HEAD:refs/heads/v5-daemon");
   // The load-bearing guarantee: NOTHING in the whole publish references `main`. No push, no fetch,
   // no rebase advances the default branch, so origin/main is provably untouched. The repo default
   // is never even queried — the target is authoritative.
@@ -267,6 +397,7 @@ test("case 2 — an explicit `main` target keeps the default-branch publish byte
     if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
     if (j.includes("api --method PATCH")) return ok();
     if (j.includes("--json defaultBranchRef")) return ok("main");
+    if (j.startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
     if (j.startsWith("git fetch")) return ok();
     if (j.startsWith("git rebase")) return ok();
     if (j.startsWith("git push")) return ok();
@@ -275,8 +406,9 @@ test("case 2 — an explicit `main` target keeps the default-branch publish byte
   const r = await gh.ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "OPS-25", targetBranch: "main" });
   expect(r.kind).toBe("pushed");
   expect(calls.some((c) => c.includes("--json defaultBranchRef"))).toBe(true); // default branch resolved as usual
-  const push = calls.find((c) => c.startsWith("git push"))!;
-  expect(push).toContain("HEAD:refs/heads/main");
+  const pushes = calls.filter((c) => c.startsWith("git push"));
+  expect(pushes[0]).toContain("HEAD:refs/heads/beckett/ops-25");
+  expect(pushes[1]).toContain("HEAD:refs/heads/main");
 });
 
 test("case 2 — a rebase CONFLICT aborts and throws (dispatcher then holds the ticket, no force-push)", async () => {
@@ -285,17 +417,23 @@ test("case 2 — a rebase CONFLICT aborts and throws (dispatcher then holds the 
     if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
     if (j.includes("api --method PATCH")) return ok();
     if (j.includes("--json defaultBranchRef")) return ok("main");
+    if (j.startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
     if (j.startsWith("git fetch")) return ok();
     if (j.startsWith("git rebase --abort")) return ok();
     if (j.startsWith("git rebase")) return fail("CONFLICT (content): merge conflict in x");
-    if (j.startsWith("git push")) return ok("SHOULD-NOT-PUSH");
+    if (j.startsWith("git push")) return ok();
     return undefined;
   });
   await expect(gh.ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "OPS-25" })).rejects.toThrow(
     /needs a human/,
   );
   expect(calls.some((c) => c.startsWith("git rebase --abort"))).toBe(true);
-  expect(calls.some((c) => c.startsWith("git push"))).toBe(false); // never force over a conflict
+  // The run's own branch (durability) DID get pushed before the conflict — that's the point of
+  // pushing it first — but nothing ever force-pushed over the conflict on trunk.
+  const pushes = calls.filter((c) => c.startsWith("git push"));
+  expect(pushes.length).toBe(1);
+  expect(pushes[0]).toContain("HEAD:refs/heads/beckett/ops-25");
+  expect(calls.some((c) => c.startsWith("git push") && c.includes("refs/heads/main"))).toBe(false);
 });
 
 test("a residual squash-apply conflict names only the remaining files, not the rebase transcript", async () => {
@@ -317,6 +455,7 @@ test("a residual squash-apply conflict names only the remaining files, not the r
     if (j.startsWith("git diff --binary")) return ok("diff --git a/a b/a\n");
     if (j.startsWith("git apply --3way")) return fail("conflict internals that a courier does not need");
     if (j.startsWith("git diff --name-only --diff-filter=U")) return ok("snapshot.test.ts\ngenerated-cli.txt\n");
+    if (j.startsWith("git push")) return ok();
     return undefined;
   });
   let error: Error | undefined;
@@ -345,6 +484,7 @@ test("unsafe squash-apply metadata keeps the existing human hold instead of gues
     if (j.startsWith("git diff --quiet")) return fail();
     if (j.startsWith("git diff --name-status")) return ok("D\tnever-touched.txt\n");
     if (j.startsWith("git log --format=%H")) return ok(); // no deletion commit in the worker range
+    if (j.startsWith("git push")) return ok();
     return undefined;
   });
   await expect(gh.ensurePublished({ slug: "beckett", sourceDir: "/src", baseSha: "base" })).rejects.toThrow(
@@ -352,6 +492,84 @@ test("unsafe squash-apply metadata keeps the existing human hold instead of gues
   );
   expect(calls.some((call) => call.startsWith("git apply --3way"))).toBe(false);
 });
+
+/**
+ * Acceptance gate for Task 2 (push-the-branch-first): a REAL remote, a REAL trunk-side conflict that
+ * makes the trunk push fail, and proof that the run's own branch is durable on the remote anyway —
+ * the whole point of pushing it first. No fakes: a fake `git push` can't prove anything left the
+ * machine.
+ */
+test("a real trunk-push failure still leaves beckett/run-<id> on the remote (Task 2 acceptance gate)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "beckett-publish-push-first-"));
+  try {
+    const remoteParent = join(root, "0xbeckett");
+    const remote = join(remoteParent, "beckett.git");
+    const seed = join(root, "seed");
+    const worker = join(root, "worker");
+    const other = join(root, "other");
+    await mkdir(remoteParent, { recursive: true });
+    await git(root, "init", "--bare", remote);
+    await git(root, "init", "--initial-branch=main", seed);
+    await git(seed, "config", "user.email", "test@example.com");
+    await git(seed, "config", "user.name", "Test");
+    await writeFile(join(seed, "shared.txt"), "root\n");
+    await git(seed, "add", ".");
+    await git(seed, "commit", "-m", "root");
+    await git(seed, "remote", "add", "origin", `file://${remote}`);
+    await git(seed, "push", "origin", "main");
+
+    // The run's own checkout: one commit, its own edit to the shared file.
+    await git(root, "clone", "-b", "main", `file://${remote}`, worker);
+    await git(worker, "config", "user.email", "test@example.com");
+    await git(worker, "config", "user.name", "Test");
+    await writeFile(join(worker, "shared.txt"), "the run's own change\n");
+    await git(worker, "add", ".");
+    await git(worker, "commit", "-m", "run checkpoint");
+    const runTip = await git(worker, "rev-parse", "HEAD");
+
+    // Main moves on with a CONFLICTING edit to the same line, so the rebase genuinely fails.
+    await git(root, "clone", "-b", "main", `file://${remote}`, other);
+    await git(other, "config", "user.email", "test@example.com");
+    await git(other, "config", "user.name", "Test");
+    await writeFile(join(other, "shared.txt"), "someone else's conflicting change\n");
+    await git(other, "add", ".");
+    await git(other, "commit", "-m", "landed meanwhile, conflicts with the run");
+    await git(other, "push", "origin", "main");
+
+    const calls: string[] = [];
+    const gh = new GitHubCli({
+      pat: "tok",
+      account: "0xbeckett",
+      apiBase: "https://api.github.com",
+      resolveRepoDir: () => worker,
+      logger: noopLog,
+      run: (async (cmd: string[], opts?: { cwd?: string; env?: Record<string, string | undefined> }) => {
+        calls.push(cmd.join(" "));
+        if (cmd[0] === "git") return realRun(cmd, opts);
+        if (cmd.join(" ").startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
+        if (cmd.join(" ").includes("api --method PATCH")) return ok();
+        if (cmd.join(" ").includes("--json defaultBranchRef")) return ok("main");
+        if (cmd.join(" ").startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
+        return fail(`unrouted: ${cmd.join(" ")}`);
+      }) as never,
+    });
+    (gh as unknown as { gitHost: () => string }).gitHost = () => `file://${root}`;
+
+    await expect(
+      gh.ensurePublished({ slug: "beckett", sourceDir: worker, ticket: "run-20260815-conflict" }),
+    ).rejects.toThrow(/needs a human/);
+
+    // The trunk (main) never moved past the seed's push — the conflict really blocked it.
+    expect(await git(root, "--git-dir", remote, "log", "-1", "--format=%s", "main")).toBe(
+      "landed meanwhile, conflicts with the run",
+    );
+    // ...but the run's OWN branch is durable on the remote, at the run's own tip.
+    const remoteBranchTip = await git(root, "--git-dir", remote, "rev-parse", "beckett/run-20260815-conflict");
+    expect(remoteBranchTip).toBe(runTip);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30_000);
 
 test("a dependent cut from pre-squash predecessor history squash-applies only its own delta", async () => {
   const root = await mkdtemp(join(tmpdir(), "beckett-publish-squash-"));
@@ -644,6 +862,7 @@ test("a tracked spec.md with no run stamp is left alone", async () => {
     if (j.startsWith("gh repo view 0xbeckett/beckett --json name")) return ok('{"name":"beckett"}');
     if (j.includes("api --method PATCH")) return ok();
     if (j.includes("--json defaultBranchRef")) return ok("main");
+    if (j.startsWith("gh api repos/0xbeckett/beckett/branches/main")) return ok("main");
     if (j.startsWith("git ls-files")) return ok("spec.md\n");
     if (j.startsWith("git show :spec.md")) return ok("# A customer's own notes\nNo stamp here.\n");
     if (j.startsWith("git fetch")) return ok();
@@ -654,8 +873,9 @@ test("a tracked spec.md with no run stamp is left alone", async () => {
   const r = await gh.ensurePublished({ slug: "beckett", sourceDir: "/src", ticket: "OPS-25" });
   expect(r.kind).toBe("pushed");
   expect(calls.some((c) => c.startsWith("git rm"))).toBe(false);
-  const push = calls.find((c) => c.startsWith("git push"))!;
-  expect(push).toContain("HEAD:refs/heads/main");
+  const pushes = calls.filter((c) => c.startsWith("git push"));
+  expect(pushes[0]).toContain("HEAD:refs/heads/beckett/ops-25");
+  expect(pushes[1]).toContain("HEAD:refs/heads/main");
 });
 
 /**
@@ -958,7 +1178,12 @@ test("case 2 — an owned repo that is EMPTY publishes to main, never to a branc
   const r = await gh.ensurePublished({ slug: "babble", sourceDir: "/src", ticket: "run-1" });
 
   expect(r.kind).toBe("pushed");
-  const push = calls.find((c) => c.startsWith("git push"))!;
-  expect(push).toContain("HEAD:refs/heads/main");
-  expect(push).not.toContain("refs/heads/null");
+  // Trunk goes FIRST here, run branch second: a branchless repo takes its default branch from
+  // whichever ref lands first on GitHub, so pushing `beckett/run-1` first would make IT the repo's
+  // new default — the exact kowo-co/babble misconfiguration this whole path exists to close. See
+  // "must" finding in the Task 2 review (2026-08-15).
+  const pushes = calls.filter((c) => c.startsWith("git push"));
+  expect(pushes[0]).toContain("HEAD:refs/heads/main");
+  expect(pushes[0]).not.toContain("refs/heads/null");
+  expect(pushes[1]).toContain("HEAD:refs/heads/beckett/run-1");
 });
