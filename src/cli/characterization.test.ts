@@ -155,6 +155,7 @@ const CASES: Case[] = [
   { name: "proposals: unknown sub prints usage", argv: ["proposals", "bogus"] },
   { name: "proposals: file without a kind prints usage", argv: ["proposals", "file"] },
   { name: "proposals: file without a claim fails", argv: ["proposals", "file", "--kind", "doctrine-change"] },
+  { name: "proposals: file rejects an unknown kind", argv: ["proposals", "file", "--kind", "venture", "--claim", "x"] },
 
   // ── spend ───────────────────────────────────────────────────────────────────────────────
   { name: "spend: empty ledger summary", argv: ["spend"] },

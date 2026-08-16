@@ -156,6 +156,29 @@ test("listing is highest-signal kind first, oldest first within a kind", () => {
   ]);
 });
 
+test("a product idea is a first-class kind, and it lists above a ticket", () => {
+  const dir = sandbox();
+  const idea = createProposal(dir, { ...BASE, kind: "product-idea", claim: "a shared watchlist" });
+  const spike = createProposal(dir, { ...BASE, kind: "ticket", claim: "spike the retry idea", now: daysAfter(-1) });
+  const persona = createProposal(dir, { ...BASE, kind: "persona-change", claim: "sound less breathless", now: daysAfter(-2) });
+  const doctrine = createProposal(dir, { ...BASE, claim: "stop asking on read-only commands", now: daysAfter(-3) });
+  const correction = createProposal(dir, {
+    ...BASE,
+    kind: "memory-correction",
+    claim: "jason moved off pacific time",
+    now: daysAfter(-4),
+  });
+
+  expect(() => createProposal(dir, { ...BASE, kind: "whatever" as never })).toThrow(/kind must be one of/);
+  expect(listProposals(dir, { now: NIGHT }).map((p) => p.id)).toEqual([
+    doctrine.id,
+    persona.id,
+    correction.id,
+    idea.id,
+    spike.id,
+  ]);
+});
+
 test("decided proposals are kept but leave the open list", () => {
   const dir = sandbox();
   const p = createProposal(dir, BASE);

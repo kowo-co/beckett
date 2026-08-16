@@ -9,7 +9,10 @@
  *     same road, with the same review gate, as any other change to my core. A dream gets no
  *     shortcut for having been clever at 4am. A `ticket` proposal becomes a real task branch,
  *     and a `memory-correction` becomes one too: correcting a memory is work a waking session
- *     does with judgement and visibility rules in hand, not a write this file performs.
+ *     does with judgement and visibility rules in hand, not a write this file performs. A
+ *     `product-idea` also deploys a run, but the run it deploys is a SCOPING run — one page at
+ *     `docs/ideas/<slug>.md`, never a build — because deciding what Kowo builds is not the same
+ *     act as writing the diff.
  *   - **reject** requires a reason and writes a calibration record, so the same SHAPE of
  *     proposal is weighed differently in that room next time. The rejected record is kept with
  *     its reason — rejection is signal, not deletion, the same logic as the open-loop ledger
@@ -41,6 +44,7 @@ export const ACCEPT_ROUTE: Record<ProposalKind, "run" | "task"> = {
   "doctrine-change": "run",
   "persona-change": "run",
   "memory-correction": "task",
+  "product-idea": "run",
   // The kind name is frozen history: proposals raised before the ticket rip-out are on disk with
   // `kind: "ticket"`, and renaming it would strand them. It routes to a task branch either way.
   ticket: "task",
@@ -110,7 +114,7 @@ export async function acceptProposal(deps: AcceptDeps, id: string): Promise<Acce
     // A doctrine/persona change becomes a REVIEWABLE run. This is the whole design: the change to
     // my core is written, reviewed, and merged by the pipeline, never by this call.
     const run = await deps.deployRun({
-      title: `${proposal.kind}: ${proposal.claim}`,
+      title: proposal.kind === "product-idea" ? `scope: ${proposal.claim}` : `${proposal.kind}: ${proposal.claim}`,
       body,
       criteria: [proposal.claim],
     });
@@ -201,16 +205,59 @@ function daysOpen(proposal: Proposal, now: Date): number {
 
 /** The body a routed proposal carries into the pipeline: the claim, the argument, the receipts. */
 function filedBody(proposal: Proposal): string {
-  return [
-    proposal.claim,
-    "",
-    "## why",
-    proposal.rationale,
-    "",
-    "## provenance",
-    ...proposal.provenance.map((p) => `- ${p}`),
-    "",
-    `Accepted from proposal \`${proposal.id}\` (${proposal.kind}, raised ${proposal.created.slice(0, 10)} by ${proposal.origin}).`,
-    "Proposals never edit anything: this is the normal pipeline doing the work, with the normal review gate.",
-  ].join("\n");
+  const footer =
+    "\n\n" +
+    [
+      `Accepted from proposal \`${proposal.id}\` (${proposal.kind}, raised ${proposal.created.slice(0, 10)} by ${proposal.origin}).`,
+      "Proposals never edit anything: this is the normal pipeline doing the work, with the normal review gate.",
+    ].join("\n");
+
+  if (proposal.kind === "product-idea") {
+    return (
+      [
+        "Scope this idea. Do NOT build it.",
+        "",
+        proposal.claim,
+        "",
+        "## why",
+        proposal.rationale,
+        "",
+        "## provenance",
+        ...proposal.provenance.map((p) => `- ${p}`),
+        "",
+        "## what this run owes",
+        `ONE page at \`docs/ideas/${slugifyClaim(proposal.claim)}.md\`, and nothing else — no feature code, no ` +
+          "scaffolding, no dependencies, no new package. The page has four parts:",
+        "",
+        "1. **The idea, in one paragraph.** What it is, who it is for, and what they do with it.",
+        "2. **The case.** Why now, what it competes with or replaces, and what we already have that it " +
+          "reuses. Cite what you actually checked — a repo, a file, a ledger row. Anything you could not " +
+          "verify is written as an open question, never as a number.",
+        "3. **The smallest experiment.** The cheapest thing that would tell us whether this is real, and the " +
+          "result that would kill it. Days, not months.",
+        "4. **A rough spec.** The shape of a first build if the experiment passes: the surfaces, the data, " +
+          "and the parts that are actually hard. A page, not a design doc.",
+        "",
+        "Done is that file committed and a summary in your own words. A diff that adds product code fails " +
+          "this run's review: the decision this memo exists to inform has not been made yet.",
+      ].join("\n") + footer
+    );
+  }
+
+  return [proposal.claim, "", "## why", proposal.rationale, "", "## provenance", ...proposal.provenance.map((p) => `- ${p}`)].join(
+    "\n",
+  ) + footer;
+}
+
+/**
+ * Slug a claim the same way the store slugs a proposal id: lowercase, non-alnum collapses to a
+ * single `-`, trimmed, capped so `docs/ideas/<slug>.md` never runs unreasonably long. Lives here,
+ * not in the store — this is the one place a claim becomes a filename.
+ */
+function slugifyClaim(claim: string): string {
+  const slug = claim
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return (slug || "idea").slice(0, 48).replace(/-+$/, "");
 }
