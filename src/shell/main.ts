@@ -20,9 +20,8 @@
  * Import style (whole repo, bun-native): explicit `.ts` extensions, ESM.
  */
 
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import { homedir } from "node:os";
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { loadConfig } from "../config.ts";
 import { buildPaths } from "../paths.ts";
 import { recordBoot, recordCleanShutdown, uptimeLedgerPath } from "../uptime.ts";
@@ -612,23 +611,15 @@ async function boot(): Promise<BootedSystem> {
     lifecycleLedgerPath,
     spendPath: paths.spend,
   });
-  // Bot presence + desktop RPC, both driven off the SAME status-snapshot tick (#132). One deriver,
-  // two sinks: the gateway bot user (discord.js setPresence) and ~/.beckett/rpc-status.json (the
-  // {details,state} shape the untouched RPC daemon in src/rpc/daemon.ts already reads). The
-  // controller only emits on a real change and rate-floors sends; both sinks catch their own errors.
-  const rpcStatusPath = join(beckettDir, "rpc-status.json");
+  // Bot presence, driven off the status-snapshot tick (#132). One deriver, one sink: the gateway
+  // bot user (discord.js setPresence). The controller only emits on a real change and rate-floors
+  // sends; the sink catches its own errors.
   const presenceController = new PresenceController({
     logger: logger.child("discord.presence"),
     sinks: {
       setPresence: (data) => {
         const client = gateway instanceof DiscordJsGateway ? gateway.discordClient() : undefined;
         client?.user?.setPresence(data);
-      },
-      writeStatus: (payload) => {
-        mkdirSync(dirname(rpcStatusPath), { recursive: true });
-        const tmp = `${rpcStatusPath}.tmp`;
-        writeFileSync(tmp, `${JSON.stringify(payload)}\n`, "utf8");
-        renameSync(tmp, rpcStatusPath);
       },
     },
   });

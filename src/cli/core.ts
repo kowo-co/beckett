@@ -1789,22 +1789,6 @@ export async function runAgent(argv: string[]): Promise<void> {
 // runQuick moved onto the quick extension (V6 Phase 3, src/capability/modules/quick.ts);
 // its verb projects back into the same spine slot below via asCapability.
 
-// ── rpc (in-process: write status file for the RPC daemon) ──────────────────────────────
-export async function runRpc(argv: string[]): Promise<void> {
-  const [sub, ...rest] = argv;
-  const { _, flags } = parse([sub, ...rest].filter(Boolean) as string[]);
-  if (sub === "status") {
-    const details = _[0] ?? flags.details ?? "on standby";
-    const state = _[1] ?? String(flags.state ?? "beckett");
-    const statusFile = join(paths.beckettDir, "rpc-status.json");
-    const { mkdirSync, writeFileSync } = await import("node:fs");
-    mkdirSync(paths.beckettDir, { recursive: true });
-    writeFileSync(statusFile, JSON.stringify({ details, state, updatedAt: Date.now() }, null, 2));
-    out({ updated: true, details, state });
-  }
-  fail("usage: beckett rpc status \"<details>\" [<state>]");
-}
-
 // ── concierge self-management (control bus) ──────────────────────────────────────────────
 // Self-improvement: apply edits to your persona/doctrine/skills WITHOUT a service restart.
 /** Re-spawn the parent (resume) with the new self. */

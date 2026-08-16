@@ -18,8 +18,8 @@ export interface StatusDashboardServiceOptions {
   gateway: Pick<DiscordGateway, "post" | "editMessage">;
   /**
    * Where the single dashboard message lives. `null` (the staging daemon, #141, whose cards channel
-   * is `disabled`) keeps the cycle running — presence + rpc-status still update — but posts nothing
-   * to Discord, so DEV never narrates into a prod channel.
+   * is `disabled`) keeps the cycle running — presence still updates — but posts nothing to
+   * Discord, so DEV never narrates into a prod channel.
    */
   channelId: string | null;
   statePath: string;
@@ -70,8 +70,8 @@ export class StatusDashboardService {
     }
     this.running = true;
     try {
-      // Always collect (its side effect updates presence + rpc-status.json), then render. With no
-      // channel configured (staging), stop here — the snapshot ran, but nothing is posted/edited.
+      // Always collect (its side effect updates presence), then render. With no channel configured
+      // (staging), stop here — the snapshot ran, but nothing is posted/edited.
       const embed = renderStatusDashboardEmbed(await this.opts.collectSnapshot());
       if (!this.opts.channelId) return;
       if (this.messageId) {

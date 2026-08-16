@@ -2032,32 +2032,6 @@ exports[`cli: quick: agent without a task prints usage 1`] = `
 }
 `;
 
-exports[`cli: rpc: status writes the status file 1`] = `
-{
-  "exit": 0,
-  "stderr": "",
-  "stdout": 
-"{
-  "updated": true,
-  "details": "status",
-  "state": "test details"
-}
-"
-,
-}
-`;
-
-exports[`cli: rpc: bare prints usage 1`] = `
-{
-  "exit": 1,
-  "stderr": 
-"error: usage: beckett rpc status "<details>" [<state>]
-"
-,
-  "stdout": "",
-}
-`;
-
 exports[`cli: reload: daemon down fails on the bus 1`] = `
 {
   "exit": 1,

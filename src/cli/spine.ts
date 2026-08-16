@@ -192,7 +192,6 @@ export const SPINE: SpineEntry[] = [
   { id: "spend", verbs: [{ name: "spend", load: core((m) => m.runSpend) }] },
   { id: "journal", verbs: [{ name: "journal", load: core((m) => m.runJournal) }] },
   { id: "config", verbs: [{ name: "config", load: core((m) => m.runConfig) }] },
-  { id: "rpc", verbs: [{ name: "rpc", load: core((m) => m.runRpc) }] },
 ];
 
 /** verb-name → its lazy loader (built once from the spine). */

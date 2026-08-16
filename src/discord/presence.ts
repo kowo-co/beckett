@@ -4,10 +4,7 @@
  * Turns the live board into a one-line "what Beckett is doing right now", so anyone in the
  * server can read the state of the board from the bot's presence without asking (#132).
  *
- * ONE deriver, TWO sinks:
- *   1. the gateway bot presence (discord.js `client.user.setPresence`), and
- *   2. `~/.beckett/rpc-status.json` in the `{ details, state }` shape the existing desktop RPC
- *      daemon (`src/rpc/daemon.ts`) already parses — so that daemon needs NO change.
+ * ONE deriver, ONE sink: the gateway bot presence (discord.js `client.user.setPresence`).
  *
  * The line is a CUSTOM status (activity type 4), not Playing/Watching: a bot's board state is a
  * caption, not an activity, and the custom type renders the text verbatim with no forced verb.
@@ -18,7 +15,7 @@
  * module never polls anything itself. Rate safety is the one real risk: Discord allows ~5 presence
  * updates per 20s per connection, so {@link PresenceController} only emits when the derived line
  * actually changes AND never faster than one send per {@link PresenceControllerOptions.minSendIntervalMs}
- * (default 15s). Every failure — deriving or either sink — is caught and logged; presence is a
+ * (default 15s). Every failure — deriving or the sink — is caught and logged; presence is a
  * read-out, never a reason to take down the gateway or the daemon.
  */
 
@@ -95,12 +92,10 @@ export function initialPresenceData(): PresenceData {
   );
 }
 
-/** The two places a derived presence is written. Each is called independently and may throw. */
+/** The one place a derived presence is written. May throw. */
 export interface PresenceSinks {
   /** Push presence to the gateway bot user (discord.js `setPresence`). */
   setPresence: (data: PresenceData) => void | Promise<void>;
-  /** Persist the RPC status file consumed by `src/rpc/daemon.ts`'s `readStatus()`. */
-  writeStatus: (payload: { details: string; state: string }) => void | Promise<void>;
 }
 
 export interface PresenceControllerOptions {
@@ -109,12 +104,10 @@ export interface PresenceControllerOptions {
   now?: () => number;
   /** Hard floor between presence sends (Discord ~5 updates / 20s). Default 15_000. */
   minSendIntervalMs?: number;
-  /** The RPC `state` line (the app subtitle under the detail line). Default "beckett". */
-  rpcState?: string;
 }
 
 /**
- * Owns the send decision. Fed the current board on every snapshot tick, it emits to both sinks ONLY
+ * Owns the send decision. Fed the current board on every snapshot tick, it emits to the sink ONLY
  * when the derived line actually changes from the last one sent, and never more often than
  * `minSendIntervalMs`. When a change is rate-floored it is simply retried on the next tick (the
  * snapshot cadence is 60s, comfortably above the floor). Never throws.
@@ -124,7 +117,6 @@ export class PresenceController {
   private readonly logger: Logger;
   private readonly now: () => number;
   private readonly minSendIntervalMs: number;
-  private readonly rpcState: string;
   private lastKey: string | null = null;
   private lastSentAt: number | null = null;
 
@@ -133,19 +125,18 @@ export class PresenceController {
     this.logger = opts.logger ?? rootLog.child("discord.presence");
     this.now = opts.now ?? Date.now;
     this.minSendIntervalMs = opts.minSendIntervalMs ?? 15_000;
-    this.rpcState = opts.rpcState ?? "beckett";
   }
 
   /**
-   * Derive from the current board and, only on a real change within the rate floor, push to both
-   * sinks. A derive failure, or either sink throwing, is caught and logged — the tick, the gateway,
-   * and the RPC daemon all carry on unaffected.
+   * Derive from the current board and, only on a real change within the rate floor, push to the
+   * sink. A derive failure, or the sink throwing, is caught and logged — the tick and the gateway
+   * carry on unaffected.
    */
   async update(inputs: PresenceInputs): Promise<void> {
     try {
       const derived = derivePresence(inputs);
       const key = presenceKey(derived);
-      if (key === this.lastKey) return; // unchanged — no send, no write
+      if (key === this.lastKey) return; // unchanged — no send
       const now = this.now();
       if (this.lastSentAt !== null && now - this.lastSentAt < this.minSendIntervalMs) {
         // Rate-floored: leave lastKey untouched so the next tick re-attempts this pending change.
@@ -159,17 +150,12 @@ export class PresenceController {
     }
   }
 
-  /** Write both sinks; each is isolated so one failing never blocks the other or the caller. */
+  /** Write the sink. */
   private async emit(derived: DerivedPresence): Promise<void> {
     try {
       await this.sinks.setPresence(toPresenceData(derived));
     } catch (err) {
       this.logger.warn("presence: setPresence sink failed", { line: derived.line, error: String(err) });
-    }
-    try {
-      await this.sinks.writeStatus({ details: derived.line, state: this.rpcState });
-    } catch (err) {
-      this.logger.warn("presence: rpc-status write failed", { line: derived.line, error: String(err) });
     }
   }
 }

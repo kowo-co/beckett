@@ -3,8 +3,10 @@
  * =======================================================================================
  * The FOUNDATION step of the v6 migration (issue #82). This module defines the ONE standard
  * contract every v6 extension registers through — the "plug n play" interface the whole v6
- * generation migrates onto. It is design + skeleton: nothing here is wired into the live
- * daemon path yet. See {@link ../../docs/v6-architecture.md} for the full boundary + migration.
+ * generation migrates onto. LIVE since the v6 boot wiring: `src/shell/main.ts` constructs the
+ * one runtime `ExtensionRegistry` and hands it to the concierge, and nine capability modules
+ * (mail, memory, image, cloudflare, github, secret, browser, quick, routines) register through
+ * it. See {@link ../../docs/v6-architecture.md} for the full boundary + migration.
  *
  * WHY a new contract when v5 already has plug-in tables:
  * v5 STARTED the unification with the capability spine but never finished it, and two adjacent

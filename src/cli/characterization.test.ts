@@ -9,7 +9,7 @@
  *
  * What "observable behavior" means here: each command is exercised up to its hermetic
  * boundary — full output for the in-process commands (memory, task, config,
- * rpc, federation, …), and the exact usage/refusal/dead-daemon message for commands whose
+ * federation, …), and the exact usage/refusal/dead-daemon message for commands whose
  * happy path needs a live daemon, Discord, the tracker, GitHub, or Cloudflare. Those boundary
  * messages are load-bearing: the Concierge pattern-matches on them, so they are part of the
  * contract too. Dummy credentials (never real ones) are injected only to get PAST an env
@@ -324,9 +324,7 @@ const CASES: Case[] = [
   { name: "quick: no agent/task prints usage", argv: ["quick"] },
   { name: "quick: agent without a task prints usage", argv: ["quick", "quick-code"] },
 
-  // ── rpc / reload / persona ──────────────────────────────────────────────────────────────
-  { name: "rpc: status writes the status file", argv: ["rpc", "status", "test details", "idle"] },
-  { name: "rpc: bare prints usage", argv: ["rpc"] },
+  // ── reload / persona ──────────────────────────────────────────────────────────────
   { name: "reload: daemon down fails on the bus", argv: ["reload"] },
   { name: "persona: daemon down fails on the bus", argv: ["persona"] },
 ];
