@@ -71,7 +71,7 @@ export function classifyPublishError(error: unknown): PublishFailureKind {
   // (a GitHub hiccup, a dropped connection) — a failure whose cause is a property of the local tree
   // or the branch itself belongs to a human immediately, on attempt 1, with the real reason.
   if (
-    /needs a human|can't auto-rebase|cannot rebase|unstaged changes|uncommitted changes|please commit or stash|index contains uncommitted|still conflicts/i.test(
+    /needs a human|can't auto-rebase|cannot rebase|unstaged changes|uncommitted changes|please commit or stash|index contains uncommitted|still conflicts|publish blocked:|refusing to publish/i.test(
       message,
     )
   ) return "permanent";
@@ -140,6 +140,21 @@ function pushHandoff(ref: { runId: string; branch: string }, ahead?: number): st
   return (
     `${carries}Publish it by hand (\`beckett gh push --repo <owner/name> --branch ${ref.branch}\`), ` +
     `then close it out with \`beckett task courier ${ref.runId}\`.`
+  );
+}
+
+/**
+ * The hand-off for a publish that parked with a PR already open (Task 3, `src/agency/index.ts`
+ * `publishViaPullRequest`): the work is NOT stranded — it is on GitHub, and only the integration
+ * stalled (CI failed, a conflict, a missing review). Telling a human to "push it by hand" here would
+ * be actively wrong (the branch is already pushed, and re-pushing again does nothing); the actionable
+ * step is to clear the blocker ON the PR and merge it.
+ */
+export function publishPrAdvice(prUrl: string, runId: string): string {
+  return (
+    `The work is safe: it is pushed and PR ${prUrl} is open. Clear the blocker on the PR (CI, ` +
+    `conflicts, review), merge it, then close the bookkeeping with ` +
+    `\`beckett task courier ${runId} --pr-url ${prUrl}\`. Do NOT push anything by hand.`
   );
 }
 
@@ -271,8 +286,12 @@ export function publishFailureReason(
    * branch's real state against `origin/main` ({@link publishParkAdvice}). Omitted → the generic
    * "push it by hand" fallback, so this stays useful standalone (and for callers with no branch to
    * check). Ignored while the plan is still retrying: a scheduled retry needs no hand-off yet.
+   * Superseded by {@link publishPrAdvice} below when `plan.error` already carries a PR url — a
+   * failure that opened a PR is never "push it by hand" advice, regardless of what the caller passed.
    */
   advice?: string,
+  /** The run id named in the hand-off command. Omitted → the generic `<run-id>` placeholder. */
+  runId?: string,
 ): string {
   const head =
     plan.action === "park"
@@ -282,7 +301,13 @@ export function publishFailureReason(
   const hint = publishFixHint(plan.error);
   const detail = hint ? `${cause} — ${hint}` : `${cause}.`;
   if (plan.action !== "park") return `${head}: ${detail}`;
-  const handoff = advice?.trim() || pushHandoff({ runId: "<run-id>", branch: "<branch>" });
+  // Most publish failures now carry a PR url (Task 3): the work already left the machine, so the
+  // branch-vs-main advice — computed for the pre-PR world, where a park meant "still only local" —
+  // is the fallback, not the norm. A failure naming a PR gets told to clear the PR, never to push.
+  const prUrl = plan.error.match(/https?:\/\/\S+\/pull\/\d+/)?.[0];
+  const handoff = prUrl
+    ? publishPrAdvice(prUrl, runId ?? "<run-id>")
+    : advice?.trim() || pushHandoff({ runId: runId ?? "<run-id>", branch: "<branch>" });
   return `${head}: ${detail} ${handoff}`;
 }
 

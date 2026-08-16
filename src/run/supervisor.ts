@@ -1324,10 +1324,10 @@ export class RunSupervisor {
       // is what makes the hand-off advice correct instead of the blanket "just push it" that would
       // have duplicated or reverted shipped work on every 2026-08-14 stall (BUG 2).
       const advice = await this.publishHandoffAdvice(run);
-      await this.hold(run, this.adminPermissionBlocker(run, publishFailureReason(plan, attempt, advice)));
+      await this.hold(run, this.adminPermissionBlocker(run, publishFailureReason(plan, attempt, advice, run.id)));
       return;
     }
-    await this.patchRun(run.id, { error: publishFailureReason(plan, attempt) });
+    await this.patchRun(run.id, { error: publishFailureReason(plan, attempt, undefined, run.id) });
   }
 
   /**

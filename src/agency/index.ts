@@ -32,10 +32,8 @@
  * no mail client is implemented here.
  */
 
-import { unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
 import type {
   ActionType,
   ActionContext,
@@ -71,6 +69,7 @@ import { SCAFFOLDING_DIR } from "../worker/worktree.ts";
 import { specRunId } from "../run/spec-file.ts";
 import { resolveGitHubTarget } from "../github/owner.ts";
 import { GitHubAppAuth, loadGitHubAppCredentials } from "../github/app.ts";
+import { landBranch, LandError, type LandClient } from "../cli/land.ts";
 
 // =======================================================================================
 // Errors
@@ -289,6 +288,15 @@ const FORK_READY_TRIES = 10;
 /** Delay between fork-readiness polls. */
 const FORK_READY_DELAY_MS = 1500;
 
+/**
+ * How long ONE publish attempt may sit on CI before {@link publishViaPullRequest} hands the wait
+ * back to the retry ladder (`PUBLISH_RETRY_DELAYS_MS`, `src/dispatch/publish-outbox.ts`) instead of
+ * blocking forever. Must stay comfortably under `PUBLISH_STALL_MS` (20 min,
+ * `src/run/supervisor.ts:292`) — that guard measures an in-flight attempt from its start, so an
+ * inline CI wait this long still leaves headroom before the stall watchdog would fire mid-wait.
+ */
+export const PUBLISH_CI_TIMEOUT_MS = 5 * 60_000;
+
 /** Sleep helper for fork-readiness polling (real timers; publish runs off the hot path). */
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -392,6 +400,11 @@ export interface GitHubClientOptions {
   spawn?: (cmd: string[], opts: { cwd?: string; env?: Record<string, string | undefined> }) => StreamingChild;
   /** Injectable authenticated REST transport (defaults to the global fetch). */
   fetchImpl?: typeof fetch;
+  /** Injectable clock/sleep for {@link GitHubCli.publishViaPullRequest}'s bounded CI wait — defaults
+   *  to the real `Date.now`/`setTimeout`. Tests fake both so a CI-still-pending scenario resolves
+   *  without actually blocking for `PUBLISH_CI_TIMEOUT_MS`. */
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /** The outcome of {@link GitHubCli.ensurePublished} — carries HOW the work shipped so callers can
@@ -888,9 +901,12 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
    *      `origin`, never a hardcoded `<owner>/<slug>`. If we're a collaborator (write access) we
    *      push the ticket branch straight to origin and open a plain in-repo PR; otherwise we fork
    *      the upstream, push to the fork, and open a cross-fork PR. Merging is a human call → `kind: "pr"`.
-   *   2. **A repo we already own** (a continuing/shared project, e.g. the beckett self-repo) → push a
-   *      ticket branch and open a PR against its default branch. NEVER `HEAD→main` (that's the
-   *      non-fast-forward "fetch first" reject that stranded shared-repo tickets) → `kind: "pr"`.
+   *   2. **A repo we already own** (a continuing/shared project, e.g. the beckett self-repo) — the
+   *      run's finished commit leaves the machine as `beckett/<ticket>` FIRST, unconditionally, before
+   *      any trunk integration is attempted (durability). Then a PR opens against the trunk, CI is
+   *      awaited (bounded), and GitHub merges it via the API (`git rebase`/`git apply` never run) →
+   *      `kind: "pushed"` with `prUrl` = the merged PR's URL. The one exception is a repo with no
+   *      commits at all yet: there is no trunk to PR against, so the trunk is pushed to directly.
    *   3. **Brand-new project we own** → create it from `sourceDir` and push `HEAD→main` in one shot →
    *      `kind: "pushed"`.
    */
@@ -908,10 +924,11 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
      * (OPS-185).
      */
     targetBranch?: string;
-    /** Original worker base, captured when its worktree was created. Used only to recover from a
-     * rebase that tries to replay a predecessor which has since squash-landed. */
+    /** Original worker base, captured when its worktree was created. Used only by
+     * {@link squashLocalCommits} to collapse the run's raw checkpoint history into one commit. */
     baseSha?: string;
-    /** The worker's completion summary; used as the single squash-apply commit subject. */
+    /** The worker's completion summary; used as the squash commit subject and, when it carries a
+     * review write-up after its first blank line, as the PR body's mechanism section. */
     commitMessage?: string;
   }): Promise<PublishResult> {
     await this.ensureCreds("publish repo");
@@ -927,6 +944,10 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
     const body =
       `Automated contribution by Beckett${p.ticket ? ` for ${p.ticket}` : ""}.` +
       (p.description ? `\n\n${p.description}` : "");
+    // The review write-up now lives in the PR body, not just the squash commit (#246's squash commit
+    // was the only carrier before): everything after `commitMessage`'s first blank line.
+    const reviewWriteup = p.commitMessage?.split(/\r?\n\r?\n/).slice(1).join("\n\n").trim() || "";
+    const prBody = reviewWriteup ? `${body}\n\n${reviewWriteup}` : body;
 
     // Case 1 — origin points to a repo outside our own account/managed owner. The head repo and
     // push target are read from THAT origin, never a hardcoded `<owner>/<slug>` — the assumption
@@ -971,44 +992,61 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
 
     const repo = `${this.publishingOwner()}/${p.slug}`;
 
-    // Case 2 — a repo we already own (a continuing project, incl. beckett's own repos): ship straight
-    // to its default branch. Integrate the remote tip FIRST (fetch + rebase) so this isn't the
-    // non-fast-forward "fetch first" reject that stranded OPS-25/27; keeping the branch current also
-    // keeps it visible to DAG dependents that clone fresh. A rebase CONFLICT throws → the dispatcher
-    // holds the ticket for a human (never a silent false-done).
+    // Case 2 — a repo we already own (a continuing project, incl. beckett's own repos): emit a
+    // durable ref, then ask GitHub to integrate it. No local rebase, no local merge — the pushed
+    // branch is the immutable input, and CI gates the SAME tree a human would review, not a
+    // sandbox-side reconstruction of it.
     if (await this.repoExists(repo)) {
       await this.setPublicSafe(repo);
       const commitSummary = p.commitMessage ?? title;
       // Finish the commit BEFORE anything leaves the machine: the branch pushed below (durability)
       // must already be the run's single finished commit, not a scratch draft a later squash still
-      // has to touch (#261/#246 stay correct under the new push-first order).
+      // has to touch (#261/#246 stay correct under the push-first order).
       await this.commitStrayWorkingTree(p.sourceDir, commitSummary);
       await this.squashLocalCommits(p.sourceDir, p.baseSha, commitSummary);
       // Resolve + validate the trunk before any network action — refuses outright if the repo's
       // default branch is itself a sibling run's branch (`kowo-co/babble`, 2026-08-14).
       const trunk = await this.resolveTrunk(repo, p.targetBranch);
-      // FIRST network action of the publish, unconditional: the run's finished work leaves this
-      // machine before the trunk integration that might fail. A publish that dies after this line
-      // still has `beckett/<ticket>` durable on GitHub instead of stranded on one disk.
-      //
-      // EXCEPT when the trunk doesn't exist yet (an owned repo with zero refs pushed): GitHub sets a
-      // branchless repo's default branch to whichever ref lands FIRST. Pushing the run branch first
-      // would make `beckett/<ticket>` the repo's new default — the exact kowo-co/babble
-      // misconfiguration `resolveTrunk` above exists to refuse — and every later publish onto this
-      // repo would hit that refusal permanently. In that one case, push the trunk first so it claims
-      // the default, then push the run branch for durability.
+      // The run's finished work leaves this machine before the trunk integration that might fail: a
+      // publish that dies after this line still has `beckett/<ticket>` durable on GitHub instead of
+      // stranded on one disk. EXCEPT when the trunk doesn't exist yet (an owned repo with zero refs
+      // pushed): GitHub sets a branchless repo's default branch to whichever ref lands FIRST, so
+      // pushing the run branch there first would make IT the repo's new default — the exact
+      // kowo-co/babble misconfiguration `resolveTrunk` exists to refuse. In that one case, push the
+      // trunk directly (there is no PR to open against a base that doesn't exist) so it claims the
+      // default, then push the run branch for durability.
       if (trunk.exists) await this.pushRunBranch(p.sourceDir, repo, branch);
-      const sha = await this.pushToBranch(p.sourceDir, repo, trunk.base, p.baseSha, commitSummary);
-      if (!trunk.exists) await this.pushRunBranch(p.sourceDir, repo, branch);
-      this.opts.logger.info("published via push to branch", { repo, branch: trunk.base });
-      // #246: `prUrl` is what the Discord publish announcement renders — it must point at something
-      // real (the landed commit), never the bare repo root. `url` stays the repo root for callers
-      // that want the repo itself (e.g. the task registry's publication link).
+      if (!trunk.exists) {
+        await this.gitPush(p.sourceDir, repo, "HEAD", trunk.base);
+        await this.pushRunBranch(p.sourceDir, repo, branch);
+        const sha = await this.currentSha(p.sourceDir);
+        this.opts.logger.info("published via direct push (branchless repo)", { repo, branch: trunk.base });
+        // #246: `prUrl` is what the Discord publish announcement renders — it must point at something
+        // real (the landed commit), never the bare repo root. `url` stays the repo root for callers
+        // that want the repo itself (e.g. the task registry's publication link).
+        return {
+          nameWithOwner: repo,
+          url: `${this.gitHost()}/${repo}`,
+          kind: "pushed",
+          ...(sha ? { prUrl: `${this.gitHost()}/${repo}/commit/${sha}` } : {}),
+        };
+      }
+      const landed = await this.publishViaPullRequest({
+        cwd: p.sourceDir,
+        repo,
+        branch,
+        base: trunk.base,
+        title,
+        body: prBody,
+        baseSha: p.baseSha,
+        summary: commitSummary,
+      });
+      this.opts.logger.info("published via pull request", { repo, branch, base: trunk.base, prUrl: landed.prUrl });
       return {
         nameWithOwner: repo,
         url: `${this.gitHost()}/${repo}`,
         kind: "pushed",
-        ...(sha ? { prUrl: `${this.gitHost()}/${repo}/commit/${sha}` } : {}),
+        prUrl: landed.prUrl || (landed.sha ? `${this.gitHost()}/${repo}/commit/${landed.sha}` : undefined),
       };
     }
 
@@ -1112,58 +1150,73 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
   }
 
   /**
-   * Push the checkout's HEAD to a repo we own, on `base`, WITHOUT a non-fast-forward reject: fetch
-   * that branch's remote tip and rebase local commits onto it first, then push. `base` is resolved
-   * and validated by {@link resolveTrunk} before this is called — a ticket cast onto a non-main
-   * integration branch passes ITS resolved base so `main` is never fetched, rebased, or pushed. If
-   * the remote branch doesn't exist yet (a just-created/empty repo, or a fresh integration branch)
-   * the fetch fails harmlessly and the push creates it. On a rebase conflict, a dependent worker may
-   * be carrying a predecessor's pre-squash commits. In that one shape, retry its recorded *own*
-   * base..tip delta as one patch over a freshly fetched remote tip; this avoids replaying
-   * already-landed checkpoints.
+   * Case 2's landing half: push `p.branch` (redundant with {@link pushRunBranch} — idempotent, so a
+   * retry's re-push is a no-op), open or reuse its PR into `p.base`, wait BOUNDED
+   * ({@link PUBLISH_CI_TIMEOUT_MS}) for CI, and merge with squash — all through
+   * {@link landBranch}, the SAME engine `beckett finish` and the release-bump deploy use, so there is
+   * exactly one implementation of "push → PR → wait → merge" in the codebase. The merge itself runs
+   * with `cwd: tmpdir()`, never `p.cwd` (the run's own worktree) — merging from there would make `gh`
+   * switch branches and delete the local branch out from under an in-flight run, the exact class of
+   * bug this lane exists to kill.
    *
-   * The checkout's finished commit — {@link commitStrayWorkingTree} + {@link squashLocalCommits} —
-   * is the caller's job now (case 2 runs them once, before the branch push, so the branch pushed for
-   * durability is already the finished single commit); this only re-touches history on the conflict
-   * fallback below. Returns the pushed commit's sha (for a real, non-root `prUrl`), or `undefined` if
-   * it couldn't be determined.
+   * {@link LandError}s are rethrown with a prefix {@link classifyPublishError} keys on:
+   *   - `timeout` → `"publish: still waiting on CI for …"` (transient — the retry is free, the PR is
+   *     already open and nothing local changed);
+   *   - `pr` with "no commits between" → not an error at all: the work is already on `p.base` (a
+   *     retry after an earlier attempt's PR already merged and GitHub deleted the branch). Report the
+   *     current tip as the shipped commit instead of failing;
+   *   - everything else (CONFLICTING, DRAFT, failed checks, a merge refusal, …) →
+   *     `"publish blocked: …"` (permanent — a retry cannot change GitHub's verdict; a human must).
    */
-  private async pushToBranch(
-    cwd: string,
-    repo: string,
-    base: string,
-    workerBaseSha?: string,
-    summary?: string,
-  ): Promise<string | undefined> {
-    const url = `${this.gitHost()}/${repo}.git`;
-    const fetch = await this.runner(["git", "fetch", url, base], { cwd, env: this.gitEnv() });
-    if (fetch.code === 0) {
-      const rebase = await this.runner(["git", "rebase", "FETCH_HEAD"], { cwd, env: this.gitEnv() });
-      if (rebase.code !== 0) {
-        await this.runner(["git", "rebase", "--abort"], { cwd, env: this.gitEnv() });
-        try {
-          if (await this.squashApplyWorkerDelta(cwd, url, base, workerBaseSha, summary)) {
-            await this.gitPush(cwd, repo, "HEAD", base);
-            return await this.currentSha(cwd);
-          }
-        } catch (err) {
-          // A failed apply reports only the remaining files. Do not bury the useful answer under
-          // the original 20-commit rebase transcript.
-          throw err;
-        }
-        throw new Error(
-          `publish: local work conflicts with ${repo}@${base} and can't auto-rebase — needs a human ` +
-            `(${rebase.stderr.trim() || rebase.stdout.trim()})`,
-        );
+  private async publishViaPullRequest(p: {
+    cwd: string;
+    repo: string;
+    branch: string;
+    base: string;
+    title: string;
+    body: string;
+    baseSha?: string;
+    summary?: string;
+  }): Promise<{ prUrl: string; sha?: string }> {
+    const client: LandClient = {
+      pushBranch: async (_repo, localRef, remoteBranch) => this.gitPush(p.cwd, p.repo, localRef, remoteBranch),
+      ensurePR: (o) => this.ensurePR(o),
+      prMergeability: (repo, n) => this.prMergeability(repo, n),
+      mergePR: (repo, n, s) => this.mergePR(repo, n, s, { cwd: tmpdir() }),
+    };
+    try {
+      const landed = await landBranch(client, {
+        repo: p.repo,
+        head: p.branch,
+        localRef: "HEAD",
+        base: p.base,
+        title: p.title,
+        body: p.body,
+        strategy: "squash",
+        ciTimeoutMs: PUBLISH_CI_TIMEOUT_MS,
+        dir: p.cwd,
+        command: "beckett task courier <run-id>",
+        step: (m) => this.opts.logger.info(`publish: ${m}`),
+        now: this.opts.now,
+        sleep: this.opts.sleep,
+      });
+      return { prUrl: landed.pr.url };
+    } catch (err) {
+      if (!(err instanceof LandError)) throw err;
+      if (err.stage === "timeout") {
+        const prUrl = err.message.match(/https?:\/\/\S+\/pull\/\d+/)?.[0] ?? "";
+        throw new Error(`publish: still waiting on CI for ${prUrl} — ${err.message}`);
       }
+      if (err.stage === "pr" && /no commits between/i.test(err.message)) {
+        return { prUrl: "", sha: await this.currentSha(p.cwd) };
+      }
+      throw new Error(`publish blocked: ${err.message}`);
     }
-    await this.gitPush(cwd, repo, "HEAD", base);
-    return await this.currentSha(cwd);
   }
 
   /**
-   * Commit whatever is still loose in the publish checkout, BEFORE the squash and the fetch/rebase
-   * below. `git rebase` refuses outright on a dirty tree ("cannot rebase: You have unstaged changes.
+   * Commit whatever is still loose in the publish checkout, BEFORE the squash. `git rebase` used to
+   * refuse outright on a dirty tree ("cannot rebase: You have unstaged changes.
    * error: additionally, your index contains uncommitted changes."), and that is not a transient
    * fault — it fails identically on every attempt, so a run that hits it burns its retry ladder and
    * parks without ever publishing (2026-08-14). The dirty state is our OWN doing: the run's private
@@ -1176,12 +1229,13 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
    * formality: `sourceDir` falls back to the SHARED project checkout when a run carries no workspace
    * (`run.workspace ?? resolveRepoRoot(run)`), and loose edits there are a human's in-progress work,
    * not ours to commit and push. Undecidable ⇒ treated as not ours, so the worst case is the old
-   * behavior (the rebase reports the dirty tree) rather than shipping someone else's changes.
+   * behavior — the loose work stays uncommitted and unpushed — rather than shipping someone else's
+   * changes.
    *
    * Internal scaffolding is kept OUT of the index (`:(exclude)`) exactly as
-   * {@link stripHarnessState} keeps it out of the push — leaving it untracked, which a rebase
-   * does not mind. Best-effort throughout: a `git status` we can't read, or an add/commit that
-   * fails, leaves the working tree exactly as it was and lets the rebase report the real problem.
+   * {@link stripHarnessState} keeps it out of the push — leaving it untracked. Best-effort
+   * throughout: a `git status` we can't read, or an add/commit that fails, leaves the working tree
+   * exactly as it was; the push below then reports whatever real problem remains.
    *
    * The ONE state it refuses outright is an unmerged path (a half-finished merge/rebase left in the
    * worktree). "Loose work" means work no stage got around to committing, NOT a file full of
@@ -1294,83 +1348,6 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
   private async currentSha(cwd: string): Promise<string | undefined> {
     const r = await this.runner(["git", "rev-parse", "HEAD"], { cwd, env: this.gitEnv() });
     return r.code === 0 ? r.stdout.trim() || undefined : undefined;
-  }
-
-  /**
-   * Apply exactly the worker's recorded base..tip contribution as one commit. False means the
-   * metadata is not safe enough to make this transformation, so the caller preserves the old human
-   * hold. A conflicting apply throws a deliberately compact residual-conflict error for the courier.
-   */
-  private async squashApplyWorkerDelta(
-    cwd: string,
-    url: string,
-    remoteBranch: string,
-    workerBaseSha: string | undefined,
-    summary: string | undefined,
-  ): Promise<boolean> {
-    if (!workerBaseSha?.trim()) return false;
-    const tip = await this.runner(["git", "rev-parse", "--verify", "--quiet", "HEAD"], { cwd, env: this.gitEnv() });
-    const base = await this.runner(["git", "rev-parse", "--verify", "--quiet", `${workerBaseSha}^{commit}`], { cwd, env: this.gitEnv() });
-    if (tip.code !== 0 || base.code !== 0) return false;
-    const baseSha = base.stdout.trim();
-    const tipSha = tip.stdout.trim();
-    if (!baseSha || !tipSha) return false;
-
-    // A non-ancestor base makes a two-dot diff a tree comparison rather than the worker's history.
-    // Never guess in that case.
-    const ancestor = await this.runner(["git", "merge-base", "--is-ancestor", baseSha, tipSha], { cwd, env: this.gitEnv() });
-    if (ancestor.code !== 0) return false;
-    const nonempty = await this.runner(["git", "diff", "--quiet", `${baseSha}..${tipSha}`], { cwd, env: this.gitEnv() });
-    if (nonempty.code === 0 || nonempty.code > 1) return false;
-
-    // A deletion must have been made in this exact worker range. This catches a stale/wrong base
-    // whose snapshot comparison would otherwise remove a file the worker never changed.
-    const deletions = await this.runner(["git", "diff", "--name-status", "--diff-filter=D", `${baseSha}..${tipSha}`], {
-      cwd,
-      env: this.gitEnv(),
-    });
-    if (deletions.code !== 0) return false;
-    for (const line of deletions.stdout.split(/\r?\n/)) {
-      const path = line.split("\t")[1]?.trim();
-      if (!path) continue;
-      const touched = await this.runner(
-        ["git", "log", "--format=%H", "--diff-filter=D", `${baseSha}..${tipSha}`, "--", path],
-        { cwd, env: this.gitEnv() },
-      );
-      if (touched.code !== 0 || !touched.stdout.trim()) return false;
-    }
-
-    // Fetch again after aborting the rebase: FETCH_HEAD is the precise landing point for the patch.
-    const refreshed = await this.runner(["git", "fetch", url, remoteBranch], { cwd, env: this.gitEnv() });
-    if (refreshed.code !== 0) return false;
-    const current = await this.runner(["git", "branch", "--show-current"], { cwd, env: this.gitEnv() });
-    const landingBranch = `${current.stdout.trim() || "beckett/squash-apply"}-land`;
-    const checkout = await this.runner(["git", "checkout", "-B", landingBranch, "FETCH_HEAD"], { cwd, env: this.gitEnv() });
-    if (checkout.code !== 0) return false;
-
-    const patchPath = join(tmpdir(), `beckett-squash-apply-${randomUUID()}.patch`);
-    try {
-      const diff = await this.runner(["git", "diff", "--binary", `${baseSha}..${tipSha}`], { cwd, env: this.gitEnv() });
-      if (diff.code !== 0 || !diff.stdout) return false;
-      await writeFile(patchPath, diff.stdout);
-      const apply = await this.runner(["git", "apply", "--3way", patchPath], { cwd, env: this.gitEnv() });
-      if (apply.code !== 0) {
-        const conflicts = await this.runner(["git", "diff", "--name-only", "--diff-filter=U"], { cwd, env: this.gitEnv() });
-        const files = conflicts.stdout.split(/\r?\n/).map((file) => file.trim()).filter(Boolean);
-        throw new Error(
-          `publish: squash-apply still conflicts with ${remoteBranch}; residual conflicting files: ` +
-            `${files.length ? files.join(", ") : "(none reported)"} — needs a human`,
-        );
-      }
-      const commit = await this.runner(
-        ["git", "-c", "commit.gpgsign=false", "commit", "--no-verify", "-m", summary?.trim() || "beckett: squash apply worker delta"],
-        { cwd, env: this.gitEnv() },
-      );
-      if (commit.code !== 0) return false;
-      return true;
-    } finally {
-      await unlink(patchPath).catch(() => {});
-    }
   }
 
   /** `setPublic` that never throws — visibility is cosmetic and must not block shipping the code. */
@@ -1589,13 +1566,18 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
   /**
    * Merge a PR (Spec 07 §3.4). The IRREVERSIBLE step — callers MUST route this through
    * {@link Agency.perform}("gh.pr.merge", …); this method assumes the handshake already said go.
+   *
+   * `opts.cwd` overrides the resolved repo dir — {@link publishViaPullRequest} passes a neutral
+   * `tmpdir()` so merging a run's PR never `gh`-switches branches inside the run's own worktree
+   * (the exact class of bug this lane exists to kill: merging from `sourceDir` would delete the
+   * local branch out from under an in-flight run).
    */
-  async mergePR(repo: string, n: number, strategy: MergeStrategy): Promise<void> {
+  async mergePR(repo: string, n: number, strategy: MergeStrategy, opts?: { cwd?: string }): Promise<void> {
     await this.ensureCreds("merge PR", { repo });
     const flag = strategy === "merge" ? "--merge" : strategy === "rebase" ? "--rebase" : "--squash";
     const r = await this.runner(
       ["gh", "pr", "merge", String(n), "--repo", repo, flag, "--delete-branch"],
-      { cwd: this.opts.resolveRepoDir(repo), env: this.ghEnv() },
+      { cwd: opts?.cwd ?? this.opts.resolveRepoDir(repo), env: this.ghEnv() },
     );
     if (r.code !== 0) {
       throw new Error(`gh pr merge failed (${r.code}): ${r.stderr.trim() || r.stdout.trim()}`);

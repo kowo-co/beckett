@@ -10,6 +10,7 @@ import {
   publishFailureReason,
   publishFixHint,
   publishParkAdvice,
+  publishPrAdvice,
   PublishOutbox,
   PUBLISH_MAX_ATTEMPTS,
   PUBLISH_RETRY_DELAYS_MS,
@@ -298,4 +299,46 @@ test("publishFailureReason names the step, the attempt, the cause, and what to d
   expect(withAdvice).not.toContain("beckett gh push");
   const retryWithAdvice = publishFailureReason(planPublishRetry(2, new Error("fetch failed"), 1_000), 2, advice);
   expect(retryWithAdvice).not.toContain(advice);
+});
+
+// ── Task 3: publish-opens-a-pr — the classifier learns the new prefixes, and a PR url wins the hand-off ──
+
+test("publish blocked: is permanent, still waiting on CI is transient", () => {
+  expect(
+    classifyPublishError(new Error("publish blocked: PR #11 (https://github.com/o/r/pull/11) has MERGE CONFLICTS")),
+  ).toBe("permanent");
+  expect(
+    classifyPublishError(new Error("refusing to publish: harness state is still tracked (.beckett) — needs a human")),
+  ).toBe("permanent");
+  expect(
+    classifyPublishError(
+      new Error("publish: still waiting on CI for https://github.com/o/r/pull/13 — gave up waiting on PR #13"),
+    ),
+  ).toBe("transient");
+});
+
+test("publishPrAdvice tells a human to clear the PR, never to push by hand", () => {
+  const advice = publishPrAdvice("https://github.com/o/r/pull/9", "run-20260815-x");
+  expect(advice).toContain("https://github.com/o/r/pull/9");
+  expect(advice).toContain("beckett task courier run-20260815-x --pr-url https://github.com/o/r/pull/9");
+  expect(advice).toContain("Do NOT push anything by hand");
+});
+
+test("a failure carrying a PR url gets PR advice, not push-it-by-hand advice", () => {
+  const branchAdvice = "This branch's work is ALREADY on origin/main — do NOT push.";
+  const plan = planPublishRetry(
+    1,
+    new Error("publish blocked: PR #11 (https://github.com/o/r/pull/11) has MERGE CONFLICTS with main"),
+    1_000,
+  );
+  const reason = publishFailureReason(plan, 1, branchAdvice, "run-20260815-x");
+  expect(reason).toContain("https://github.com/o/r/pull/11");
+  expect(reason).toContain("beckett task courier run-20260815-x --pr-url https://github.com/o/r/pull/11");
+  expect(reason).not.toContain(branchAdvice);
+  expect(reason).not.toContain("Publish it by hand");
+
+  // No PR url in the error → the branch-vs-main advice is still the fallback.
+  const noPrPlan = planPublishRetry(4, new Error("fetch failed"), 1_000);
+  const fallback = publishFailureReason(noPrPlan, 4, branchAdvice, "run-20260815-x");
+  expect(fallback).toContain(branchAdvice);
 });
