@@ -1,5 +1,6 @@
 [Unit]
 Description=Beckett [DEV] — staging/testing instance (own checkout + BECKETT_DIR=%h/.beckett-dev, started on demand)
+# Operator contract (what to supply, what stays off, seed/start/stop/redeploy): docs/dev-instance.md
 After=network-online.target
 Wants=network-online.target
 # Same crash-loop backstop as prod. NOTE: unlike beckett-v4, DEV wires NO OnFailure alert — a

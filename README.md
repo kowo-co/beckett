@@ -313,6 +313,10 @@ branch-protected anyway): the release-version bump lands through its own PR via 
 and the annotated tag via `beckett gh push --tag`. It preflights that credential before it commits
 anything, so a missing app key fails immediately with a named cause.
 
+A separate, fully isolated staging instance (own checkout, own state dir, own Discord bot
+application) can run alongside prod on the same box — see
+[`docs/dev-instance.md`](docs/dev-instance.md) for what to supply and how to seed/start it.
+
 ## Repo layout
 
 ```
