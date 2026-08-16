@@ -751,7 +751,7 @@ export class RunSupervisor {
     //    unstamped — possibly worker-authored, not provably foreign) alone.
     const specPath = join(workspace, SPEC_FILE_REL);
     try {
-      mkdirSync(join(workspace, ".beckett"), { recursive: true });
+      mkdirSync(dirname(specPath), { recursive: true });
       const legacyPath = join(workspace, "spec.md");
       if (!existsSync(specPath) && existsSync(legacyPath)) {
         const legacyText = readFileSync(legacyPath, "utf8");
