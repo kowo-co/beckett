@@ -1887,6 +1887,7 @@ describe("elicitation (overhaul B8)", () => {
     await settle();
     const after = store.get(run.id)!;
     expect(after.state).toBe("cancelled");
+    expect(after.question).toBeNull(); // cancel clears the question, not just the timer
     expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(1); // no resume spawn
   });
 });

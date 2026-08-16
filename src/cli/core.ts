@@ -1021,8 +1021,15 @@ export async function runTask(argv: string[]): Promise<void> {
           `branch ${run.branch} still holds everything this run committed.`,
       );
     }
+    // (B8) `awaiting_input` gets the same "steering outranks waiting" treatment: there is no live
+    // worker to nudge, so routing this to `run.steer` would silently buffer the note and let the
+    // question ride out its full `runs.question_wait_s` timer even though a human just answered it.
+    // `run.resume`'s `answer` path is the one exit that actually clears the question and re-spawns
+    // now.
     if (run.state === "parked") {
       await bus("run.resume", { runId: run.id, note });
+    } else if (run.state === "awaiting_input") {
+      await bus("run.resume", { runId: run.id, answer: note });
     } else {
       await bus("run.steer", { runId: run.id, note });
     }

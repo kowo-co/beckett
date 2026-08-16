@@ -1905,7 +1905,7 @@ export class RunSupervisor {
       this.pump();
       return "already-terminal";
     }
-    await this.patchRun(runId, { state: "cancelled", error: reason });
+    await this.patchRun(runId, { state: "cancelled", error: reason, question: null });
     this.pump();
     return "cancelled";
   }

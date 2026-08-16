@@ -300,6 +300,29 @@ test("task steer on a parked run resumes it instead of failing", async () => {
   }
 });
 
+test("task steer on an awaiting_input run answers the question", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-task-steer-awaiting-"));
+  dirs.push(dir);
+  const store = new RunStore(join(dir, "runs.json"));
+  const run = await store.create({ title: "Add oauth", prompt: "…" });
+  await store.update(run.id, { state: "awaiting_input" });
+
+  const requests: BusRequest[] = [];
+  const stop = serveBus(join(dir, "control.sock"), (req) => {
+    requests.push(req);
+    return { ok: true, data: { runId: req.args.runId, resumed: true } };
+  });
+  try {
+    await cli(dir, ["task", "steer", run.id, "use google oauth"]);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.cmd).toBe("run.resume");
+    expect(requests[0]!.args.answer).toBe("use google oauth");
+    expect(requests[0]!.args.note).toBeUndefined();
+  } finally {
+    stop();
+  }
+});
+
 test("task steer on a done run still fails", async () => {
   const dir = mkdtempSync(join(tmpdir(), "beckett-task-steer-done-"));
   dirs.push(dir);
