@@ -44,7 +44,7 @@ export interface DerivedPresence {
   status: PresenceStatus;
   /** The custom-status state text Discord renders verbatim, e.g. `a deploy in flight · 2 branches build`. */
   text: string;
-  /** The full rendered line — the RPC detail line + the change anchor. Identical to `text` (no verb). */
+  /** The full rendered line — the derived detail text + the change anchor. Identical to `text` (no verb). */
   line: string;
 }
 

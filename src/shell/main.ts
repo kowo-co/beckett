@@ -626,7 +626,7 @@ async function boot(): Promise<BootedSystem> {
   const statusDashboard = createStatusDashboardService({
     gateway,
     // The env-overridable cards channel (`disabled` → null): the staging daemon (#141) runs the
-    // dashboard for its presence/rpc side effects but posts nothing into prod's cards channel.
+    // dashboard for its presence side effects but posts nothing into prod's cards channel.
     channelId: cardsChannelId(),
     statePath: statusDashboardMessagePath(beckettDir),
     collectSnapshot: async () => {

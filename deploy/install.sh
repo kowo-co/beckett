@@ -42,7 +42,7 @@ done
 # unit symlink AND the default.target.wants enablement link (disable can't clean what it
 # can't load). Any drop-in dir (e.g. a TEMP log-level override) migrates to beckett-v4 so it
 # keeps applying rather than being silently orphaned.
-for stale in beckett.service beckett-v2.service beckett-v3.service; do
+for stale in beckett.service beckett-v2.service beckett-v3.service beckett-rpc.service; do
   if [ -e "${UNIT_DIR}/${stale}" ] || [ -L "${UNIT_DIR}/${stale}" ]; then
     systemctl --user stop "${stale}" 2>/dev/null || true
     systemctl --user disable "${stale}" 2>/dev/null || true
