@@ -1,27 +1,34 @@
 ## Couriering finished work the machinery couldn't publish
 
-Run finished, publish failed → the run is parked with its work committed locally in
-`~/Projects/<slug>`. **You are the courier.**
+For an owned repo, publish already did the pushing and PR-opening itself: the run's finished
+commit leaves the machine as `beckett/<run-id>` before any trunk integration is even attempted, a
+PR opens (or is reused) against trunk, CI is awaited, and GitHub merges it via the API. When a run
+PARKS on a publish failure, the work is almost never stranded — it is on GitHub, and the blocker
+names exactly what's stopping the merge. **You are the courier for whatever's left**, never a
+rebuilder.
 
-**Courier for finished work, not a builder**: only where the worker finished and shipping is the
-blocker — publish, merge, conflicts. **Merge conflicts ARE couriering**: main moved → rebase onto
-`origin/main`, reconcile both sides' intent (worker's summary, the run's checklist), re-run
-checks. Never build features or fix the work; a conflict forcing a real design decision, not a
-reconciliation, goes back to a worker — but this run is parked, so its worker is gone and steering
-is refused. Deploy a short run against the same `--repo`, naming the branch and the decision the
-conflict forces. Never a question to the human.
-
-On `<slug>` (repo `~/Projects/<slug>`, remote `{{github_owner}}/<slug>`):
-
-1. **Confirm the commits are there**: local tip ahead of remote, worker's summary says finished.
-2. **Ship it with one command** — `cd ~/Projects/<slug> && beckett finish -m "<what it shipped>"`.
-   That pushes, opens (or reuses) the PR, waits for CI, merges, and redeploys; see
-   `landing-a-run.md`. Never hand-run push → PR → merge, and never raw `git push`/`gh`.
-3. **Clear conflicts yourself; never park for them.** `finish` stops with the exact rebase to run —
-   do it, push, re-run `finish` (it reuses the same PR). Leave it unmerged only if the review did
-   NOT pass, the work drifted outside what was asked, or the owner wants eyes on it — then drop
-   the link and say why.
-4. Ping the channel in voice with the artifact link once it's published.
+1. **Read the blocker** (`beckett task ask <ref>` / `task show`) before touching anything. It
+   tells you which of these you're in:
+   - **A PR is open and something's blocking it** (CI red, merge conflicts, a missing review) —
+     the blocker names the PR URL. Clear it *on the PR* — push a fix, resolve the conflict, get the
+     review — never push a fresh branch or open a second PR. Once it merges (its own CI-gated API
+     merge, or a human clearing the last blocker by hand), close the bookkeeping:
+     `beckett task courier <ref> [--pr-url <url>]`.
+   - **The work already landed** (a retry after an earlier attempt's PR already merged) — don't
+     push again, that would open a duplicate PR of work that's already on trunk. Just courier it:
+     `beckett task courier <ref> --pr-url <the PR that merged it>`.
+   - **A genuine merge conflict that needs a design call**, not a mechanical rebase — that's not
+     couriering, it's work: deploy a short run against the same `--repo`, naming the branch and the
+     decision the conflict forces. `beckett task steer`/`task resume` also reach this run directly
+     if the conflict is small enough to hand it back as a note instead. Never a question to the
+     human.
+2. **Never `git push`/`gh` by hand and never hand-run the sequence.** Everything above goes
+   through `beckett gh …` or the run's own commands (see [[github]]).
+3. Ping the channel in voice with the artifact/PR link once it's actually landed.
 
 Repeated publish failure is a defect in the machinery, not a chore: deploy work against Beckett's
 own source to make publishing reliable.
+
+(`beckett finish` is a separate, human-driven command for landing a checkout you're standing in
+by hand — Beckett's own release flow uses it. It is not the routine remedy for a parked run's
+publish failure; see `landing-a-run.md`.)
