@@ -258,6 +258,7 @@ function newSupervisor(
     summarizeActivity?: (lines: string[], opts: { provider?: string }) => Promise<string | null>;
     now?: () => number;
     preflight?: (harness: HarnessName) => Promise<{ ok: boolean; problems: string[] }>;
+    pauseFilePath?: string;
   } = {},
 ): Harness {
   const dir = scratch();
@@ -299,6 +300,7 @@ function newSupervisor(
     ...(opts.spendLedgerPath ? { spendLedgerPath: opts.spendLedgerPath } : {}),
     ...(opts.publishOutboxPath ? { publishOutboxPath: opts.publishOutboxPath } : {}),
     ...(opts.preflight ? { preflight: opts.preflight } : {}),
+    ...(opts.pauseFilePath ? { pauseFilePath: opts.pauseFilePath } : {}),
   });
   return { supervisor, store, repos, publishCalls, events };
 }
@@ -352,6 +354,37 @@ describe("admission", () => {
     await Promise.all([supervisor.admit(run.id), supervisor.admit(run.id)]);
     await settle();
     expect(spawnCalls).toHaveLength(1);
+  });
+
+  test("a queued run is not staffed while paused, and is staffed after the hold lifts", async () => {
+    const dir = scratch("beckett-pause-");
+    const pauseFile = join(dir, "pause.json");
+    writeFileSync(pauseFile, JSON.stringify({ pausedAt: "2026-08-15T00:00:00.000Z", reason: "hands off tonight", by: "jason" }));
+    const { supervisor, store, events } = newSupervisor({ pauseFilePath: pauseFile });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    expect(spawnCalls).toHaveLength(0);
+    expect(events.some((e) => e.outcome === "held" && e.stage === "implement:staff")).toBe(true);
+    rmSync(pauseFile);
+    await supervisor.admit(run.id);
+    await tick();
+    expect(spawnCalls).toHaveLength(1);
+    expect(store.get(run.id)!.state).toBe("implementing");
+  });
+
+  test("a hold never stops a run that already has a worker from advancing to review", async () => {
+    const dir = scratch("beckett-pause-");
+    const pauseFile = join(dir, "pause.json");
+    writeFileSync(pauseFile, JSON.stringify({ pausedAt: "2026-08-15T00:00:00.000Z", reason: null, by: null }));
+    const { supervisor, store } = newSupervisor({ pauseFilePath: pauseFile });
+    const run = seedRun(store, makeRun({ state: "reviewing", workspace: scratch("beckett-ws-") }));
+    // `spawnGuarded` for a non-"queued" run must proceed even while a hold is on file (only a
+    // never-staffed "queued" run is gated).
+    (supervisor as any).spawnGuarded(run, "review");
+    await tick();
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]!.stage).toBe("review");
   });
 
   test("the spec scaffold is written to .beckett/spec.md, never the worktree root", async () => {

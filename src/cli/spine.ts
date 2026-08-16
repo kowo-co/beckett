@@ -74,6 +74,14 @@ export const SPINE: SpineEntry[] = [
       { name: "status", load: core((m) => m.runStatus) },
     ],
   },
+  {
+    id: "pause",
+    cliHelp: "pause [--reason <text>] | resume",
+    verbs: [
+      { name: "pause", load: core((m) => m.runPause) },
+      { name: "resume", load: core((m) => m.runResume) },
+    ],
+  },
   { id: "version", cliHelp: "version [bump]", verbs: [{ name: "version", load: core((m) => m.runVersion) }] },
   { id: "doctor", cliHelp: "doctor [--json]", verbs: [{ name: "doctor", load: core((m) => m.runDoctor) }] },
   {

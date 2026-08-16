@@ -345,6 +345,24 @@ test("decline is a no-op on a direct @mention — a directed message is answered
   expect(h.posts).toEqual([{ channelId: CHAN, text: "on it", replyTo: "m1" }]);
 });
 
+test("a paused daemon prepends the hold note to the turn", async () => {
+  const h = harness({ reply: "on it" });
+  const clock = clockOf(h);
+  writeFileSync(
+    join(process.env.BECKETT_DIR!, "pause.json"),
+    JSON.stringify({ pausedAt: "2026-08-15T00:00:00.000Z", reason: "hands off tonight", by: "jason" }),
+  );
+
+  await h.concierge.onMessage(msg("m1", "hey beckett do the thing", 0, { mentionsBot: true }));
+  await drain();
+  clock.advance(2_000);
+  await drain();
+
+  const frame = h.asks[0] as string;
+  expect(frame).toContain("YOU ARE PAUSED (chat only)");
+  expect(frame).toContain("hands off tonight");
+});
+
 test("decline off-turn (no ambient turn running) is rejected", async () => {
   const h = harness();
   const res = await h.concierge.onBusRequest({ cmd: "discord.decline", args: {} });

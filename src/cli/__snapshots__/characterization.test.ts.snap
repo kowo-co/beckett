@@ -5,7 +5,7 @@ exports[`cli: bare invocation prints the unknown-command help 1`] = `
   "exit": 1,
   "stderr": 
 "error: unknown command: beckett  
-commands: status [--pretty] | status deploy-state [--pretty] | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|deploy|ask|steer|cancel|show|list|trace | preset ls|show | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | proposals ls|show|accept|reject|expire | proposals file --kind <k> --claim <c> --why <w> --from <src,src> | free-time run [--dry] | free-time ls|show <id>
+commands: status [--pretty] | status deploy-state [--pretty] | pause [--reason <text>] | resume | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|deploy|ask|steer|cancel|show|list|trace | preset ls|show | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | dream ls|show <date> | dream propose|proposals ls|show|accept|reject | dream spikes ls|show | free-time run [--dry] | free-time ls|show <id>
 "
 ,
   "stdout": "",
@@ -17,7 +17,7 @@ exports[`cli: unknown group prints the unknown-command help 1`] = `
   "exit": 1,
   "stderr": 
 "error: unknown command: beckett wat 
-commands: status [--pretty] | status deploy-state [--pretty] | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|deploy|ask|steer|cancel|show|list|trace | preset ls|show | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | proposals ls|show|accept|reject|expire | proposals file --kind <k> --claim <c> --why <w> --from <src,src> | free-time run [--dry] | free-time ls|show <id>
+commands: status [--pretty] | status deploy-state [--pretty] | pause [--reason <text>] | resume | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|deploy|ask|steer|cancel|show|list|trace | preset ls|show | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | dream ls|show <date> | dream propose|proposals ls|show|accept|reject | dream spikes ls|show | free-time run [--dry] | free-time ls|show <id>
 "
 ,
   "stdout": "",
@@ -29,7 +29,7 @@ exports[`cli: bare discord group falls through to the help 1`] = `
   "exit": 1,
   "stderr": 
 "error: unknown command: beckett discord 
-commands: status [--pretty] | status deploy-state [--pretty] | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|deploy|ask|steer|cancel|show|list|trace | preset ls|show | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | proposals ls|show|accept|reject|expire | proposals file --kind <k> --claim <c> --why <w> --from <src,src> | free-time run [--dry] | free-time ls|show <id>
+commands: status [--pretty] | status deploy-state [--pretty] | pause [--reason <text>] | resume | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|deploy|ask|steer|cancel|show|list|trace | preset ls|show | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | dream ls|show <date> | dream propose|proposals ls|show|accept|reject | dream spikes ls|show | free-time run [--dry] | free-time ls|show <id>
 "
 ,
   "stdout": "",
@@ -196,6 +196,72 @@ exports[`cli: memory: unknown sub fails 1`] = `
 }
 `;
 
+exports[`cli: dream: bare lists an empty journal 1`] = `
+{
+  "exit": 0,
+  "stderr": "",
+  "stdout": 
+"(no dreams yet)
+"
+,
+}
+`;
+
+exports[`cli: dream: ls lists an empty journal 1`] = `
+{
+  "exit": 0,
+  "stderr": "",
+  "stdout": 
+"(no dreams yet)
+"
+,
+}
+`;
+
+exports[`cli: dream: show without a date prints usage 1`] = `
+{
+  "exit": 1,
+  "stderr": 
+"error: usage: beckett dream show <YYYY-MM-DD>
+"
+,
+  "stdout": "",
+}
+`;
+
+exports[`cli: dream: show rejects a non-date 1`] = `
+{
+  "exit": 1,
+  "stderr": 
+"error: dream: invalid date 'not-a-date' (expected YYYY-MM-DD)
+"
+,
+  "stdout": "",
+}
+`;
+
+exports[`cli: dream: show of an undreamt night fails 1`] = `
+{
+  "exit": 1,
+  "stderr": 
+"error: no dream entry for 2026-01-01
+"
+,
+  "stdout": "",
+}
+`;
+
+exports[`cli: dream: unknown sub prints usage 1`] = `
+{
+  "exit": 1,
+  "stderr": 
+"error: usage: beckett dream ls [--json] | dream show <YYYY-MM-DD> | dream run [--force] [--routine <id>] [--requester <id>] | dream propose --kind doctrine-change|persona-change|ticket|memory-correction --claim <one line> --why <rationale> --from <src,src> [--channel <id>] | dream proposals ls [--all|--json] | proposals show <id> | proposals accept <id> [--board <name>] | proposals reject <id> --why <reason> [--about <slug>] | proposals expire | dream spikes ls [--json] | spikes show <id>
+"
+,
+  "stdout": "",
+}
+`;
+
 exports[`cli: free-time: bare lists an empty journal 1`] = `
 {
   "exit": 0,
@@ -262,7 +328,7 @@ exports[`cli: free-time: unknown sub prints usage 1`] = `
 }
 `;
 
-exports[`cli: proposals: ls on an empty queue 1`] = `
+exports[`cli: dream: proposals ls on an empty queue 1`] = `
 {
   "exit": 0,
   "stderr": "",
@@ -273,7 +339,7 @@ exports[`cli: proposals: ls on an empty queue 1`] = `
 }
 `;
 
-exports[`cli: proposals: ls --all on an empty queue 1`] = `
+exports[`cli: dream: proposals ls --all on an empty queue 1`] = `
 {
   "exit": 0,
   "stderr": "",
@@ -284,18 +350,18 @@ exports[`cli: proposals: ls --all on an empty queue 1`] = `
 }
 `;
 
-exports[`cli: proposals: show without an id prints usage 1`] = `
+exports[`cli: dream: proposals show without an id prints usage 1`] = `
 {
   "exit": 1,
   "stderr": 
-"error: usage: beckett proposals show <id>
+"error: usage: beckett dream proposals show <id>
 "
 ,
   "stdout": "",
 }
 `;
 
-exports[`cli: proposals: show rejects a traversal id 1`] = `
+exports[`cli: dream: proposals show rejects a traversal id 1`] = `
 {
   "exit": 1,
   "stderr": 
@@ -306,7 +372,7 @@ exports[`cli: proposals: show rejects a traversal id 1`] = `
 }
 `;
 
-exports[`cli: proposals: accept of an unknown id fails 1`] = `
+exports[`cli: dream: proposals accept of an unknown id fails 1`] = `
 {
   "exit": 1,
   "stderr": 
@@ -317,40 +383,40 @@ exports[`cli: proposals: accept of an unknown id fails 1`] = `
 }
 `;
 
-exports[`cli: proposals: reject without --why refuses 1`] = `
+exports[`cli: dream: proposals reject without --why refuses 1`] = `
 {
   "exit": 1,
   "stderr": 
-"error: proposals reject: --why <reason> is required — rejection is signal, not deletion
+"error: dream proposals reject: --why <reason> is required — rejection is signal, not deletion
 "
 ,
   "stdout": "",
 }
 `;
 
-exports[`cli: proposals: unknown sub prints usage 1`] = `
+exports[`cli: dream: proposals unknown sub prints usage 1`] = `
 {
   "exit": 1,
   "stderr": 
-"error: usage: beckett proposals ls [--all|--json] | proposals show <id> | proposals accept <id> [--board <name>] | proposals reject <id> --why <reason> [--about <slug>] | proposals expire | proposals file --kind doctrine-change|persona-change|ticket|memory-correction --claim <one line> --why <rationale> --from <src,src> [--channel <id>]
+"error: usage: beckett dream proposals ls [--all|--json] | proposals show <id> | proposals accept <id> | proposals reject <id> --why <reason> | proposals expire
 "
 ,
   "stdout": "",
 }
 `;
 
-exports[`cli: proposals: file without a kind prints usage 1`] = `
+exports[`cli: dream: propose without a kind prints usage 1`] = `
 {
   "exit": 1,
   "stderr": 
-"error: proposals file: --kind must be one of: doctrine-change, persona-change, ticket, memory-correction
+"error: dream propose: --kind must be one of: doctrine-change, persona-change, ticket, memory-correction
 "
 ,
   "stdout": "",
 }
 `;
 
-exports[`cli: proposals: file without a claim fails 1`] = `
+exports[`cli: dream: propose without a claim fails 1`] = `
 {
   "exit": 1,
   "stderr": 
@@ -1732,6 +1798,36 @@ exports[`cli: status: daemon down fails with the service hint 1`] = `
 }
 `;
 
+exports[`cli: pause: writes the hold file and prints it 1`] = `
+{
+  "exit": 0,
+  "stderr": "",
+  "stdout": 
+"{
+  "paused": true,
+  "pausedAt": "<ISO>",
+  "reason": "sleeping",
+  "by": null
+}
+"
+,
+}
+`;
+
+exports[`cli: resume: lifts a hold that isn't there 1`] = `
+{
+  "exit": 0,
+  "stderr": "",
+  "stdout": 
+"{
+  "paused": false,
+  "lifted": false
+}
+"
+,
+}
+`;
+
 exports[`cli: config: print-default emits the full default TOML 1`] = `
 {
   "exit": 0,
@@ -1809,7 +1905,6 @@ gmail_address = ""
 [runs]
 max_live = 3
 review_cycles_max = 2
-continuation_max = 2
 budget_usd_per_run = 0
 cards = true
 
@@ -1906,6 +2001,12 @@ max_commits = 20
 peers = []
 peer_burst_per_min = 5
 peer_max_consecutive_turns = 6
+
+[dream]
+output_token_budget = 150000
+model = ""
+spike_output_token_budget = 60000
+spike_repo = ""
 
 [free_time]
 enabled = true

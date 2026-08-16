@@ -311,6 +311,8 @@ const CASES: Case[] = [
 
   // ── status / config ─────────────────────────────────────────────────────────────────────
   { name: "status: daemon down fails with the service hint", argv: ["status"] },
+  { name: "pause: writes the hold file and prints it", argv: ["pause", "--reason", "sleeping"] },
+  { name: "resume: lifts a hold that isn't there", argv: ["resume"] },
   { name: "config: print-default emits the full default TOML", argv: ["config", "print-default"] },
   { name: "config: bare prints usage", argv: ["config"] },
 

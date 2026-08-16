@@ -34,6 +34,7 @@ import { createQuickRunner, type QuickRun, type QuickRunner } from "../../quick/
 import { callBus, ControlBusTimeoutError, indeterminateBusTimeout } from "../../shell/control-bus.ts";
 import { fail, out, parse } from "../../cli/io.ts";
 import { quickDetachedMessage } from "../../cli/quick-output.ts";
+import { pauseRefusal, readPause } from "../../pause.ts";
 
 /**
  * What the daemon injects beyond {@link ExtensionContext}: the detached-result callback the
@@ -104,6 +105,8 @@ export const createQuickExtension =
       if (!agent || !task) {
         fail('usage: beckett quick <quick-code|repo-explorer> "<task>" [--channel <id>]  |  beckett quick list');
       }
+      const held = readPause(ctx.paths.pauseFile);
+      if (held) fail(pauseRefusal(held, "dispatch a quick agent"));
       try {
         // The one custom bus timeout: the run may block the whole sync window for its report.
         const res = await callBus(
