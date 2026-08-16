@@ -73,7 +73,11 @@ describe("beckett-dev.service", () => {
     expect(text).toContain("BECKETT_CARDS_CHANNEL_ID=disabled");
     expect(text).not.toMatch(/^OnFailure=/m);
     // Prose is allowed to name prod's ~/.beckett for contrast; no *directive* may point there.
-    expect(text).not.toMatch(/^(Environment(File)?|WorkingDirectory)=-?%h\/\.beckett\/?$/m);
+    // Prefix match (not exact-match): the realistic rot is copying prod's directive verbatim
+    // (e.g. `EnvironmentFile=-%h/.beckett/.env`), which an exact-match regex would miss.
+    expect(text).not.toMatch(
+      /^(Environment=BECKETT_(DIR|HOME|PROJECTS_ROOT)=|EnvironmentFile=-?|WorkingDirectory=)%h\/\.beckett(\/|$)/m,
+    );
   });
 
   test("and beckett-v4.service never share a state dir", () => {
@@ -81,16 +85,11 @@ describe("beckett-dev.service", () => {
     const devDir = devText.match(/Environment=BECKETT_DIR=(\S+)/)?.[1];
     expect(devDir).toBeTruthy();
 
-    let prodDir: string | undefined;
-    let prodEnvFile: string | undefined;
-    try {
-      const prodText = readFileSync(PROD_UNIT_PATH, "utf8");
-      prodDir = prodText.match(/Environment=BECKETT_DIR=(\S+)/)?.[1];
-      prodEnvFile = prodText.match(/EnvironmentFile=-?(\S+)/)?.[1];
-    } catch {
-      // beckett-v4.service is not committed under this name; fall back to the known-prod default.
-      prodDir = "%h/.beckett";
-    }
+    // beckett-v4.service is committed and sets no explicit BECKETT_DIR — the daemon's default
+    // (src/paths.ts) applies, which is %h/.beckett.
+    const prodText = readFileSync(PROD_UNIT_PATH, "utf8");
+    const prodDir = prodText.match(/Environment=BECKETT_DIR=(\S+)/)?.[1] ?? "%h/.beckett";
+    const prodEnvFile = prodText.match(/EnvironmentFile=-?(\S+)/)?.[1];
     // Prod's BECKETT_DIR (explicit or the daemon's documented default) must differ from dev's.
     expect(prodDir ?? "%h/.beckett").not.toBe(devDir);
 
@@ -171,6 +170,26 @@ describe("seed.sh", () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  test("--token-file with no value exits 2 instead of failing silently", () => {
+    const { code, stderr, home } = runSeed(["--dry-run", "--token-file"]);
+    try {
+      expect(code).toBe(2);
+      expect(stderr).toContain("--token-file requires a value");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("--owner-id with no value exits 2 instead of failing silently", () => {
+    const { code, stderr, home } = runSeed(["--dry-run", "--owner-id"]);
+    try {
+      expect(code).toBe(2);
+      expect(stderr).toContain("--owner-id requires a value");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("docs/dev-instance.md", () => {
@@ -192,17 +211,42 @@ describe("docs/dev-instance.md", () => {
 });
 
 describe("no systemctl/sudo/prod access from a --dry-run seed", () => {
-  test("dry-run never invokes systemctl, sudo, or reads ~/.beckett", () => {
-    // A minimal env with an empty HOME and no prod .env — if seed.sh reached for systemctl/sudo/
-    // ~/.beckett unconditionally (not behind the run() dry-run guard) this would be visible in
-    // stdout ("+ systemctl ...") only as a printed *plan*, never an actual invocation, and no
-    // prod path may appear in the seeded state below.
+  test("--dry-run --no-secrets never reads a real prod .env, even when one exists", () => {
+    // Plant a real prod .env with a sentinel token/owner-id — if seed.sh's --no-secrets branch
+    // ever fell through to the prod-.env fallback, the sentinel would leak into stdout/stderr.
     const home = mkdtempSync(join(tmpdir(), "beckett-dev-seed-home-"));
-    mkdirSync(join(home, ".beckett"), { recursive: true }); // prod dir present, but must not be read
-    const { code, stdout } = runSeed(["--dry-run", "--no-secrets"], { home });
+    mkdirSync(join(home, ".beckett"), { recursive: true });
+    writeFileSync(
+      join(home, ".beckett", ".env"),
+      "CALLIE_DISCORD_TOKEN=prod-sentinel-xyz\nDISCORD_OWNER_ID=7\n",
+    );
+    const { code, stdout, stderr } = runSeed(["--dry-run", "--no-secrets"], { home });
     try {
       expect(code).toBe(0);
-      expect(stdout).not.toContain(join(home, ".beckett", ".env"));
+      expect(stdout).not.toContain("prod-sentinel-xyz");
+      expect(stderr).not.toContain("prod-sentinel-xyz");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("env vars win over a real prod .env, and neither is echoed", () => {
+    const home = mkdtempSync(join(tmpdir(), "beckett-dev-seed-home-"));
+    mkdirSync(join(home, ".beckett"), { recursive: true });
+    writeFileSync(
+      join(home, ".beckett", ".env"),
+      "CALLIE_DISCORD_TOKEN=prod-sentinel-xyz\nDISCORD_OWNER_ID=7\n",
+    );
+    const { code, stdout, stderr } = runSeed(["--dry-run"], {
+      home,
+      env: { BECKETT_DEV_DISCORD_TOKEN: "env-sentinel-abc", DISCORD_OWNER_ID: "42" },
+    });
+    try {
+      expect(code).toBe(0);
+      expect(stdout).not.toContain("prod-sentinel-xyz");
+      expect(stderr).not.toContain("prod-sentinel-xyz");
+      expect(stdout).not.toContain("env-sentinel-abc");
+      expect(stderr).not.toContain("env-sentinel-abc");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

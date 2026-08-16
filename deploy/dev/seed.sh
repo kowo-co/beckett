@@ -38,11 +38,13 @@ DRY_RUN=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --token-file)
-      TOKEN_FILE="${2:-}"
+      [ $# -ge 2 ] || { echo "seed: $1 requires a value" >&2; exit 2; }
+      TOKEN_FILE="$2"
       shift 2
       ;;
     --owner-id)
-      OWNER_ID_ARG="${2:-}"
+      [ $# -ge 2 ] || { echo "seed: $1 requires a value" >&2; exit 2; }
+      OWNER_ID_ARG="$2"
       shift 2
       ;;
     --no-secrets)
