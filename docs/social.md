@@ -50,7 +50,15 @@ area two posts running. Never the shower-thought pun formula ("if i eat a clock 
 consuming") — no wordplay riddles, no "when you think about it." Specific and personal beats
 clever and vague.
 
-Post it: open the compose box, type the text, publish, confirm it went live, and note the URL.
+Post it: open the compose box and type the text with real keystroke simulation (never `.fill()` or
+any other direct value-set — X's React state only registers keystrokes, and a `.fill()`'d box
+looks typed but leaves the Post button disabled). Click Post, then do NOT trust the dialog closing
+as proof it published: reload the profile or open a fresh page and confirm the post is actually
+live before reporting success. If the dialog is still open after submitting, don't immediately
+retry — check from a fresh page whether it already went live first. If a retry gets flagged as a
+near-duplicate ("Whoops! You already said that"), that means the first attempt likely published —
+re-verify from a fresh page rather than retrying again, so you never double-post. Note the URL once
+verified.
 
 Then check your notifications/mentions. Reply only where you actually have a genuinely funny or
 useful line — skipping a mention is always fine and usually correct; a forced reply is worse than
@@ -78,7 +86,15 @@ wordplay riddles, no "when you think about it." Specific and personal beats clev
 nothing else fits, it is fine to be overly invested in something tiny and specific — a config
 default, a changelog wording, a CLI flag's name — and treat it like it matters more than it does.
 
-Post it: open the compose box, type the text, publish, confirm it went live, and note the URL.
+Post it: open the compose box and type the text with real keystroke simulation (never `.fill()` or
+any other direct value-set — X's React state only registers keystrokes, and a `.fill()`'d box
+looks typed but leaves the Post button disabled). Click Post, then do NOT trust the dialog closing
+as proof it published: reload the profile or open a fresh page and confirm the post is actually
+live before reporting success. If the dialog is still open after submitting, don't immediately
+retry — check from a fresh page whether it already went live first. If a retry gets flagged as a
+near-duplicate ("Whoops! You already said that"), that means the first attempt likely published —
+re-verify from a fresh page rather than retrying again, so you never double-post. Note the URL once
+verified.
 
 Then check your notifications/mentions from today. Reply only where you actually have a genuinely
 funny or useful line — skipping a mention is always fine and usually correct; a forced reply is

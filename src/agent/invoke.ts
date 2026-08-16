@@ -241,6 +241,15 @@ export function truncateAtWordBoundary(text: string, maxChars: number): string {
  * agent. The safety lines (already-authenticated, don't touch credentials, verbatim text,
  * confirm + report the URL, stop-and-report on a block) carry the same facts the agent used to
  * be trusted to restate itself.
+ *
+ * The keystroke/verification lines below are load-bearing, not stylistic: two background runs in
+ * a row hit the same failure mode. Setting the compose box's text with `.fill()` (or any direct
+ * value-set) leaves X's own React state unaware the text changed, so the Post button never
+ * enables — the draft LOOKS typed but nothing actually registered. One run then saw the compose
+ * dialog reopen stuck after a publish that had actually gone through; the other retried via
+ * keystrokes and got flagged as a near-duplicate ("Whoops! You already said that"), meaning the
+ * first attempt HAD registered content. Trusting the dialog's own state (closed vs. still open)
+ * is exactly what let both runs nearly double-post.
  */
 export function buildXPostBrowserTask(account: string, text: string): string {
   return [
@@ -250,8 +259,22 @@ export function buildXPostBrowserTask(account: string, text: string): string {
     "Post this exact text, verbatim, and nothing else:",
     text,
     "",
-    "Open the compose box, type that text, publish, then confirm it went live and report the URL of",
-    "the published post.",
+    "Open the compose box and type that text with real keystroke simulation (character-by-character,",
+    "e.g. pressSequentially) — never `.fill()` or any other direct value-set. X's own React state",
+    "only registers a keystroke-driven input; a `.fill()`'d box looks typed but leaves the Post",
+    "button disabled, so the submit silently does nothing.",
+    "",
+    "After clicking Post, do NOT trust the compose dialog closing as proof it published. Verify",
+    "independently: reload the profile or open a fresh page and confirm the post is actually live",
+    "before reporting success.",
+    "",
+    "If the compose dialog is still open after submitting, do not immediately retry. First check from",
+    "a fresh page whether the post already went live — a stuck dialog does not mean the submit failed.",
+    "Only retry if it genuinely did not publish. If a retry gets flagged as a near-duplicate (e.g.",
+    "\"Whoops! You already said that\"), treat that as evidence the FIRST attempt likely published —",
+    "re-verify from a fresh page rather than retrying again, so you never double-post.",
+    "",
+    "Once verified live, report the URL of the published post.",
     "",
     "If anything blocks posting (a checkpoint, a rate limit, a changed UI), stop and report what you",
     "saw instead of guessing.",

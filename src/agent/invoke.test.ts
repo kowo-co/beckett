@@ -191,8 +191,31 @@ test("buildXPostBrowserTask carries the account, the verbatim text, and every sa
   expect(task).toContain("already authenticated");
   expect(task).toContain("do not log in or touch any credential field");
   expect(task).toContain("a genuinely unhinged opinion about tabs");
-  expect(task).toContain("confirm it went live and report the URL");
   expect(task).toContain("stop and report what you");
+});
+
+test("buildXPostBrowserTask demands real keystroke typing and explains why .fill() breaks the Post button", () => {
+  const task = buildXPostBrowserTask(X_SOCIAL_ACCOUNT, "keyboard input only");
+  expect(task).toContain("real keystroke simulation");
+  expect(task).toContain("never `.fill()`");
+  expect(task).toContain("leaves the Post");
+  expect(task).toContain("button disabled");
+});
+
+test("buildXPostBrowserTask requires independent verification instead of trusting the dialog closing", () => {
+  const task = buildXPostBrowserTask(X_SOCIAL_ACCOUNT, "verify independently");
+  expect(task).toContain("do NOT trust the compose dialog closing");
+  expect(task).toContain("reload the profile or open a fresh page");
+  expect(task).toContain("confirm the post is actually live");
+});
+
+test("buildXPostBrowserTask tells the agent not to blind-retry on a stuck dialog, and to read a duplicate flag as likely-already-published", () => {
+  const task = buildXPostBrowserTask(X_SOCIAL_ACCOUNT, "stuck dialog case");
+  expect(task).toContain("do not immediately retry");
+  expect(task).toContain("check from");
+  expect(task).toContain("a fresh page whether the post already went live");
+  expect(task).toContain("Whoops! You already said that");
+  expect(task).toContain("re-verify from a fresh page rather than retrying again");
 });
 
 // ── the chill pass: fail-open, cap enforcement (fake chillTransform — no network) ────────────
