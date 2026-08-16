@@ -184,6 +184,8 @@ async function boot(): Promise<BootedSystem> {
   // relays, never replies or merges. Skipped without a credential (nothing to read GitHub with).
   const paths = buildPaths(config);
   const beckettDir = paths.beckettDir;
+  // The CTO seat's input (src/company.ts): seed <beckettDir>/company.md with questions on a
+  // fresh install. Never overwrites an answered brief; a failure logs rather than blocking boot.
   seedCompanyBrief(paths.companyFile, logger);
   // Lifecycle history starts now; a previous unmatched boot becomes an explicit unclean restart.
   // `recordBoot`'s own boot event `at` is captured here and threaded into the status provider

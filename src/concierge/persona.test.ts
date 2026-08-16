@@ -51,7 +51,7 @@ test("the seeded default carries the working guardrails (no emojis / no em-dashe
 test("the seat does not depend on the voice file", () => {
   // The CTO seat's job description lives in doctrine (the-cto-seat.md), which chilltext's carve
   // never touches — not in persona.md, which is exactly what the carve trims first.
-  expect(DEFAULT_PERSONA.toLowerCase()).not.toContain("cto");
+  expect(/\bcto\b/i.test(DEFAULT_PERSONA)).toBe(false);
   const playbook = readFileSync(
     join(import.meta.dir, "playbooks", "the-cto-seat.md"),
     "utf8",
