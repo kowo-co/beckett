@@ -250,7 +250,19 @@ export function createOwedRunNotificationStore(opts: OwedRunNotificationStoreOpt
     claim(input: OwedRunNotificationClaim): void {
       const map = load();
       const existing = map.get(input.runId);
-      if (existing && existing.settledAt === null) return; // idempotent: still an open debt
+      if (existing && existing.settledAt === null) {
+        if (existing.state === input.state) return; // idempotent: same open debt, no-op
+        // B5/B7 made `parked` a two-way door: a run can leave parked and reach a different owed
+        // state (e.g. `done`) while the ORIGINAL debt is still unsettled (the ping was judged not
+        // worth sending). Refresh the entry in place rather than dropping it, so a later replay
+        // reports the run's actual outcome instead of a stale, now-false state.
+        existing.state = input.state;
+        existing.channelId = input.channelId;
+        existing.requesterIds = [...input.requesterIds];
+        existing.phase = "queued";
+        persist();
+        return;
+      }
       map.set(input.runId, {
         runId: input.runId,
         state: input.state,

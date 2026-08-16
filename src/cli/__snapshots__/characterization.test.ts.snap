@@ -5,7 +5,7 @@ exports[`cli: bare invocation prints the unknown-command help 1`] = `
   "exit": 1,
   "stderr": 
 "error: unknown command: beckett  
-commands: status [--pretty] | status deploy-state [--pretty] | pause [--reason <text>] | resume | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|deploy|ask|steer|cancel|show|list|trace | preset ls|show | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | proposals ls|show|accept|reject|expire | proposals file --kind <k> --claim <c> --why <w> --from <src,src> | free-time run [--dry] | free-time ls|show <id>
+commands: status [--pretty] | status deploy-state [--pretty] | pause [--reason <text>] | resume | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|deploy|ask|steer|resume|cancel|courier|show|list|trace | preset ls|show | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | proposals ls|show|accept|reject|expire | proposals file --kind <k> --claim <c> --why <w> --from <src,src> | free-time run [--dry] | free-time ls|show <id>
 "
 ,
   "stdout": "",
@@ -17,7 +17,7 @@ exports[`cli: unknown group prints the unknown-command help 1`] = `
   "exit": 1,
   "stderr": 
 "error: unknown command: beckett wat 
-commands: status [--pretty] | status deploy-state [--pretty] | pause [--reason <text>] | resume | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|deploy|ask|steer|cancel|show|list|trace | preset ls|show | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | proposals ls|show|accept|reject|expire | proposals file --kind <k> --claim <c> --why <w> --from <src,src> | free-time run [--dry] | free-time ls|show <id>
+commands: status [--pretty] | status deploy-state [--pretty] | pause [--reason <text>] | resume | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|deploy|ask|steer|resume|cancel|courier|show|list|trace | preset ls|show | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | proposals ls|show|accept|reject|expire | proposals file --kind <k> --claim <c> --why <w> --from <src,src> | free-time run [--dry] | free-time ls|show <id>
 "
 ,
   "stdout": "",
@@ -29,7 +29,7 @@ exports[`cli: bare discord group falls through to the help 1`] = `
   "exit": 1,
   "stderr": 
 "error: unknown command: beckett discord 
-commands: status [--pretty] | status deploy-state [--pretty] | pause [--reason <text>] | resume | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|deploy|ask|steer|cancel|show|list|trace | preset ls|show | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | proposals ls|show|accept|reject|expire | proposals file --kind <k> --claim <c> --why <w> --from <src,src> | free-time run [--dry] | free-time ls|show <id>
+commands: status [--pretty] | status deploy-state [--pretty] | pause [--reason <text>] | resume | version [bump] | doctor [--json] | reload | persona | mail inbox|send|ls|read | access ls|grant|revoke | maintainer ls|grant|revoke | federation ls|add|remove | channels list|search|recall|wipe | identity set|show|list | discord reply|ack|react|decline|delete | proactivity status|set|off | quick <agent>|list | browser <task>|status|watch|steer|stop|exec | routine list|inspect|add|remove|fire | agent ls|show|add|new|invoke|rm | image | eval <author/model> [--short|--full] | site deploy | task create|branch|start|deploy|ask|steer|resume|cancel|courier|show|list|trace | preset ls|show | finish -m "<message>" | gh repo|pr|issue|push | dns ls|add|rm | deploy <name>|ls|rm | secret request | recall "<query>" [--type t] [--name n] [--as-self | --viewer id] | memory recall|remember|show|maintain | loops [--all|--json] | loops open|note|close|drop | calibration [--channel <id>|--about <slug>|--json] | calibration veto|hit | proposals ls|show|accept|reject|expire | proposals file --kind <k> --claim <c> --why <w> --from <src,src> | free-time run [--dry] | free-time ls|show <id>
 "
 ,
   "stdout": "",
@@ -2085,6 +2085,17 @@ exports[`cli: persona: daemon down fails on the bus 1`] = `
   "exit": 1,
   "stderr": 
 "error: shell not running (socket <BECKETT_DIR>/control.sock): <CONNECT_ERROR>
+"
+,
+  "stdout": "",
+}
+`;
+
+exports[`cli: routine: proactive-sweep reaches its body and refuses on an unresolved GitHub identity 1`] = `
+{
+  "exit": 1,
+  "stderr": 
+"error: proactive-sweep cannot resolve Beckett's GitHub identity: GitHub account is not configured — set GITHUB_ACCOUNT or identity.github_user in config.toml
 "
 ,
   "stdout": "",

@@ -244,8 +244,9 @@ export function loadConfig(opts: LoadConfigOptions = {}): Config {
   // 3. runtime proactivity overrides (partial [proactivity]) → raw object.
   raw = mergeProactivityOverride(raw, opts.proactivityOverrideFile ?? `${beckettDir}/proactivity.json`);
 
-  // 3b. retired v6 sections ([tracker], [progress], [plane]) → stripped with a deprecation line,
-  //     so a prod config.toml written before the run engine still boots this daemon.
+  // 3b. retired v6 sections ([tracker], [progress], [plane], [dream]) → stripped with a
+  //     deprecation line, so a prod config.toml written before the run engine still boots this
+  //     daemon.
   raw = dropRetiredSections(raw, (message) => console.warn(message));
 
   // 3c. the retired `[concierge.chilltext] system` voice string → stripped the same way, so prod's

@@ -124,9 +124,12 @@ export const SPINE: SpineEntry[] = [
     id: "routines",
     cliHelp: "routine list|inspect|add|remove|fire",
     verbs: [
-      // `routine deps-update` is the scheduler's routine BODY (no help token of its own); the
-      // two-word name always wins the longest-match resolve over the bare `routine` below it.
+      // `routine deps-update`, `routine proactive-sweep`, and `routine spend-report` are the
+      // scheduler's routine BODIES (no help token of their own); each two-word name always wins
+      // the longest-match resolve over the bare `routine` below it.
       { name: "routine deps-update", load: ext(async (d) => (await import("../capability/modules/routines.ts")).createRoutinesExtension({})(d), "routine deps-update") },
+      { name: "routine proactive-sweep", load: ext(async (d) => (await import("../capability/modules/routines.ts")).createRoutinesExtension({})(d), "routine proactive-sweep") },
+      { name: "routine spend-report", load: ext(async (d) => (await import("../capability/modules/routines.ts")).createRoutinesExtension({})(d), "routine spend-report") },
       { name: "routine", load: ext(async (d) => (await import("../capability/modules/routines.ts")).createRoutinesExtension({})(d), "routine") },
     ],
   },
@@ -138,7 +141,7 @@ export const SPINE: SpineEntry[] = [
   },
   { id: "eval", cliHelp: "eval <author/model> [--short|--full]", verbs: [{ name: "eval", load: core((m) => m.runEval) }] },
   { id: "site", cliHelp: "site deploy", verbs: [{ name: "site", load: core((m) => m.runSite) }] },
-  { id: "task", cliHelp: "task create|branch|start|deploy|ask|steer|cancel|show|list|trace", verbs: [{ name: "task", load: core((m) => m.runTask) }] },
+  { id: "task", cliHelp: "task create|branch|start|deploy|ask|steer|resume|cancel|courier|show|list|trace", verbs: [{ name: "task", load: core((m) => m.runTask) }] },
   { id: "preset", cliHelp: "preset ls|show", verbs: [{ name: "preset", load: core((m) => m.runPreset) }] },
   {
     // The end-of-ticket motion as ONE verb: PR → CI → merge → the guarded redeploy. Sits next to
