@@ -23,6 +23,7 @@ import type { Casting } from "../run/cast.ts";
 import { isOpusModel, validateCasting } from "../run/cast.ts";
 import type { CreateRunInput } from "../run/store.ts";
 import type { Run, RunStage } from "../run/types.ts";
+import { pauseRefusal, type PauseState } from "../pause.ts";
 import { fail, out, parse } from "./io.ts";
 
 const RUN_STAGES: ReadonlySet<RunStage> = new Set(["implement", "review"]);
@@ -63,6 +64,8 @@ export interface TaskDeployDeps {
   preNotify?: (run: Run) => Promise<void>;
   /** Injectable clock so tests get deterministic ids/timestamps. */
   now?: () => Date;
+  /** The chat-only hold (`src/pause.ts`), checked before anything is filed. Default: never held. */
+  pause?: () => PauseState | null;
 }
 
 export interface TaskDeployOutput {
@@ -282,6 +285,8 @@ function outputOf(run: Run): TaskDeployOutput {
  * deploy still returns the narrow {@link TaskDeployOutput} the concierge parses.
  */
 export async function deployRun(argv: string[], deps: TaskDeployDeps): Promise<Run | TaskDeployOutput> {
+  const held = deps.pause?.() ?? null;
+  if (held) throw new TaskDeployUsageError(pauseRefusal(held, "deploy a run"));
   const input = parseTaskDeployArgs(argv);
   const now = deps.now ? deps.now() : new Date();
   if (input.dry) return previewRun(input, now);

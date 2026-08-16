@@ -43,6 +43,7 @@ import { AgentStore } from "../agent/store.ts";
 import { createAgentRunner } from "../agent/invoke.ts";
 import { AGENT_HARNESSES, AGENT_EFFORTS, type AgentDefinition } from "../agent/types.ts";
 import { deployRun, runTaskDeploy } from "./task-deploy.ts";
+import { clearPause, pauseRefusal, readPause, writePause, type PauseState } from "../pause.ts";
 import { runTaskAsk } from "./task-ask.ts";
 import { supportsNameFlag } from "../drivers/claude.ts";
 import { RunStore } from "../run/store.ts";
@@ -935,6 +936,7 @@ export async function runTask(argv: string[]): Promise<void> {
       {
         store: runStore(),
         notifyBus,
+        pause: () => readPause(paths.pauseFile),
         preNotify: async (run) => {
           let branch = await store.linkRun(branchRef, { runId: run.id }, "queued", project);
           if (pings.length > 0) branch = await store.setPings(branch.ref, pings);
@@ -966,7 +968,7 @@ export async function runTask(argv: string[]): Promise<void> {
   }
 
   if (sub === "deploy") {
-    await runTaskDeploy(rest, { store: runStore(), notifyBus });
+    await runTaskDeploy(rest, { store: runStore(), notifyBus, pause: () => readPause(paths.pauseFile) });
   }
 
   // v7 status relay (W2B): resolve a run to the cross-session address of its LIVE worker, plus the
@@ -1188,6 +1190,22 @@ export async function runPreset(argv: string[]): Promise<void> {
   fail("usage: beckett preset ls | show <name>");
 }
 
+// ── pause / resume (chat-only hold; src/pause.ts) ──────────────────────────────────────────
+// A file-based brake, not a bus command or a config key (see src/pause.ts's module doc): instant,
+// readable by both the daemon and this short-lived CLI process, and removable by hand.
+export async function runPause(argv: string[]): Promise<void> {
+  const { flags } = parse(argv);
+  const reason = typeof flags.reason === "string" && flags.reason.trim() ? flags.reason.trim() : null;
+  const by = typeof flags.by === "string" && flags.by.trim() ? flags.by.trim() : null;
+  const state = writePause(paths.pauseFile, { pausedAt: new Date().toISOString(), reason, by });
+  out({ paused: true, pausedAt: state.pausedAt, reason: state.reason, by: state.by });
+}
+
+export async function runResume(argv: string[]): Promise<void> {
+  const lifted = clearPause(paths.pauseFile);
+  out({ paused: false, lifted });
+}
+
 // ── status (control bus → the live daemon; issue #30) ─────────────────────────────────────
 // One command answering "is prod healthy and what is it doing right now". From the Mac:
 //   ssh beckett@loom-desk 'cd beckett && bun src/cli/beckett.ts status --pretty'
@@ -1211,6 +1229,12 @@ export async function runStatus(argv: string[]): Promise<void> {
     out(lines.join("\n"));
   }
   lines.push(`discord:   ${data.discord?.connected ? "connected" : "DISCONNECTED"}`);
+  const held = data.paused as PauseState | null | undefined;
+  lines.push(
+    held
+      ? `paused:    YES since ${held.pausedAt} — ${held.reason ?? "no reason given"}  (beckett resume lifts it)`
+      : "paused:    no",
+  );
   const tick = data.supervisor?.lastReconcileAt;
   lines.push(
     `engine:    last staffing pass ${
@@ -1547,6 +1571,8 @@ export async function runBrowser(argv: string[]): Promise<void> {
     await bus("browser.stop", { runId, reason: flags.reason ? String(flags.reason) : undefined });
   }
   if (sub === "exec") {
+    const held = readPause(paths.pauseFile);
+    if (held) fail(pauseRefusal(held, "run a browser script"));
     const code = rest.join(" ").trim();
     if (!code) fail(BROWSER_USAGE);
     try {
@@ -1578,6 +1604,8 @@ export async function runBrowser(argv: string[]): Promise<void> {
   if (!task) {
     fail(BROWSER_USAGE);
   }
+  const held = readPause(paths.pauseFile);
+  if (held) fail(pauseRefusal(held, "dispatch a browser task"));
   try {
     // The dispatch returns the moment the background agent takes the task; nothing here blocks.
     const res = await callBus(

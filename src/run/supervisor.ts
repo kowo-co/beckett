@@ -39,6 +39,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname, join } from "node:path";
 
 import type { Config, Harness, Logger, WorkerEvent } from "../types.ts";
+import { pauseFilePath, readPause } from "../pause.ts";
 import type { HarnessSpec } from "./cast.ts";
 import { applySonnetFirst, DEFAULT_IMPLEMENT_MODEL, isOpusModel } from "./cast.ts";
 import type { WorkItem } from "./work-item.ts";
@@ -178,6 +179,8 @@ export interface RunSupervisorDeps {
   summarizeActivity?: (journalLines: string[], opts: SummarizeActivityOptions) => Promise<string | null>;
   /** Clock seam for the blurb throttle (tests). Defaults to `Date.now`. */
   now?: () => number;
+  /** The chat-only hold's file path (`src/pause.ts`). Default: `buildPaths(config).pauseFile`. */
+  pauseFilePath?: string;
   logger?: Logger;
 }
 
@@ -314,6 +317,7 @@ export class RunSupervisor {
   private readonly publishOutbox?: PublishOutbox;
   private readonly runtimeStatePath?: string;
   private readonly spendLedgerPath: string;
+  private readonly pauseFile: string;
 
   /** Live worker handles, keyed by run id. */
   private readonly workers = new Map<string, WorkerHandle>();
@@ -411,6 +415,14 @@ export class RunSupervisor {
       ? new PublishOutbox(deps.publishOutboxPath, this.logger.child("run-publish-outbox"))
       : undefined;
     this.runtimeStatePath = deps.runtimeStatePath;
+    // Mirrors spendLedgerPath's fallback below: `this.config.paths` is present on every real,
+    // strictly-validated boot config, but tests routinely hand in a partial fake, so this must
+    // degrade the same way rather than throw at construction.
+    this.pauseFile =
+      deps.pauseFilePath ??
+      (this.config.paths?.beckett_dir
+        ? pauseFilePath(this.config.paths.beckett_dir)
+        : pauseFilePath(join(process.env.HOME ?? "/home/beckett", ".beckett")));
     this.spendLedgerPath =
       deps.spendLedgerPath ??
       this.config.paths?.spend ??
@@ -598,6 +610,13 @@ export class RunSupervisor {
     // finish handler, and the flag exists only to keep the watchdog from reading a mid-finish run
     // as wedged. `isStaffed` is the real dedup.
     if (this.isStaffed(run.id)) return;
+    if (run.state === "queued") {
+      const held = readPause(this.pauseFile);
+      if (held) {
+        this.trace(run, `${stage}:staff`, "held", `beckett is paused — not admitting new work (${held.reason ?? "no reason given"})`);
+        return;
+      }
+    }
     const budget = this.budgetCeiling(run);
     if (budget.over) {
       this.trace(run, `${stage}:staff`, "held", `per-run budget reached ($${budget.spentUsd.toFixed(2)} ≥ $${budget.capUsd.toFixed(2)})`);

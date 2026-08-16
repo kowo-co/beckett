@@ -41,6 +41,7 @@ import { resolveGitHubOwner } from "../github/owner.ts";
 import { log as rootLog } from "../log.ts";
 import { loadConfig } from "../config.ts";
 import { buildPaths } from "../paths.ts";
+import { pauseTurnNote, readPause } from "../pause.ts";
 import { renderClaudeSettings } from "../hooks/registry.ts";
 import { supportsNameFlag } from "../drivers/claude.ts";
 import { StderrRing } from "../drivers/failure.ts";
@@ -6930,6 +6931,7 @@ export class Concierge {
     const attachSeed = this.pendingWorkspaceSeeds.get(m.channelId) ?? "";
     if (attachSeed) this.pendingWorkspaceSeeds.delete(m.channelId);
     const prefix =
+      this.pausePrefix() +
       workspacePrefix +
       attachSeed +
       (this.channelStore
@@ -7466,6 +7468,15 @@ export class Concierge {
       .slice(0, Math.max(0, max))
       .map(([id, name]) => `${name} (user:${id}${id === owner ? " owner" : ""})`)
       .join(", ");
+  }
+
+  /**
+   * The chat-only hold's SYSTEM note (`src/pause.ts`), re-read fresh every turn — no restart
+   * needed to arm or lift it. "" when nobody has paused.
+   */
+  private pausePrefix(): string {
+    const held = readPause(buildPaths(this.config).pauseFile);
+    return held ? pauseTurnNote(held) + "\n" : "";
   }
 
   /**

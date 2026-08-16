@@ -25,6 +25,7 @@ import { homedir } from "node:os";
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { loadConfig } from "../config.ts";
 import { buildPaths } from "../paths.ts";
+import { readPause } from "../pause.ts";
 import { recordBoot, recordCleanShutdown, uptimeLedgerPath } from "../uptime.ts";
 import { log as rootLog } from "../log.ts";
 import type { Config, Harness, Logger } from "../types.ts";
@@ -337,6 +338,7 @@ async function boot(): Promise<BootedSystem> {
     publishOutboxPath: join(beckettDir, "run-publish-outbox.jsonl"),
     runtimeStatePath: join(beckettDir, "run-state.json"),
     spendLedgerPath: paths.spend,
+    pauseFilePath: paths.pauseFile,
     preflight: (harness) => preflightFor(harness, config),
     // The closed loop: every run transition reaches the concierge, which decides whether it is
     // worth telling the person who asked. Fire-and-forget by contract — the supervisor logs and
@@ -557,6 +559,7 @@ async function boot(): Promise<BootedSystem> {
     supervisor: { lastReconcileAt: runSupervisor.lastReconcileAt() },
     githubPr: prPoller ? prPoller.stats() : null,
     githubActivity: activityPoller ? { repo: activityConfig.repo, branch: activityConfig.branch } : null,
+    paused: readPause(paths.pauseFile),
   }));
 
   // Start the Concierge FIRST (of the live parts) so a bad claude launch fails the whole boot

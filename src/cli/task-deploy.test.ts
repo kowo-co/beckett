@@ -374,3 +374,24 @@ test("deployRun: a validation failure never reaches the store or the bus", async
   expect(deps.created).toEqual([]);
   expect(deps.busPings).toEqual([]);
 });
+
+// ── pause (src/pause.ts) ─────────────────────────────────────────────────────────────────
+
+test("deployRun refuses while paused and files no run", async () => {
+  const deps = fakeDeps();
+  await expect(
+    deployRun(["--prompt", "add oauth middleware"], {
+      ...deps,
+      pause: () => ({ pausedAt: "2026-08-15T00:00:00.000Z", reason: "hands off tonight", by: "jason" }),
+    }),
+  ).rejects.toThrow(/^paused:/);
+  expect(deps.created).toEqual([]);
+  expect(deps.busPings).toEqual([]);
+});
+
+test("deployRun with no pause dep behaves exactly as before", async () => {
+  const deps = fakeDeps();
+  const result = await deployRun(["--prompt", "add oauth middleware"], deps);
+  expect("runId" in result ? result.runId : null).toBe("run-20260810-add-oauth-middleware");
+  expect(deps.created).toHaveLength(1);
+});

@@ -835,6 +835,7 @@ export interface Paths {
   peersFile: string; // <beckettDir>/peers.txt — owner-added trusted peer Beckett bot ids (federation)
   announcedFile: string; // <beckettDir>/announced.txt — last commit SHA announced on restart (changelog)
   presetsFile: string; // <beckettDir>/presets.json — user-defined named cast presets (OPS-110)
+  pauseFile: string; // <beckettDir>/pause.json — chat-only hold; existence IS the flag (src/pause.ts)
   journalDir: string; // <beckettDir>/journal — private per-ticket worker progress journals
   proposalsDir: string; // <beckettDir>/proposals — the proposal queue (issue #37)
   workspacesFile: string; // <beckettDir>/workspaces.json — user-opened thread → ticket routing

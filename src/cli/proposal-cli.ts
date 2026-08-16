@@ -25,6 +25,7 @@ import {
 import { acceptProposal, pendingProposals, rejectProposal } from "../proposal/decide.ts";
 import { out, fail, parse, quietLogger } from "./io.ts";
 import { paths } from "./context.ts";
+import { readPause } from "../pause.ts";
 
 const USAGE =
   "usage: beckett proposals ls [--all|--json] | proposals show <id> | proposals accept <id> [--board <name>] | " +
@@ -125,7 +126,11 @@ export async function runProposals(argv: string[]): Promise<void> {
                 "--prompt", prompt,
                 ...(flags.project ? ["--repo", String(flags.project)] : []),
               ],
-              { store: new RunStore(join(paths.beckettDir, "runs.json")), notifyBus },
+              {
+                store: new RunStore(join(paths.beckettDir, "runs.json")),
+                notifyBus,
+                pause: () => readPause(paths.pauseFile),
+              },
             );
             return { runId: "runId" in deployed ? deployed.runId : deployed.id };
           },
