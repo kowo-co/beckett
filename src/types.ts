@@ -870,7 +870,8 @@ export interface Config {
     worker_checkpoint_s: number;
     /** Soft edge on the wall-clock cap (B7): this many seconds before `worker_hard_cap_s` fires,
      *  every live worker still running gets exactly one steer telling it to wrap up and emit its
-     *  done-signal now. 0 disables the warning. Default 300 (5min). */
+     *  done-signal now. 0 disables the warning. Default 300 (5min). Rides the checkpoint pass
+     *  (`checkpointLiveRuns`), so it also needs `worker_checkpoint_s > 0` to fire. */
     wrap_up_lead_s: number;
     /** Runtime-awareness threshold (s): a worker tool call running at least this long gets a
      *  PostToolUse additionalContext notice so the model can route around slow operations.

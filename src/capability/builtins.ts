@@ -286,7 +286,8 @@ export const configFragments = {
       // Soft edge on the wall-clock cap (B7): this many seconds BEFORE `worker_hard_cap_s` fires,
       // every live worker still running gets exactly one steer telling it to wrap up and emit its
       // done-signal now instead of being cut off mid-thought. 0 disables the warning (the cap
-      // still fires; the worker just gets no notice). Default 300 (5min).
+      // still fires; the worker just gets no notice). Default 300 (5min). Rides the checkpoint
+      // pass (`checkpointLiveRuns`), so it also needs `worker_checkpoint_s > 0` to fire.
       wrap_up_lead_s: nonNegInt.default(300),
       // Runtime-awareness threshold (seconds) for the per-worker PostToolUse hook
       // (src/hooks/runtime-awareness.ts): a tool call that runs at least this long gets a

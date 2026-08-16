@@ -1979,12 +1979,13 @@ export class RunSupervisor {
       const elapsedS = (nowMs - ledger.spawnedAt) / 1000;
       if (elapsedS < capS - leadS) continue;
       this.wrapUpWarned.add(runId);
+      const leadMinutes = Math.max(1, Math.round(leadS / 60));
       try {
         await this.steer(
           runId,
-          "You are ~5 minutes from beckett's wall-clock backstop. Stop starting new work, commit " +
-            "what you have, and emit your done-signal now — done:false with a summary of what " +
-            "remains is the right answer if you are not finished.",
+          `You are ~${leadMinutes} minute${leadMinutes === 1 ? "" : "s"} from beckett's wall-clock ` +
+            "backstop. Stop starting new work, commit what you have, and emit your done-signal now — " +
+            "done:false with a summary of what remains is the right answer if you are not finished.",
         );
       } catch (err) {
         this.logger.warn("wrap-up steer failed", { run: runId, error: (err as Error).message });
@@ -2105,10 +2106,17 @@ export class RunSupervisor {
       `auto-resume ${n}/${cap} — beckett's own wall-clock backstop stopped this worker, re-staffing from its WIP`,
     );
     await this.patchRun(run.id, { autoResumes: n, error: null });
+    // The implement stage commits WIP before this fires (top of this method); a reviewer writes
+    // nothing to disk, so promising a WIP commit there would be the exact dishonest-copy bug
+    // `wallClockCapCause` above guards against — keep the two stages' steering text honest about
+    // what actually happened.
     this.bufferSteer(
       run.id,
-      `The previous pass was stopped by beckett's own wall-clock backstop after ${capMinutes} minutes, ` +
-        `mid-work. Its work is committed as WIP on this branch. Continue from there; do not restart.`,
+      stage === "implement"
+        ? `The previous pass was stopped by beckett's own wall-clock backstop after ${capMinutes} minutes, ` +
+            `mid-work. Its work is committed as WIP on this branch. Continue from there; do not restart.`
+        : `The previous review pass was stopped by beckett's own wall-clock backstop after ${capMinutes} ` +
+            `minutes, mid-review. Nothing was written to the branch; re-review the diff from the top.`,
     );
     await this.patchRun(run.id, { state: stage === "implement" ? "implementing" : "reviewing" });
     const next = this.store.get(run.id);
@@ -2188,8 +2196,9 @@ export class RunSupervisor {
    * Boot: re-dispatch every stage this daemon's predecessor owed (#244), following the publish
    * outbox's pattern — a durable row, drained once at start, consumed whether or not it lands.
    *
-   * IDEMPOTENCY is the run ledger's job, not a guess: an owed row is written ONLY on the park path,
-   * and a run that is no longer `parked` finished that stage (or a human moved it on) before the
+   * IDEMPOTENCY is the run ledger's job, not a guess: an owed row is written on every death
+   * (including one that auto-resumes in-process), and a run that is no longer `parked` at boot
+   * either finished that stage, was moved on by a human, or already resumed itself before the
    * kill. Re-dispatching that would double-run a completed stage, so it is dropped with a log line
    * instead. The entries are cleared BEFORE the loop, so a requeue that itself dies is never
    * replayed twice.

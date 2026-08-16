@@ -1768,9 +1768,11 @@ describe("a worker killed by the daemon's own shutdown", () => {
     await tick();
     created[0]!.finish("error", GREETING, null, { timedOut: true, errorClass: "timeout" });
     await settle();
-    // First cap kill auto-resumes into review, never claiming a WIP commit it never made.
+    // First cap kill auto-resumes into review, never claiming a WIP commit it never made —
+    // including in the steering note the resumed worker actually reads.
     expect(store.get(run.id)!.state).toBe("reviewing");
     expect(commitCalls.some((c) => c.message.includes("WIP"))).toBe(false);
+    expect(spawnCalls[1]!.steering?.join("\n")).not.toContain("WIP");
 
     created[1]!.finish("error", GREETING, null, { timedOut: true, errorClass: "timeout" });
     await settle();
