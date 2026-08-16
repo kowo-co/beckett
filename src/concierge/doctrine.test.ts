@@ -68,4 +68,15 @@ describe("concierge doctrine instance rendering", () => {
     const conciergeIndexSrc = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
     expect(conciergeIndexSrc).not.toContain("Do not deploy any work yet");
   });
+
+  test("the corpus gives the CTO seat a job description, not a punchline", () => {
+    // The seat's entire textual existence used to be one line of a user-owned persona.md — the
+    // exact line the chilltext carve drops first. Doctrine is loaded fresh every session and is
+    // never subject to that carve, so the job description belongs here, not in the voice file.
+    expect(promptCorpus).toContain("Kowo's technical direction is yours to hold");
+    expect(promptCorpus).toContain("A strategic observation is work, and it is yours to start");
+    expect(promptCorpus).toContain("Write a memo");
+    expect(promptCorpus).toContain("~/.beckett/company.md");
+    expect(promptCorpus).toContain('Never "if you want I could…"');
+  });
 });

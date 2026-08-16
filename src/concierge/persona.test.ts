@@ -6,7 +6,7 @@
  */
 
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readOrSeedPersona, DEFAULT_PERSONA } from "./index.ts";
@@ -46,4 +46,15 @@ test("an unwritable path degrades to empty, never throws", () => {
 test("the seeded default carries the working guardrails (no emojis / no em-dashes)", () => {
   expect(DEFAULT_PERSONA.toLowerCase()).toContain("no emojis");
   expect(DEFAULT_PERSONA).toContain("beckett reload");
+});
+
+test("the seat does not depend on the voice file", () => {
+  // The CTO seat's job description lives in doctrine (the-cto-seat.md), which chilltext's carve
+  // never touches — not in persona.md, which is exactly what the carve trims first.
+  expect(DEFAULT_PERSONA.toLowerCase()).not.toContain("cto");
+  const playbook = readFileSync(
+    join(import.meta.dir, "playbooks", "the-cto-seat.md"),
+    "utf8",
+  ).toLowerCase();
+  expect(playbook).toContain("cto");
 });

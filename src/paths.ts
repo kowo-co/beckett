@@ -92,6 +92,7 @@ export function buildPaths(config: Config, env: PathEnv = process.env): Paths {
     pauseFile: join(beckettDir, "pause.json"),
     journalDir: join(beckettDir, "journal"),
     proposalsDir: join(beckettDir, "proposals"),
+    companyFile: join(beckettDir, "company.md"),
     workspacesFile: join(beckettDir, "workspaces.json"),
   };
 }
