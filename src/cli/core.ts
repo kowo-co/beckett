@@ -1021,6 +1021,17 @@ export async function runTask(argv: string[]): Promise<void> {
           `branch ${run.branch} still holds everything this run committed.`,
       );
     }
+    // `unverified` is not in `RUN_FINAL` but is just as dead for steering: `stageFor()` returns
+    // null for it, so `run.steer` would only buffer the note for a stage that will never happen,
+    // and `run.resume` refuses it with `publish-blocked` since `run.published` is already set.
+    // Name the two real levers instead of promising a delivery that can't occur.
+    if (run.state === "unverified") {
+      fail(
+        `run ${run.id} is unverified — it already published and has no live stage left to steer. ` +
+          `Fix the PR and run \`beckett task resume ${run.id}\`, or record the landing with ` +
+          `\`beckett task courier ${run.id} --pr-url <url>\`.`,
+      );
+    }
     // (B8) `awaiting_input` gets the same "steering outranks waiting" treatment: there is no live
     // worker to nudge, so routing this to `run.steer` would silently buffer the note and let the
     // question ride out its full `runs.question_wait_s` timer even though a human just answered it.

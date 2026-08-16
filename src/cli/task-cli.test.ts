@@ -334,3 +334,19 @@ test("task steer on a done run still fails", async () => {
     /is done — steering only reaches a run that is still going/,
   );
 });
+
+// overhaul B "surface-fixes" (finding 24): `unverified` is live (LIVE_STATES) but has no stage
+// left to steer — `stageFor()` is null and `run.resume` refuses it with `publish-blocked`. The
+// verb must fail locally naming the real levers instead of routing to `run.steer`, which would
+// silently buffer a note for a stage that will never happen.
+test("task steer on an unverified run refuses and names courier/resume instead of buffering", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-task-steer-unverified-"));
+  dirs.push(dir);
+  const store = new RunStore(join(dir, "runs.json"));
+  const run = await store.create({ title: "Add oauth", prompt: "…" });
+  await store.update(run.id, { state: "unverified" });
+
+  await expect(cli(dir, ["task", "steer", run.id, "one more thing"])).rejects.toThrow(
+    /is unverified — it already published and has no live stage left to steer.*task resume.*task courier/s,
+  );
+});
