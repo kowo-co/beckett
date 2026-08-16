@@ -136,9 +136,9 @@ export function createCapabilityPreflight(
     }
 
     if (deps.keychain) {
-      checked.push("keychain");
       const entries = extractKeychainEntries(target.prompt);
       if (entries.length > 0) {
+        checked.push("keychain");
         try {
           const list = await deps.keychain.list();
           const have = new Set(list);
@@ -186,8 +186,11 @@ export function renderCapabilityGaps(gaps: readonly CapabilityGap[]): string {
   if (gaps.length === 0) return "";
   const blocking = gaps.filter((g) => g.severity === "blocking");
   const advisory = gaps.filter((g) => g.severity === "advisory");
-  const lines: string[] = ["this run needs you before it can land:"];
-  for (const g of blocking) lines.push(`- ${g.detail} → ${g.fix}`);
+  const lines: string[] = [];
+  if (blocking.length > 0) {
+    lines.push("this run needs you before it can land:");
+    for (const g of blocking) lines.push(`- ${g.detail} → ${g.fix}`);
+  }
   if (advisory.length > 0) {
     lines.push("also worth clearing (not blocking):");
     for (const g of advisory) lines.push(`- ${g.detail} → ${g.fix}`);

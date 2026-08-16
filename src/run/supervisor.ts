@@ -776,7 +776,7 @@ export class RunSupervisor {
             run,
             makeBlocker(
               {
-                class: "admin-permission",
+                class: "credential",
                 reversible: true,
                 remedy: blocking.map((g) => g.fix).join("; "),
                 detail: renderCapabilityGaps(inventory.gaps),

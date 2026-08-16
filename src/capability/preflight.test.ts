@@ -216,4 +216,12 @@ describe("renderCapabilityGaps", () => {
   test("empty gaps render empty", () => {
     expect(renderCapabilityGaps([])).toBe("");
   });
+
+  test("advisory-only gaps never claim the run needs a human before it can land", () => {
+    const rendered = renderCapabilityGaps([
+      { kind: "keychain-entry-missing", subject: "x", detail: "advisory detail", fix: "advisory fix", severity: "advisory" },
+    ]);
+    expect(rendered).not.toContain("needs you before it can land");
+    expect(rendered.split("\n")[0]).toBe("also worth clearing (not blocking):");
+  });
 });

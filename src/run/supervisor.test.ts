@@ -546,6 +546,38 @@ describe("capability preflight (overhaul B10)", () => {
     expect(ensureCalls).toHaveLength(0);
   });
 
+  test("a run parked on a blocking capability gap is resumable", async () => {
+    let calls = 0;
+    const { supervisor, store } = newSupervisor({
+      capabilityPreflight: async () => {
+        calls++;
+        return {
+          checked: ["github"],
+          gaps: [
+            {
+              kind: "github-not-installed",
+              subject: "acme",
+              detail: "the GitHub App is not installed on `acme`",
+              fix: "https://github.com/apps/beckett/installations/new",
+              severity: "blocking",
+            },
+          ],
+        };
+      },
+    });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await settle();
+    expect(store.get(run.id)!.state).toBe("parked");
+
+    const result = await supervisor.resume(run.id);
+    expect(result).toBe("resumed");
+    await settle();
+    expect(store.get(run.id)!.state).toBe("implementing");
+    expect(spawnCalls).toHaveLength(1);
+    expect(calls).toBe(1);
+  });
+
   test("advisory-only gaps staff the run normally", async () => {
     const { supervisor, store } = newSupervisor({
       capabilityPreflight: async () => ({
