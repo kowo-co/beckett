@@ -203,12 +203,16 @@ export function formatEvent(
   }
 }
 
-/** Pull the done-signal `summary` (blocked reason falls back) from a finished event's structured output. */
+/** Pull the done-signal `summary` (the blocker's detail falls back) from a finished event's structured output. */
 function summaryFromStructured(structured: unknown | null): string {
   if (!structured || typeof structured !== "object") return "";
   const o = structured as Record<string, unknown>;
   if (typeof o.summary === "string" && o.summary.trim()) return o.summary.trim();
-  if (typeof o.blockedReason === "string" && o.blockedReason.trim()) return o.blockedReason.trim();
+  const blocker = o.blocker;
+  if (blocker && typeof blocker === "object") {
+    const detail = (blocker as Record<string, unknown>).detail;
+    if (typeof detail === "string" && detail.trim()) return detail.trim();
+  }
   return "";
 }
 

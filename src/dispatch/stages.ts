@@ -22,7 +22,7 @@
  * changed.
  */
 
-import type { Config, DoneSignal, Effort, Logger } from "../types.ts";
+import type { Config, DoneBlocker, DoneBlockerClass, DoneSignal, Effort, Logger } from "../types.ts";
 import { ActionClass } from "../types.ts";
 import type { HarnessSpec } from "../run/cast.ts";
 import type { RunState } from "../run/types.ts";
@@ -60,14 +60,42 @@ export function defaultEffortFor(harness: HarnessSpec["harness"], config: Config
   }
 }
 
+const DONE_BLOCKER_CLASSES = new Set<DoneBlockerClass>([
+  "credential",
+  "admin-permission",
+  "product-decision",
+  "money",
+  "question",
+  "transient",
+  "continuation",
+]);
+
+/** `undefined` = malformed (reject the whole signal); `null` = no blocker was reported. */
+function parseDoneBlocker(value: unknown): DoneBlocker | null | undefined {
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const o = value as Record<string, unknown>;
+  const allowed = new Set(["class", "detail", "remedy", "defaultAnswer"]);
+  if (Object.keys(o).some((key) => !allowed.has(key))) return undefined;
+  if (typeof o.class !== "string" || !DONE_BLOCKER_CLASSES.has(o.class as DoneBlockerClass)) return undefined;
+  if (typeof o.detail !== "string") return undefined;
+  if (typeof o.remedy !== "string") return undefined;
+  if (o.defaultAnswer !== null && typeof o.defaultAnswer !== "string") return undefined;
+  return {
+    class: o.class as DoneBlockerClass,
+    detail: o.detail,
+    remedy: o.remedy,
+    defaultAnswer: o.defaultAnswer ?? null,
+  };
+}
+
 /** Strict structured done-signal parse (Spec 02 §6): anything off-schema is null, never a guess. */
 export function parseDoneSignal(structured: unknown): DoneSignal | null {
   if (!structured || typeof structured !== "object" || Array.isArray(structured)) return null;
   const o = structured as Record<string, unknown>;
-  const allowed = new Set(["status", "summary", "filesChanged", "checksRun", "blockedReason"]);
+  const allowed = new Set(["done", "summary", "filesChanged", "checksRun", "blocker"]);
   if (Object.keys(o).some((key) => !allowed.has(key))) return null;
-  const status = o.status;
-  if (status !== "complete" && status !== "blocked" && status !== "partial") return null;
+  if (typeof o.done !== "boolean") return null;
   if (typeof o.summary !== "string") return null;
   if (!Array.isArray(o.filesChanged) || !o.filesChanged.every((f) => typeof f === "string")) return null;
   if (
@@ -76,22 +104,16 @@ export function parseDoneSignal(structured: unknown): DoneSignal | null {
   ) {
     return null;
   }
-  if (o.blockedReason !== null && typeof o.blockedReason !== "string") return null;
+  const blocker = parseDoneBlocker(o.blocker);
+  if (blocker === undefined) return null;
 
   return {
-    status,
+    done: o.done,
     summary: o.summary,
     filesChanged: o.filesChanged,
     ...(Array.isArray(o.checksRun) ? { checksRun: o.checksRun } : {}),
-    ...(typeof o.blockedReason === "string" ? { blockedReason: o.blockedReason } : {}),
+    blocker,
   };
-}
-
-/** A done-signal's human summary, with the blocked reason appended when present. */
-export function doneSignalSummary(signal: DoneSignal, fallback: string): string {
-  const blockedReason = signal.blockedReason ? `\n\nBlocked reason:\n${signal.blockedReason}` : "";
-  const summary = signal.summary || fallback;
-  return `${summary}${blockedReason}`;
 }
 
 /**
@@ -353,9 +375,12 @@ function workerSystemAppend(
     `holds — there may be no separate reviewer after you. Run the check commands; fix what fails.\n` +
     `${contributions ? `${contributions}\n` : ""}` +
     `${PEER_STATUS_BLOCK}\n` +
-    `When finished, emit the structured done-signal matching the provided schema (status ` +
-    `"complete" when all criteria hold AND your self-review passed, "blocked"/"partial" ` +
-    `otherwise with a reason).\n` +
+    `When finished, emit the structured done-signal: done:true only when every acceptance ` +
+    `criterion holds AND your self-review passed. If you ran out of turn but nothing outside ` +
+    `your reach stopped you, emit done:false with blocker:null and put what remains in summary ` +
+    `— you will be given another pass with that summary as your brief. Use blocker ONLY for ` +
+    `something you cannot do from here (a missing credential, an admin permission, a product ` +
+    `decision, money, or one factual question).\n` +
     `</persona>`
   );
 }
@@ -415,9 +440,9 @@ const reviewStage: StageDefinition = {
       `at your cwd. Inspect it with ${diffHint(baseRef)} and judge it against the acceptance ` +
       `criteria listed in your task brief — do NOT edit the implementation.\n` +
       `When finished, emit the structured done-signal matching the provided schema:\n` +
-      `  - status "complete"  → the work PASSES review (all criteria met).\n` +
-      `  - status "blocked"   → the work FAILS review; put the specific reasons in summary + ` +
-      `blockedReason so the next implement pass can fix them.\n` +
+      `  - done:true   → the work PASSES review (all criteria met).\n` +
+      `  - done:false  → the work FAILS review; put the specific reasons in summary so the next ` +
+      `implement pass can fix them. blocker:null — a rework loop is not a blocker.\n` +
       `Put your one-line verdict in summary.\n` +
       `${PEER_STATUS_BLOCK}\n` +
       `</persona>`

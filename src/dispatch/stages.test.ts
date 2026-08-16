@@ -16,6 +16,7 @@ import {
   reviewEffortFor,
   createStagesExtension,
   stageViewOf,
+  parseDoneSignal,
 } from "./stages.ts";
 import { ActionClass, ExtensionRegistry, type ExtensionContext } from "../ext/index.ts";
 
@@ -308,5 +309,74 @@ describe("environment bootstrap (prompt wiring)", () => {
 
   test("the unknown-stage fallback carries it (it renders the generic brief)", () => {
     expect(stageRegistry.prompt("mystery", { item: makeItem(), envBootstrap: block })).toContain(block);
+  });
+});
+
+describe("parseDoneSignal", () => {
+  test("a well-formed done:true signal parses", () => {
+    const signal = parseDoneSignal({
+      done: true,
+      summary: "shipped it",
+      filesChanged: ["src/app.ts"],
+      checksRun: ["bun test"],
+      blocker: null,
+    });
+    expect(signal).toEqual({
+      done: true,
+      summary: "shipped it",
+      filesChanged: ["src/app.ts"],
+      checksRun: ["bun test"],
+      blocker: null,
+    });
+  });
+
+  test("done:false with blocker:null parses — that is the continuation shape", () => {
+    const signal = parseDoneSignal({
+      done: false,
+      summary: "ran out of turn, more to do",
+      filesChanged: [],
+      checksRun: null,
+      blocker: null,
+    });
+    expect(signal).toEqual({
+      done: false,
+      summary: "ran out of turn, more to do",
+      filesChanged: [],
+      blocker: null,
+    });
+  });
+
+  test("an unknown top-level key is rejected, never guessed", () => {
+    const signal = parseDoneSignal({
+      done: true,
+      summary: "shipped it",
+      filesChanged: [],
+      checksRun: null,
+      blocker: null,
+      status: "complete",
+    });
+    expect(signal).toBeNull();
+  });
+
+  test("a blocker missing remedy is rejected whole", () => {
+    const signal = parseDoneSignal({
+      done: false,
+      summary: "stuck",
+      filesChanged: [],
+      checksRun: null,
+      blocker: { class: "credential", detail: "needs a token", defaultAnswer: null },
+    });
+    expect(signal).toBeNull();
+  });
+
+  test("the legacy {status:'complete'} shape no longer parses", () => {
+    const signal = parseDoneSignal({
+      status: "complete",
+      summary: "shipped it",
+      filesChanged: [],
+      checksRun: null,
+      blockedReason: null,
+    });
+    expect(signal).toBeNull();
   });
 });

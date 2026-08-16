@@ -145,7 +145,7 @@ for (const model of ["gpt-5.6-terra", "gpt-5.6-luna"]) {
     expect(session).toMatchObject({ model });
     const fin = events.find((e) => e.kind === "finished") as {
       status: string;
-      structuredOutput: { status: string } | null;
+      structuredOutput: { done: boolean } | null;
     };
     expect(fin.status).toBe("success");
     expect(fin.structuredOutput).toMatchObject({ status: "complete" });
@@ -211,12 +211,12 @@ test("a run whose last turn died on a provider error finishes as ERROR, not empt
     status: string;
     subtype: string;
     errorClass?: string;
-    structuredOutput: { status: string } | null;
+    structuredOutput: { done: boolean } | null;
   };
   expect(fin.status).toBe("error");
   expect(fin.subtype).toBe("error_provider");
   expect(fin.errorClass).toBe("auth"); // "no api key" classifies as auth → dispatcher holds, no blind retry
-  expect(fin.structuredOutput).toMatchObject({ status: "blocked" });
+  expect(fin.structuredOutput).toMatchObject({ done: false, blocker: { class: "transient" } });
 });
 
 test("a transient errored turn followed by a successful one still finishes as success", () => {
@@ -252,12 +252,12 @@ test("#159: a run that reaches agent_end having done NOTHING fails as a launch f
     status: string;
     subtype: string;
     errorClass?: string;
-    structuredOutput: { status: string } | null;
+    structuredOutput: { done: boolean } | null;
   };
   expect(fin.status).toBe("error"); // NOT a silent ~$0 success
   expect(fin.subtype).toBe("error_noop");
   expect(fin.errorClass).toBe("crash"); // unclassified → the dispatcher's bounded retry
-  expect(fin.structuredOutput).toMatchObject({ status: "blocked" });
+  expect(fin.structuredOutput).toMatchObject({ done: false, blocker: { class: "transient" } });
   const err = events.find((e) => e.kind === "error") as { message: string };
   expect(err.message).toContain("LAUNCH FAILURE");
 });

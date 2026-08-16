@@ -70,6 +70,7 @@ function run(overrides: Partial<Run> = {}): Run {
     sessionIds: {},
     sessionName: "beckett-run-healthz",
     reviewCycles: 0,
+    continuations: 0,
     prUrl: null,
     error: null,
     published: null,

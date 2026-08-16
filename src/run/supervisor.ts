@@ -1055,9 +1055,13 @@ export class RunSupervisor {
       return;
     }
     const signal = parseDoneSignal(handle.result?.structured);
-    if (signal && (signal.status === "blocked" || signal.status === "partial")) {
+    if (signal && !signal.done) {
       await this.commitWip(run, handle);
-      await this.park(run, `the implement worker reported **${signal.status}**.\n\n${summary}`);
+      if (signal.blocker) {
+        await this.park(run, `${signal.blocker.detail}\n\n${summary}`);
+        return;
+      }
+      await this.continueImplement(run, summary);
       return;
     }
     // Safety net: capture anything the worker left uncommitted so review sees the whole change.
@@ -1074,6 +1078,33 @@ export class RunSupervisor {
     this.trace(run, "implement:verdict", "passed", "implementation complete → review");
     const next = this.store.get(run.id);
     if (next) this.spawnGuarded(next, "review");
+  }
+
+  /**
+   * A worker that ran out of turn but hit nothing outside its reach: `done:false, blocker:null`.
+   * Mirrors the reviewer's rework loop, but counts against its own field (`continuations`, NOT
+   * `reviewCycles`) — the two caps stay independent, and the ledger records why the run re-ran.
+   */
+  private async continueImplement(run: Run, summary: string): Promise<void> {
+    const n = run.continuations + 1;
+    const cap = this.config.runs?.continuation_max ?? 2;
+    await this.patchRun(run.id, { continuations: n, error: null });
+    if (n >= cap) {
+      const parked = this.store.get(run.id) ?? run;
+      await this.park(
+        parked,
+        `the implement worker ran out of turn — continuation cap ${n}/${cap} reached.\n\n${summary}`,
+      );
+      return;
+    }
+    this.bufferSteer(
+      run.id,
+      `Previous pass ended without finishing (pass ${n}/${cap}). Its work is committed on this ` +
+        `branch. Continue from here:\n${summary}`,
+    );
+    await this.patchRun(run.id, { state: "implementing" });
+    const next = this.store.get(run.id);
+    if (next) this.spawnGuarded(next, "implement");
   }
 
   /**
@@ -1108,7 +1139,7 @@ export class RunSupervisor {
       await this.park(run, `the reviewer finished without a schema-valid structured verdict.\n\n${summary}`);
       return;
     }
-    if (signal.status === "complete") {
+    if (signal.done) {
       this.trace(run, "review:verdict", "passed", "review passed");
       await this.publishRun(run, summary);
       return;
@@ -2064,9 +2095,9 @@ export class RunSupervisor {
           ? t.toolCalls === 0 && tokens === 0
             ? "launch_failed"
             : "failed"
-          : stage === "review" && signal?.status !== "complete"
+          : stage === "review" && !signal?.done
             ? "rework"
-            : stage === "implement" && (signal?.status === "blocked" || signal?.status === "partial")
+            : stage === "implement" && signal !== null && !signal.done
               ? "rework"
               : "done");
       appendSpendRecord(this.spendLedgerPath, {

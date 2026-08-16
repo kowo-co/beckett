@@ -259,6 +259,7 @@ export function previewRun(input: TaskDeployInput, now: Date): Run {
     sessionIds: {},
     sessionName: `beckett-run-${input.slug}`,
     reviewCycles: 0,
+    continuations: 0,
     prUrl: null,
     error: null,
     published: null,

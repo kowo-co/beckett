@@ -313,9 +313,10 @@ export function renderResult(
   const done: DoneSignal | null = isError
     ? null
     : {
-        status: "complete",
+        done: true,
         summary: args.summary ?? "Done.",
         filesChanged: args.filesChanged,
+        blocker: null,
       };
   const line: RawLine = {
     type: "result",

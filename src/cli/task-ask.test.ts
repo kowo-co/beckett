@@ -40,6 +40,7 @@ function makeRun(over: Partial<Run> = {}): Run {
     sessionIds: { implement: "sess-1" },
     sessionName: `beckett-run-${slug}`,
     reviewCycles: 0,
+    continuations: 0,
     prUrl: null,
     error: null,
     published: null,
