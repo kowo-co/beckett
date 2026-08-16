@@ -317,6 +317,23 @@ test("publish blocked: is permanent, still waiting on CI is transient", () => {
   ).toBe("transient");
 });
 
+test("a `read`/non-fast-forward LandError stays transient — it's a blip, not a GitHub verdict", () => {
+  expect(
+    classifyPublishError(
+      new Error(
+        "publish: GitHub did not settle this attempt — could not read PR #11 on o/r — cannot tell whether it is safe to merge.\nHTTP 502",
+      ),
+    ),
+  ).toBe("transient");
+  expect(
+    classifyPublishError(
+      new Error(
+        "publish: GitHub did not settle this attempt — could not push beckett/run-x to o/r: ! [rejected] (non-fast-forward)",
+      ),
+    ),
+  ).toBe("transient");
+});
+
 test("publishPrAdvice tells a human to clear the PR, never to push by hand", () => {
   const advice = publishPrAdvice("https://github.com/o/r/pull/9", "run-20260815-x");
   expect(advice).toContain("https://github.com/o/r/pull/9");

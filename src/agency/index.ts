@@ -33,7 +33,6 @@
  */
 
 import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type {
   ActionType,
   ActionContext,
@@ -1040,6 +1039,7 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
         body: prBody,
         baseSha: p.baseSha,
         summary: commitSummary,
+        runId: p.ticket,
       });
       this.opts.logger.info("published via pull request", { repo, branch, base: trunk.base, prUrl: landed.prUrl });
       return {
@@ -1165,6 +1165,8 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
    *   - `pr` with "no commits between" → not an error at all: the work is already on `p.base` (a
    *     retry after an earlier attempt's PR already merged and GitHub deleted the branch). Report the
    *     current tip as the shipped commit instead of failing;
+   *   - `read` (a `gh pr view` blip) or a `push` non-fast-forward reject → `"publish: GitHub did not
+   *     settle this attempt — …"` (transient — neither is a GitHub verdict on the PR itself);
    *   - everything else (CONFLICTING, DRAFT, failed checks, a merge refusal, …) →
    *     `"publish blocked: …"` (permanent — a retry cannot change GitHub's verdict; a human must).
    */
@@ -1177,6 +1179,7 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
     body: string;
     baseSha?: string;
     summary?: string;
+    runId?: string;
   }): Promise<{ prUrl: string; sha?: string }> {
     const client: LandClient = {
       pushBranch: async (_repo, localRef, remoteBranch) => this.gitPush(p.cwd, p.repo, localRef, remoteBranch),
@@ -1195,7 +1198,7 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
         strategy: "squash",
         ciTimeoutMs: PUBLISH_CI_TIMEOUT_MS,
         dir: p.cwd,
-        command: "beckett task courier <run-id>",
+        command: `beckett task courier ${p.runId ?? "<run-id>"}`,
         step: (m) => this.opts.logger.info(`publish: ${m}`),
         now: this.opts.now,
         sleep: this.opts.sleep,
@@ -1209,6 +1212,14 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
       }
       if (err.stage === "pr" && /no commits between/i.test(err.message)) {
         return { prUrl: "", sha: await this.currentSha(p.cwd) };
+      }
+      // A `read` stage failure is a `gh pr view` network/5xx blip, not a GitHub verdict — and a
+      // `push` non-fast-forward reject is the exact "durability satisfied" case `pushRunBranch`
+      // (above) deliberately swallows when a retry's local HEAD has moved. Neither is something a
+      // human needs to fix; both deserve the free retry the transient path gives, not a permanent
+      // park on attempt 1.
+      if (err.stage === "read" || (err.stage === "push" && /non-fast-forward|fetch first|\[rejected\]/i.test(err.message))) {
+        throw new Error(`publish: GitHub did not settle this attempt — ${err.message}`);
       }
       throw new Error(`publish blocked: ${err.message}`);
     }
