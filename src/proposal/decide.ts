@@ -186,7 +186,7 @@ function requireOpen(proposalsDir: string, id: string, now: Date): Proposal {
   if (pastDeadline(proposal, now)) {
     sweepExpiredProposals(proposalsDir, now);
     throw new Error(
-      `proposal: '${id}' expired undecided after ${daysOpen(proposal, now)} days; file it again with \`beckett dream propose\` if it still holds`,
+      `proposal: '${id}' expired undecided after ${daysOpen(proposal, now)} days; file it again with \`beckett proposals file\` if it still holds`,
     );
   }
   if (proposal.status !== "open") {

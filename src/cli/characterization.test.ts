@@ -137,14 +137,6 @@ const CASES: Case[] = [
   { name: "memory: remember without --name prints usage", argv: ["memory", "remember"] },
   { name: "memory: unknown sub fails", argv: ["memory", "bogus"] },
 
-  // ── dream (issue #36) — journal read-back; hermetic sandbox = no dreams yet ─────────────
-  { name: "dream: bare lists an empty journal", argv: ["dream"] },
-  { name: "dream: ls lists an empty journal", argv: ["dream", "ls"] },
-  { name: "dream: show without a date prints usage", argv: ["dream", "show"] },
-  { name: "dream: show rejects a non-date", argv: ["dream", "show", "not-a-date"] },
-  { name: "dream: show of an undreamt night fails", argv: ["dream", "show", "2026-01-01"] },
-  { name: "dream: unknown sub prints usage", argv: ["dream", "bogus"] },
-
   // ── free time (docs/freetime.md) — journal read-back; hermetic sandbox = no sessions yet ──
   { name: "free-time: bare lists an empty journal", argv: ["free-time"] },
   { name: "free-time: ls lists an empty journal", argv: ["free-time", "ls"] },
@@ -153,16 +145,16 @@ const CASES: Case[] = [
   { name: "free-time: show of an unlived session fails", argv: ["free-time", "show", "2026-01-01-abcdef12"] },
   { name: "free-time: unknown sub prints usage", argv: ["free-time", "bogus"] },
 
-  // ── dream proposals (issue #37) — the queue is empty and silent in a fresh sandbox ──────
-  { name: "dream: proposals ls on an empty queue", argv: ["dream", "proposals", "ls"] },
-  { name: "dream: proposals ls --all on an empty queue", argv: ["dream", "proposals", "ls", "--all"] },
-  { name: "dream: proposals show without an id prints usage", argv: ["dream", "proposals", "show"] },
-  { name: "dream: proposals show rejects a traversal id", argv: ["dream", "proposals", "show", "../persona"] },
-  { name: "dream: proposals accept of an unknown id fails", argv: ["dream", "proposals", "accept", "prop-2026-01-01-x"] },
-  { name: "dream: proposals reject without --why refuses", argv: ["dream", "proposals", "reject", "prop-2026-01-01-x"] },
-  { name: "dream: proposals unknown sub prints usage", argv: ["dream", "proposals", "bogus"] },
-  { name: "dream: propose without a kind prints usage", argv: ["dream", "propose"] },
-  { name: "dream: propose without a claim fails", argv: ["dream", "propose", "--kind", "doctrine-change"] },
+  // ── proposals (issue #37) — the queue is empty and silent in a fresh sandbox ────────────
+  { name: "proposals: ls on an empty queue", argv: ["proposals", "ls"] },
+  { name: "proposals: ls --all on an empty queue", argv: ["proposals", "ls", "--all"] },
+  { name: "proposals: show without an id prints usage", argv: ["proposals", "show"] },
+  { name: "proposals: show rejects a traversal id", argv: ["proposals", "show", "../persona"] },
+  { name: "proposals: accept of an unknown id fails", argv: ["proposals", "accept", "prop-2026-01-01-x"] },
+  { name: "proposals: reject without --why refuses", argv: ["proposals", "reject", "prop-2026-01-01-x"] },
+  { name: "proposals: unknown sub prints usage", argv: ["proposals", "bogus"] },
+  { name: "proposals: file without a kind prints usage", argv: ["proposals", "file"] },
+  { name: "proposals: file without a claim fails", argv: ["proposals", "file", "--kind", "doctrine-change"] },
 
   // ── spend ───────────────────────────────────────────────────────────────────────────────
   { name: "spend: empty ledger summary", argv: ["spend"] },

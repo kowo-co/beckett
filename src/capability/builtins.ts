@@ -613,21 +613,6 @@ export const configFragments = {
       peer_max_consecutive_turns: posInt.default(6),
     })
     .default({}),
-  // The nightly dream pass (issue #36): a budgeted, read-mostly replay of Beckett's own day on
-  // the self lane. The budget is a hard CEILING on model output tokens, not a target — a quiet
-  // day finishes far below it; hitting it writes a partial journal entry marked truncated.
-  dream: z
-    .object({
-      output_token_budget: posInt.default(150_000),
-      // Empty = the concierge model: a dream is Beckett replaying its own day, not a specialist.
-      model: z.string().default(""),
-      // The overnight spike's sub-budget (issue #38) is carved out of output_token_budget, and
-      // its throwaway worktree is cut from Beckett's own checkout unless a repo is named here.
-      spike_output_token_budget: posInt.default(60_000),
-      spike_repo: z.string().default(""),
-    })
-    .strict()
-    .default({}),
   // Free time (docs/freetime.md): one weekly, budgeted, unprompted session inside a scratch
   // directory, with structured memory writeback seeding the next one. Every value here is a WALL
   // the session runs INSIDE — the session's process has no write path back to this file, so it
@@ -715,7 +700,6 @@ const BUILTIN_CAPABILITY_INFO: {
   quick: { id: "quick", summary: "Quick agents (the short-lived lane) + the computer-use browser host." },
   announce: { id: "announce", summary: "Restart changelog announcements." },
   federation: { id: "federation", summary: "Peer-Beckett federation over Discord." },
-  dream: { id: "dream", summary: "Nightly dream pass: token ceiling + model for the self-lane day replay." },
   free_time: { id: "free-time", summary: "Weekly self-directed session: trigger, walls, token ceiling, share channel." },
   social: { id: "social", summary: "Social-media agent's chilltext chill-pass toggle." },
   ops_log: { id: "ops-log", summary: "Discord ops-log mirror: legible event lines, batching, turn heartbeat." },

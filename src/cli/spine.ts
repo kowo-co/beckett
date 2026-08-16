@@ -179,9 +179,9 @@ export const SPINE: SpineEntry[] = [
     verbs: [{ name: "calibration", load: async () => (await import("./calibration-cli.ts")).runCalibration }],
   },
   {
-    id: "dream",
-    cliHelp: "dream ls|show <date> | dream propose|proposals ls|show|accept|reject | dream spikes ls|show",
-    verbs: [{ name: "dream", load: async () => (await import("./dream-cli.ts")).runDream }],
+    id: "proposals",
+    cliHelp: "proposals ls|show|accept|reject|expire | proposals file --kind <k> --claim <c> --why <w> --from <src,src>",
+    verbs: [{ name: "proposals", load: async () => (await import("./proposal-cli.ts")).runProposals }],
   },
   {
     id: "free-time",

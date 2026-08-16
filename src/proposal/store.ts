@@ -193,9 +193,9 @@ export function renderProposalsBlock(proposalsDir: string | null | undefined, no
     const shown = open.slice(0, PROPOSALS_BLOCK_MAX_LINES);
     const lines = shown.map((p) => `- ${p.id} [${p.kind}] ${p.claim}`);
     if (open.length > shown.length) {
-      lines.push(`+${open.length - shown.length} more — run \`beckett dream proposals ls\``);
+      lines.push(`+${open.length - shown.length} more — run \`beckett proposals ls\``);
     }
-    lines.push("Decide with `beckett dream proposals accept|reject <id>`; a proposal never applies itself.");
+    lines.push("Decide with `beckett proposals accept|reject <id>`; a proposal never applies itself.");
     return `<open-proposals>\n${lines.join("\n")}\n</open-proposals>`;
   } catch {
     // A broken proposals directory must never keep a chat session from launching.

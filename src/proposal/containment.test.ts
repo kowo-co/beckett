@@ -323,19 +323,19 @@ test("every filesystem write in the queue goes through the id-locked path helper
   expect(writes.some((w) => /rm|unlink/.test(w.fn))).toBe(false);
 });
 
-test("the unsupervised pass cannot decide its own proposals — it does not import the decision surface", () => {
-  const dreamDir = join(import.meta.dir, "..", "dream");
-  for (const file of readdirSync(dreamDir).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"))) {
-    const text = readFileSync(join(dreamDir, file), "utf8");
+test("the unsupervised free-time session cannot decide its own proposals — it does not import the decision surface", () => {
+  const freetimeDir = join(import.meta.dir, "..", "freetime");
+  for (const file of readdirSync(freetimeDir).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"))) {
+    const text = readFileSync(join(freetimeDir, file), "utf8");
     expect(`${file}: ${/from "\.\.\/proposal\/decide\.ts"/.test(text)}`).toBe(`${file}: false`);
     for (const verb of ["acceptProposal", "rejectProposal", "ACCEPT_ROUTE"]) {
       expect(`${file}: ${text.includes(verb)}`).toBe(`${file}: false`);
     }
   }
-  // The routine that fires the pass hands it a fixed argv, so there is no `proposals accept`
-  // for a nightly run to reach even by way of the CLI.
+  // The routine that fires the session hands it a fixed argv, so there is no `proposals accept`
+  // for a scheduled run to reach even by way of the CLI.
   const routines = readFileSync(join(import.meta.dir, "..", "capability", "modules", "routines.ts"), "utf8");
-  expect(routines).toContain('"dream", "run",');
+  expect(routines).toContain('"free-time", "run",');
   expect(routines).not.toContain("proposals");
 });
 

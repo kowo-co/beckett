@@ -85,16 +85,10 @@ export interface RoutineDispatchPlan {
   /** self lane: the instruction Beckett gives itself, framed as a SYSTEM turn (null elsewhere). */
   selfPrompt: string | null;
   /**
-   * self lane, dream variant (issue #36): true when this fire is the nightly dream pass. The
-   * dispatcher then spawns the contained `beckett dream run` body instead of framing a concierge
-   * turn — same pre-browser fork, same no-agent/no-browser/no-creds shape as a plain self wake.
-   */
-  dream: boolean;
-  /**
    * self lane, free-time variant (docs/freetime.md): true when this fire is the weekly
    * self-directed session. The dispatcher spawns the contained `beckett free-time run` body —
-   * same pre-browser fork and same no-agent/no-browser/no-creds shape as `dream`, plus the one
-   * thing no other plan has: it may be DEFERRED before the period is claimed (see
+   * same pre-browser fork and same no-agent/no-browser/no-creds shape as a plain self wake, plus
+   * the one thing no other plan has: it may be DEFERRED before the period is claimed (see
    * {@link ./scheduler.ts}) when the fleet is busy, so free time never competes with real work.
    */
   freeTime: boolean;
@@ -122,7 +116,6 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       depsUpdate: null,
       proactiveSweep: null,
       selfPrompt: null,
-      dream: false,
       freeTime: false,
       preview: `invoke agent ${action.agentId}: ${action.input}`,
       credsEntry: action.credsEntry ?? null,
@@ -147,7 +140,6 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       },
       proactiveSweep: null,
       selfPrompt: null,
-      dream: false,
       freeTime: false,
       preview:
         `update in-range dependencies in an isolated clone, run typecheck + tests, ` +
@@ -174,7 +166,6 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       depsUpdate: null,
       proactiveSweep: { repos },
       selfPrompt: null,
-      dream: false,
       freeTime: false,
       preview:
         repos.length === 0
@@ -200,7 +191,6 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       depsUpdate: null,
       proactiveSweep: null,
       selfPrompt: null,
-      dream: false,
       freeTime: false,
       preview:
         `poll ${action.feedUrl} every ${action.pollIntervalMinutes}m; on a genuinely new, ` +
@@ -226,7 +216,6 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       depsUpdate: null,
       proactiveSweep: null,
       selfPrompt: action.prompt,
-      dream: false,
       freeTime: false,
       preview: `wake the concierge on its own ledger: ${action.prompt}`,
       credsEntry: null,
@@ -235,36 +224,11 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
     };
   }
 
-  if (action.kind === "dream") {
-    // The dream pass (issue #36) rides the SELF lane: same pre-browser fork, same guarantee that
-    // nothing here can be mistaken for browser work. `dream: true` is the only difference — the
-    // dispatcher spawns the contained `beckett dream run` body instead of framing a concierge
-    // turn, so the token ceiling and the write containment stay enforced in code, not prompt.
-    return {
-      routineId: routine.id,
-      lane: "self",
-      agentId: null,
-      agentInput: null,
-      browserTask: null,
-      depsUpdate: null,
-      proactiveSweep: null,
-      selfPrompt: null,
-      dream: true,
-      freeTime: false,
-      preview:
-        "replay the day on the self lane (dream pass): read-only assembly, budgeted reflection, " +
-        "one dated journal entry under ~/.beckett/dreams, inference-only memories",
-      credsEntry: null,
-      channelId: action.channelId ?? null,
-      requesterId: action.requesterId ?? null,
-    };
-  }
-
   if (action.kind === "free-time") {
-    // Free time (docs/freetime.md) rides the SELF lane beside the dream, for the same reason: it
-    // shares the lane's "never the browser, never an agent, never a credential" structure but runs
-    // as the contained `beckett free-time run` subprocess, so the scratch-directory scope guard,
-    // the deny list, and the token ceiling stay enforced in code rather than in a prompt.
+    // Free time (docs/freetime.md) rides the SELF lane: it shares the lane's "never the browser,
+    // never an agent, never a credential" structure but runs as the contained `beckett free-time
+    // run` subprocess, so the scratch-directory scope guard, the deny list, and the token ceiling
+    // stay enforced in code rather than in a prompt.
     return {
       routineId: routine.id,
       lane: "self",
@@ -274,7 +238,6 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       depsUpdate: null,
       proactiveSweep: null,
       selfPrompt: null,
-      dream: false,
       freeTime: true,
       preview:
         "one self-directed session on the self lane (free time): a scratch directory it may not " +
@@ -286,7 +249,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
   }
 
   if (action.kind === "spend-report") {
-    // The weekly bill (#77) gets its OWN lane, deliberately: like `deps-update`/`dream` it names no
+    // The weekly bill (#77) gets its OWN lane, deliberately: like `deps-update` it names no
     // agent, no browser task, and no creds entry, so there is no shape a dispatcher could mistake
     // for browser work. Its body reads the spend ledger and posts one per-task breakdown to the
     // channel, run as the `beckett routine spend-report` subprocess off the scheduler tick.
@@ -299,7 +262,6 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       depsUpdate: null,
       proactiveSweep: null,
       selfPrompt: null,
-      dream: false,
       freeTime: false,
       preview: `post the per-task spend bill for the last ${action.since} to the channel`,
       credsEntry: null,
@@ -320,7 +282,6 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       depsUpdate: null,
       proactiveSweep: null,
       selfPrompt: null,
-      dream: false,
       freeTime: false,
       preview: `invoke agent ${SOCIAL_MEDIA_AGENT_ID}: ${LEGACY_SHITPOST_INPUT}`,
       credsEntry: action.credsEntry ?? null,
@@ -339,7 +300,6 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
     depsUpdate: null,
     proactiveSweep: null,
     selfPrompt: null,
-    dream: false,
     freeTime: false,
     preview: action.task,
     credsEntry: action.credsEntry ?? null,

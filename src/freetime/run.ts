@@ -16,8 +16,8 @@
  *     PreToolUse scope guard every worker runs behind ({@link ../hooks/scope-guard.ts}), rooted
  *     at `<beckettDir>/free-time/<id>/`. It may READ its world freely — that is most of the
  *     point — and it may write in exactly one place.
- *   - **No push, no deploy, no GitHub, no messaging.** The spike deny list
- *     ({@link ../dream/spike.ts}) plus `Bash(beckett discord:*)`: the optional one-line share is
+ *   - **No push, no deploy, no GitHub, no messaging.** {@link FREE_TIME_DENIED_PERMISSIONS} plus
+ *     `Bash(beckett discord:*)`: the optional one-line share is
  *     posted by THIS code after the session exits, so nothing the model does mid-session can
  *     reach a person. No subagents and no web tools (`--disallowedTools`) — v0 is deliberately
  *     inward-facing.
@@ -45,8 +45,7 @@ import { createMemory, type MemoryStore } from "../memory/index.ts";
 import { SELF_AUDIENCE } from "../memory/search.ts";
 import { renderClaudeSettings } from "../hooks/registry.ts";
 import { scopeGuardSpec } from "../hooks/scope-guard.ts";
-import { SPIKE_DENIED_PERMISSIONS } from "../dream/spike.ts";
-import { localDate, parseModelResult } from "../dream/run.ts";
+import { localDate, parseModelResult } from "./model.ts";
 import { appendSpendRecord, FREE_TIME_SPEND_TICKET_ID, type SpendOutcome } from "../spend.ts";
 
 export { freeTimeDeferReason, type FreeTimeBusySignals } from "./gate.ts";
@@ -61,12 +60,19 @@ export const FREE_TIME_SCRATCH_RETENTION_MS = 30 * 24 * 60 * 60_000;
 export const FREE_TIME_DISALLOWED_TOOLS = "Task,WebFetch,WebSearch";
 
 /**
- * The deny list baked into the session's settings, on top of the scope-guard hook. The spike's
- * list (push/GitHub/deploy) plus the one rule free time adds: the session cannot message anyone.
+ * The deny list baked into the session's settings, on top of the scope-guard hook: no push, no
+ * GitHub, no deploy, no site, and the one rule free time adds — the session cannot message anyone.
  * A share is a thing the RUNNER does, after the session is over, from text the session wrote —
  * never a live channel the session holds while it works.
  */
-export const FREE_TIME_DENIED_PERMISSIONS = [...SPIKE_DENIED_PERMISSIONS, "Bash(beckett discord:*)"];
+export const FREE_TIME_DENIED_PERMISSIONS = [
+  "Bash(git push:*)",
+  "Bash(gh:*)",
+  "Bash(beckett gh:*)",
+  "Bash(beckett deploy:*)",
+  "Bash(beckett site:*)",
+  "Bash(beckett discord:*)",
+];
 
 /** Longest share posted to Discord. A session's own summary, not a report. */
 export const FREE_TIME_SHARE_MAX_CHARS = 500;
@@ -102,7 +108,7 @@ export interface FreeTimeRunDeps {
   scopeGuardScriptPath?: string;
 }
 
-/** The receipt — cut from {@link ../dream/run.ts}'s outcome: what happened, what it cost, what fell out. */
+/** The receipt: what happened, what it cost, what fell out. */
 export interface FreeTimeRunOutcome {
   id: string;
   date: string;
