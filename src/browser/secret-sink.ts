@@ -48,6 +48,11 @@ export const SECRET_FIELD_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
  */
 export function wrapEvalWithSecretSink(code: string, values: Record<string, string>): string {
   const json = JSON.stringify(values);
+  // Deliberate ordering: `secrets` (whose `save` closure references `__beckettSaves`) is declared
+  // before `const __beckettSaves = []` below. This is safe only because `save` is a closure that
+  // isn't called until the IIFE body runs, by which point `__beckettSaves` is already initialized —
+  // nothing at preamble level invokes it early. The order is pinned by the dedup characterization
+  // test, which asserts the emitted source starts with this exact `const secrets = ...` line.
   return `const secrets = Object.freeze({
   ...${json},
   save: (field, value) => {

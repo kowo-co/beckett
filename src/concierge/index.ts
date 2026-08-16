@@ -91,7 +91,7 @@ import {
   type BrowserAgentQuestion,
   type BrowserAgentRun,
 } from "../browser/agent.ts";
-import { readSecretEnvelope, wrapEvalWithSecretSink, type SecretSaveReceipt } from "../browser/secret-sink.ts";
+import { readSecretEnvelope, wrapEvalWithSecretSink, type SecretSaveReceipt, type SecretSaveRequest } from "../browser/secret-sink.ts";
 import { BROWSER_QUESTION_SUFFIX } from "../browser/question-message.ts";
 import {
   createAmbientCoordinator,
@@ -5012,18 +5012,27 @@ export class Concierge {
               // model transcript.
               let secretValues: string[] = [];
               let injected = code;
+              let sinkWrapped = false;
               try {
                 const secrets = this.browserAgent ? await this.browserAgent.evalSecrets(runId) : null;
                 if (secrets !== null) {
                   secretValues = Object.values(secrets);
                   injected = wrapEvalWithSecretSink(code, secrets);
+                  sinkWrapped = true;
                 }
               } catch (error) {
                 return { ok: false, error: `keychain secrets are unavailable for this run: ${(error as Error).message}` };
               }
               try {
                 const data = await this.browserRuntime.evaluate(runId, injected, controlToken, { note, timeoutMs });
-                const { result, saves } = readSecretEnvelope(data.value);
+                // Only unwrap the envelope when this eval was actually wrapped with the sink: an
+                // unwrapped eval (no credsEntry, or a plain `browser exec`) never had `secrets.save`
+                // injected, so a `{__beckettEnvelope:1,...}`-shaped return is model-authored data, not
+                // a real save request — treat it as the script's literal result. `this.browserAgent!`
+                // below is safe because sinkWrapped can only be true when browserAgent was truthy.
+                const { result, saves }: { result: unknown; saves: SecretSaveRequest[] } = sinkWrapped
+                  ? readSecretEnvelope(data.value)
+                  : { result: data.value, saves: [] };
                 const receipts: SecretSaveReceipt[] = [];
                 for (const save of saves) {
                   receipts.push(await this.browserAgent!.saveSecret(runId, save.field, save.value));
