@@ -209,6 +209,7 @@ function makeRun(over: Partial<Run> = {}): Run {
     sessionName: over.sessionName ?? `beckett-run-${slug}`,
     reviewCycles: over.reviewCycles ?? 0,
     continuations: over.continuations ?? 0,
+    autoResumes: over.autoResumes ?? 0,
     prUrl: null,
     error: over.error ?? null,
     published: over.published === undefined ? null : over.published,
@@ -1464,6 +1465,118 @@ describe("typed blockers (overhaul B5)", () => {
   });
 });
 
+describe("death classification (overhaul B7)", () => {
+  test("a cap-killed implement worker resumes from its WIP instead of parking", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(store, makeRun({ state: "implementing" }));
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("error", "", null, { timedOut: true, errorClass: "timeout" });
+    await settle();
+
+    const resumed = store.get(run.id)!;
+    expect(resumed.state).toBe("implementing");
+    expect(resumed.autoResumes).toBe(1);
+    expect(resumed.blocker).toBeNull();
+    expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(2);
+    const steer = spawnCalls[1]!.steering?.join("\n") ?? "";
+    expect(steer).toContain("wall-clock backstop");
+    expect(steer).toContain("WIP");
+    expect(commitCalls.some((c) => c.message.includes("WIP"))).toBe(true);
+  });
+
+  test("auto-resume stops at runs.auto_resume_max and parks with a transient blocker", async () => {
+    const { supervisor, store } = newSupervisor({
+      config: cfg({ runs: { max_live: 3, review_cycles_max: 2, budget_usd_per_run: 0, auto_resume_max: 2 } }),
+    });
+    const run = seedRun(store, makeRun({ state: "implementing" }));
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("error", "", null, { timedOut: true, errorClass: "timeout" });
+    await settle();
+    expect(store.get(run.id)!.state).toBe("implementing");
+    created[1]!.finish("error", "", null, { timedOut: true, errorClass: "timeout" });
+    await settle();
+    expect(store.get(run.id)!.state).toBe("implementing");
+    created[2]!.finish("error", "", null, { timedOut: true, errorClass: "timeout" });
+    await settle();
+
+    const parked = store.get(run.id)!;
+    expect(parked.state).toBe("parked");
+    expect(parked.autoResumes).toBe(2);
+    expect(parked.blocker?.class).toBe("transient");
+    expect(parked.blocker?.actor).toBe("human");
+    expect(parked.error).toContain("auto-resume cap 2/2 reached");
+    expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(3);
+  });
+
+  test("a worker killed by the daemon's own shutdown still parks for the boot requeue", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(store, makeRun({ state: "implementing" }));
+    await supervisor.admit(run.id);
+    await tick();
+    supervisor.stop();
+    created[0]!.finish("error", "", null, { timedOut: true, errorClass: "timeout" });
+    await settle();
+
+    const parked = store.get(run.id)!;
+    expect(parked.state).toBe("parked");
+    expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(1);
+  });
+
+  test("an external death (auth) parks with a credential blocker and does not resume", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(store, makeRun({ state: "implementing" }));
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("error", "", null, { errorClass: "auth", errorMessage: "no auth" });
+    await settle();
+
+    const parked = store.get(run.id)!;
+    expect(parked.state).toBe("parked");
+    expect(parked.autoResumes).toBe(0);
+    expect(parked.blocker?.class).toBe("credential");
+    expect(parked.blocker?.actor).toBe("human");
+    expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(1);
+  });
+
+  test("a live worker within the wrap-up lead gets exactly one wrap-up steer", async () => {
+    let now = 0;
+    const { supervisor, store } = newSupervisor({
+      now: () => now,
+      config: cfg({
+        supervise: { staffing_watchdog_s: 120, worker_checkpoint_s: 0, worker_hard_cap_s: 3600, wrap_up_lead_s: 300 },
+      }),
+    });
+    const run = seedRun(store, makeRun({ state: "implementing" }));
+    await supervisor.admit(run.id);
+    await tick();
+    now = 3600_000 - 300_000; // exactly at the lead edge
+    await supervisor.checkpointLiveRuns();
+    await supervisor.checkpointLiveRuns();
+
+    expect(created[0]!.nudges).toHaveLength(1);
+    expect(created[0]!.nudges[0]).toContain("wall-clock backstop");
+  });
+
+  test("a worker outside the wrap-up lead gets no steer", async () => {
+    let now = 0;
+    const { supervisor, store } = newSupervisor({
+      now: () => now,
+      config: cfg({
+        supervise: { staffing_watchdog_s: 120, worker_checkpoint_s: 0, worker_hard_cap_s: 3600, wrap_up_lead_s: 300 },
+      }),
+    });
+    const run = seedRun(store, makeRun({ state: "implementing" }));
+    await supervisor.admit(run.id);
+    await tick();
+    now = 1000; // nowhere near the cap
+    await supervisor.checkpointLiveRuns();
+
+    expect(created[0]!.nudges).toHaveLength(0);
+  });
+});
+
 describe("crash resume", () => {
   test("a ledgered session is resumed instead of restarting the run from scratch", async () => {
     const dir = scratch();
@@ -1604,12 +1717,31 @@ describe("a worker killed by the daemon's own shutdown", () => {
   // 2026-08-14: a worker Beckett itself killed on the wall-clock backstop was parked as "failure
   // class `crash`", which reads as a harness segfault and cost two investigations in one day. A
   // cap kill must name the cap and the knob, and must never say crash.
-  test("a wall-clock cap kill parks as a timeout naming worker_hard_cap_s, never as a crash", async () => {
-    const { supervisor, store } = newSupervisor();
+  //
+  // B7: a cap kill no longer parks on the FIRST kill — it auto-resumes from its own WIP
+  // (`runs.auto_resume_max`, default 2). This test pins `auto_resume_max: 1` so a SECOND cap kill
+  // exhausts it and the wording assertions below apply to the exhaustion park, not the first kill.
+  test("a wall-clock cap kill auto-resumes once, then parks as a timeout naming worker_hard_cap_s, never as a crash", async () => {
+    const { supervisor, store } = newSupervisor({
+      config: cfg({ runs: { max_live: 3, review_cycles_max: 2, budget_usd_per_run: 0, auto_resume_max: 1 } }),
+    });
     const run = seedRun(store, makeRun({ state: "implementing" }));
     await supervisor.admit(run.id);
     await tick();
     created[0]!.finish("error", GREETING, null, { timedOut: true, errorClass: "timeout" });
+    await settle();
+
+    // First cap kill: auto-resumed, not parked.
+    const resumed = store.get(run.id)!;
+    expect(resumed.state).toBe("implementing");
+    expect(resumed.autoResumes).toBe(1);
+    expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(2);
+    expect(spawnCalls[1]!.steering?.join("\n")).toContain("wall-clock backstop");
+    // And the work survives: WIP is committed BEFORE the resume, on every death path.
+    expect(commitCalls.some((c) => c.message.includes("WIP"))).toBe(true);
+
+    // Second cap kill: auto-resume budget (1) is exhausted — parks.
+    created[1]!.finish("error", GREETING, null, { timedOut: true, errorClass: "timeout" });
     await settle();
 
     const parked = store.get(run.id)!;
@@ -1623,22 +1755,28 @@ describe("a worker killed by the daemon's own shutdown", () => {
     expect(parked.error).not.toContain("failure class");
     expect(parked.error).not.toContain("died before it reported a verdict");
     expect(parked.error).not.toContain("I'll start by inspecting");
-
-    // And the work survives: WIP is committed BEFORE the park, on every death path.
-    expect(commitCalls.some((c) => c.message.includes("WIP"))).toBe(true);
   });
 
   // `finishReview` does NOT commit WIP (a dead reviewer wrote nothing worth saving), so the park
   // message must not promise a WIP commit there — a park note that lies is how we got here.
   test("a capped REVIEWER names the cap but never claims a WIP commit it did not make", async () => {
-    const { supervisor, store } = newSupervisor();
+    const { supervisor, store } = newSupervisor({
+      config: cfg({ runs: { max_live: 3, review_cycles_max: 2, budget_usd_per_run: 0, auto_resume_max: 1 } }),
+    });
     const run = seedRun(store, makeRun({ state: "reviewing" }));
     await supervisor.admit(run.id);
     await tick();
     created[0]!.finish("error", GREETING, null, { timedOut: true, errorClass: "timeout" });
     await settle();
+    // First cap kill auto-resumes into review, never claiming a WIP commit it never made.
+    expect(store.get(run.id)!.state).toBe("reviewing");
+    expect(commitCalls.some((c) => c.message.includes("WIP"))).toBe(false);
+
+    created[1]!.finish("error", GREETING, null, { timedOut: true, errorClass: "timeout" });
+    await settle();
 
     const parked = store.get(run.id)!;
+    expect(parked.state).toBe("parked");
     expect(parked.error).toContain("worker_hard_cap_s");
     expect(parked.error).not.toContain("WIP");
     expect(commitCalls.some((c) => c.message.includes("WIP"))).toBe(false);

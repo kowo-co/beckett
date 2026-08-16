@@ -868,6 +868,10 @@ export interface Config {
      *  crash loses at most one window of on-disk WIP, not the whole session. 0 disables. Default
      *  120 (OPS-125). */
     worker_checkpoint_s: number;
+    /** Soft edge on the wall-clock cap (B7): this many seconds before `worker_hard_cap_s` fires,
+     *  every live worker still running gets exactly one steer telling it to wrap up and emit its
+     *  done-signal now. 0 disables the warning. Default 300 (5min). */
+    wrap_up_lead_s: number;
     /** Runtime-awareness threshold (s): a worker tool call running at least this long gets a
      *  PostToolUse additionalContext notice so the model can route around slow operations.
      *  0 disables the hook. Default 30. */
@@ -963,6 +967,9 @@ export interface Config {
     review_cycles_max: number;
     /** Implement passes an out-of-turn worker gets before the supervisor parks it. Default 2. */
     continuation_max: number;
+    /** Auto-resumes a death BECKETT ITSELF caused (wall-clock cap) gets before the supervisor
+     *  stops re-spawning it and parks it (B7, `./run/death.ts`). Default 2. */
+    auto_resume_max: number;
     /** Per-run USD ceiling; 0 falls back to `[budget] per_task_usd_cap`. Default 0. */
     budget_usd_per_run: number;
     /**

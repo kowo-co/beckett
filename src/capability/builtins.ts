@@ -283,6 +283,11 @@ export const configFragments = {
       // work instead of the whole session. Best-effort and side-effect-free beyond the worktree
       // (never touches the publish outbox). 0 disables periodic checkpointing.
       worker_checkpoint_s: nonNegInt.default(120),
+      // Soft edge on the wall-clock cap (B7): this many seconds BEFORE `worker_hard_cap_s` fires,
+      // every live worker still running gets exactly one steer telling it to wrap up and emit its
+      // done-signal now instead of being cut off mid-thought. 0 disables the warning (the cap
+      // still fires; the worker just gets no notice). Default 300 (5min).
+      wrap_up_lead_s: nonNegInt.default(300),
       // Runtime-awareness threshold (seconds) for the per-worker PostToolUse hook
       // (src/hooks/runtime-awareness.ts): a tool call that runs at least this long gets a
       // one-line additionalContext notice injected so the model can route around slow
@@ -366,6 +371,11 @@ export const configFragments = {
       // supervisor stops re-spawning it and parks for a human. Independent of `review_cycles_max`
       // — running out of turn is not a review failure.
       continuation_max: posInt.default(2),
+      // Auto-resumes a death BECKETT ITSELF caused (wall-clock cap, or a drain kill with the
+      // daemon still up) gets before the supervisor stops re-spawning it and parks for a human.
+      // Independent of `continuation_max`/`review_cycles_max` — the worker didn't run out of turn
+      // or fail review, beckett just stopped the clock on it (B7, `./death.ts`).
+      auto_resume_max: posInt.default(2),
       // Per-run USD ceiling, summed from the spend ledger over rows at/after the run's createdAt.
       // 0 (the default) falls back to `[budget] per_task_usd_cap`, so an install that already
       // tuned the task cap keeps exactly that behavior.

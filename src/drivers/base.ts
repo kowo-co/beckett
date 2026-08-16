@@ -69,6 +69,8 @@ export abstract class BaseDriver {
 
   protected workerState: WorkerState = "spawning";
   protected finished = false;
+  /** The reason the last {@link latch} call fired — diagnostic only, nothing reads it downstream. */
+  protected lastLatch: "terminal-event" | "process-exit" | "wall-clock-cap" | "turn-boundary" | null = null;
   /**
    * Set the instant {@link tickWatchdog} trips the wall-clock backstop — BEFORE the kill goes out,
    * and never cleared. Once the cap has ruled, {@link emit} lets NOTHING but the cap's own
@@ -362,7 +364,7 @@ export abstract class BaseDriver {
         errorClass: classifyHarnessFailure(message) ?? "crash",
         ts,
       });
-      this.finished = true;
+      this.latch("process-exit");
       this.setState("failed");
     }
     this.onExitCleanup();
@@ -373,6 +375,17 @@ export abstract class BaseDriver {
   /** Hook after exit bookkeeping, before the descendant sweep (claude fails pending nudges). */
   protected onExitCleanup(): void {}
 
+  /**
+   * The ONE way a driver closes itself (B7 — was 12 hand-copied `this.finished` assignments
+   * across four files, one per subclass's own terminal path). `cause` is diagnostic only — it
+   * names WHY this worker is done, for a reader of {@link lastLatch}, never behavior; `capTripped`
+   * and {@link emit}'s guard against it are unchanged by this refactor.
+   */
+  protected latch(cause: "terminal-event" | "process-exit" | "wall-clock-cap" | "turn-boundary"): void {
+    this.finished = true;
+    this.lastLatch = cause;
+  }
+
   protected tickWatchdog(): void {
     if (!this.spec || this.finished || this.isTerminal()) return;
     const capS = hardCapSeconds(this.config);
@@ -381,7 +394,7 @@ export abstract class BaseDriver {
       // Trip the generous backstop cap. Set both flags up-front so this can't re-enter, so
       // onProcessExit (fired by the kill below) won't also synthesize a finish, and so the
       // harness's own dying words can't outrank the cap's verdict (see {@link emit}).
-      this.finished = true;
+      this.latch("wall-clock-cap");
       this.capTripped = true;
       void this.timeOut(capS, totalS);
       return;

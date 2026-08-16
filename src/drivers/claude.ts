@@ -661,7 +661,7 @@ export class ClaudeDriver extends BaseDriver implements HarnessDriver {
       errorClass,
       ts,
     });
-    this.finished = true;
+    this.latch("terminal-event");
     this.stopWatchdog();
     this.closeChildStdin();
 

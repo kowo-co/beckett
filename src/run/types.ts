@@ -151,6 +151,8 @@ export interface Run {
   reviewCycles: number;
   /** Implement passes spent on "ran out of turn" (`done:false, blocker:null`). */
   continuations: number;
+  /** Auto-resumes spent on a death BECKETT ITSELF caused (wall-clock cap). See `./death.ts` (B7). */
+  autoResumes: number;
   prUrl: string | null;
   error: string | null;
   /** How a `done` run got published — null until it does (see {@link PublishRecord}). */
