@@ -30,13 +30,15 @@ describe("dead-exports census", () => {
     if (result.testOnly > baseline.testOnly) grew.push(`testOnly: ${baseline.testOnly} -> ${result.testOnly}`);
 
     if (grew.length > 0) {
-      const newEntries = result.entries
-        .filter((e) => e.status === "dead" || e.status === "test-only")
-        .map((e) => `  ${e.status.padEnd(9)} ${e.file}::${e.symbol}`)
-        .join("\n");
+      const CAP = 25;
+      const shown = result.entries.slice(0, CAP).map((e) => `  ${e.status.padEnd(9)} ${e.file}::${e.symbol}`);
+      const remainder = result.entries.length - shown.length;
+      const dump =
+        shown.join("\n") +
+        (remainder > 0 ? `\n  ... and ${remainder} more — run \`bun run dead-exports --json\` for the full list` : "");
       throw new Error(
         `dead-exports census grew past the committed baseline (${grew.join(", ")}).\n` +
-          `Current entries:\n${newEntries}\n\n` +
+          `Entries (dead + test-only, capped at ${CAP}):\n${dump}\n\n` +
           "Run `bun run dead-exports`, delete or un-export the symbol, or `--write-baseline` if the growth is deliberate.",
       );
     }
@@ -122,8 +124,8 @@ describe("dead-exports census", () => {
       );
       const result = census(root);
       expect(result.entries.find((e) => e.symbol === "ignoredDead")).toBeUndefined();
-      // It is still counted in the totals, just not listed.
-      expect(result.dead).toBe(1);
+      // Suppressed entirely: neither listed nor counted in the totals.
+      expect(result.dead).toBe(0);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

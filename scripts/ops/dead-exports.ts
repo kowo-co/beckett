@@ -29,8 +29,9 @@
  * verified by hand, not auto-applied.
  */
 
-import { readdirSync, readFileSync, existsSync } from "node:fs";
+import { readdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
+import { execSync } from "node:child_process";
 
 export interface DeadExport {
   file: string; // repo-relative, e.g. "src/worker/worktree.ts"
@@ -65,14 +66,14 @@ function isTestFile(relPath: string): boolean {
   return relPath.endsWith(".test.ts") || relPath.endsWith(".test.tsx");
 }
 
-function walkTsFiles(absRoot: string, repoRoot: string, out: string[]): void {
+function walkTsFiles(absRoot: string, out: string[]): void {
   if (!existsSync(absRoot)) return;
   const entries = readdirSync(absRoot, { withFileTypes: true });
   for (const entry of entries) {
     if (SKIP_DIR_NAMES.has(entry.name)) continue;
     const abs = join(absRoot, entry.name);
     if (entry.isDirectory()) {
-      walkTsFiles(abs, repoRoot, out);
+      walkTsFiles(abs, out);
     } else if (entry.isFile() && (abs.endsWith(".ts") || abs.endsWith(".tsx"))) {
       out.push(abs);
     }
@@ -82,7 +83,7 @@ function walkTsFiles(absRoot: string, repoRoot: string, out: string[]): void {
 function collectFiles(repoRoot: string, roots: string[]): string[] {
   const out: string[] = [];
   for (const root of roots) {
-    walkTsFiles(join(repoRoot, root), repoRoot, out);
+    walkTsFiles(join(repoRoot, root), out);
   }
   return out;
 }
@@ -139,11 +140,6 @@ function resolveSpecifier(fromAbsFile: string, specifier: string): string | null
   let target = resolve(base, specifier);
   if (!target.endsWith(".ts") && !target.endsWith(".tsx")) target += ".ts";
   return target;
-}
-
-interface ScanState {
-  declByFile: Map<string, ExportDecl[]>; // absFile -> declared exports
-  starReexports: Map<string, string[]>; // absFile -> [target absFile,...] via `export * from`
 }
 
 function scanExportsInFile(absFile: string, source: string, lines: string[]): ExportDecl[] {
@@ -313,7 +309,6 @@ export function census(repoRoot: string): CensusResult {
 
   // key = `${absFile}::${symbol}` -> usage kind
   const usedByAny = new Set<string>();
-  const usedByTestOnly = new Set<string>(); // symbols seen ONLY from test importers so far
   const usedByNonTest = new Set<string>();
   const namespaceUsedFiles = new Set<string>(); // absFile whose every export counts as used
   const namespaceUsedFilesNonTest = new Set<string>();
@@ -331,8 +326,7 @@ export function census(repoRoot: string): CensusResult {
       }
       const key = `${ref.targetAbsFile}::${ref.symbol}`;
       usedByAny.add(key);
-      if (isTest) usedByTestOnly.add(key);
-      else usedByNonTest.add(key);
+      if (!isTest) usedByNonTest.add(key);
     }
   }
 
@@ -370,17 +364,14 @@ export function census(repoRoot: string): CensusResult {
         live++;
         continue;
       }
+      if (ignore.has(ignoreKey)) continue; // suppressed entirely: not counted, not listed
       if (hasAnyUse) {
         testOnly++;
-        if (!ignore.has(ignoreKey)) {
-          entries.push({ file: relPath, symbol: decl.symbol, kind: decl.kind, status: "test-only" });
-        }
+        entries.push({ file: relPath, symbol: decl.symbol, kind: decl.kind, status: "test-only" });
         continue;
       }
       dead++;
-      if (!ignore.has(ignoreKey)) {
-        entries.push({ file: relPath, symbol: decl.symbol, kind: decl.kind, status: "dead" });
-      }
+      entries.push({ file: relPath, symbol: decl.symbol, kind: decl.kind, status: "dead" });
     }
   }
 
@@ -391,7 +382,6 @@ export function census(repoRoot: string): CensusResult {
 
 function gitSha(repoRoot: string): string {
   try {
-    const { execSync } = require("node:child_process") as typeof import("node:child_process");
     return execSync("git rev-parse HEAD", { cwd: repoRoot }).toString().trim();
   } catch {
     return "unknown";
@@ -414,7 +404,7 @@ if (import.meta.main) {
   if (writeBaseline) {
     const baseline = { dead: result.dead, testOnly: result.testOnly, generatedFrom: gitSha(repoRoot) };
     const path = join(repoRoot, "scripts/ops/dead-exports.baseline.json");
-    require("node:fs").writeFileSync(path, JSON.stringify(baseline, null, 2) + "\n");
+    writeFileSync(path, JSON.stringify(baseline, null, 2) + "\n");
     console.log(`wrote ${path}: ${JSON.stringify(baseline)}`);
   } else if (asJson) {
     console.log(JSON.stringify(result, null, 2));
