@@ -946,7 +946,7 @@ describe("stage flow", () => {
 // declaration — every test in `describe("admission")`/`describe("stage flow")` above deploys no
 // `deps`/`files` and needed no change for this feature to land, which is the acceptance gate.
 describe("dependency edges (overhaul B9)", () => {
-  test("a run whose files overlap an in-flight sibling stays queued and records the auto dep", async () => {
+  test("a run whose files overlap an in-flight sibling stays queued without persisting an auto dep", async () => {
     const { supervisor, store } = newSupervisor();
     const sib = seedRun(store, makeRun({ id: "run-sib", slug: "sib", files: ["src/run/"] }));
     const dep = seedRun(store, makeRun({ id: "run-dep", slug: "dep", files: ["src/run/supervisor.ts"] }));
@@ -980,6 +980,30 @@ describe("dependency edges (overhaul B9)", () => {
     expect(store.get(sib.id)!.state).toBe("done");
     expect(spawnCalls.map((c) => c.itemId)).toContain(dep.id);
     expect(store.get(dep.id)!.state).not.toBe("queued");
+  });
+
+  test("a run auto-blocked by an overlapping sibling still composes that sibling's branch once it's done", async () => {
+    // The auto edge is never persisted into `run.deps` (finding 22), but `prepareWorktree` must
+    // still see it — otherwise a dependent admitted right after its overlap sibling finishes
+    // would cut its worktree from stale `origin/main` instead of the sibling's committed edits
+    // to the exact files they share.
+    const { supervisor, store } = newSupervisor({ publish: true });
+    const sib = seedRun(store, makeRun({ id: "run-sib", slug: "sib", files: ["src/run/"] }));
+    const dep = seedRun(store, makeRun({ id: "run-dep", slug: "dep", files: ["src/run/supervisor.ts"] }));
+    await supervisor.admit(sib.id);
+    await tick();
+    await supervisor.admit(dep.id);
+    await tick();
+    expect(store.get(dep.id)!.deps).toEqual([]); // no persisted edge
+
+    created[0]!.finish("success", "implemented", doneSignal(true));
+    await settle();
+    created[1]!.finish("success", "looks good", doneSignal(true));
+    await settle();
+    expect(store.get(sib.id)!.state).toBe("done");
+    const depWorktreeCall = createWorktreeCalls.find((c) => c.branch === store.get(dep.id)!.branch);
+    expect(depWorktreeCall?.baseRef).toBe(store.get(sib.id)!.branch);
+    expect(mergeCalls).toHaveLength(0);
   });
 
   test("a dependent run's worktree is cut from its dep's branch, not origin/main", async () => {

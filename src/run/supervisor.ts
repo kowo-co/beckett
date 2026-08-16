@@ -111,7 +111,7 @@ import {
 import { blockerFromDoneSignal, makeBlocker, renderBlocker, stopsTheRun } from "./blocker.ts";
 import { blockerFromDeath, classifyDeath } from "./death.ts";
 import { assembleProof } from "./proof.ts";
-import { readiness } from "./deps.ts";
+import { pathOverlaps, readiness } from "./deps.ts";
 import { isFrontendChange } from "../preview/index.ts";
 import type { CapabilityInventory, CapabilityTarget } from "../capability/preflight.ts";
 import { renderCapabilityGaps } from "../capability/preflight.ts";
@@ -742,12 +742,13 @@ export class RunSupervisor {
     // finish handler, and the flag exists only to keep the watchdog from reading a mid-finish run
     // as wedged. `isStaffed` is the real dedup.
     if (this.isStaffed(run.id)) return;
-    if (run.state === "queued") {
+    if (this.pausedFor(run)) {
+      // `pausedFor` already re-reads the pause file to decide; read it once more here only for
+      // `held.reason` in the trace — this is the ONE place that gate is evaluated, so a future
+      // clause added to `pausedFor` cannot diverge from what `spawnGuarded` enforces.
       const held = readPause(this.pauseFile);
-      if (held) {
-        this.trace(run, `${stage}:staff`, "held", `beckett is paused — not admitting new work (${held.reason ?? "no reason given"})`);
-        return;
-      }
+      this.trace(run, `${stage}:staff`, "held", `beckett is paused — not admitting new work (${held?.reason ?? "no reason given"})`);
+      return;
     }
     const budget = this.budgetCeiling(run);
     if (budget.over) {
@@ -1171,13 +1172,20 @@ export class RunSupervisor {
   /**
    * Allocate (or reuse) the run's worktree on its own branch.
    *
-   * B9: on FIRST allocation only (`firstTouch`), a run with declared `deps` is cut from its
-   * newest — the last entry of `run.deps` — dep's branch instead of `origin/main`, and every
-   * OTHER dep branch is merged in via `mergeBranchesIntoWorktree`. By the time a run reaches
-   * here every dep is `done` (the admission gate in `dependenciesReady` would not have released
-   * it otherwise), so this never blocks on a dep that hasn't landed. A defensive fallback to
-   * `origin/main` covers the (should-never-happen) case of a dep going missing between admission
-   * and spawn.
+   * B9: on FIRST allocation only (`firstTouch`), a run with declared `deps` — plus any DONE
+   * sibling on the same repo whose `files` overlap `run.files` (the auto edge `readiness()`
+   * checks at admission, but never persists into `run.deps` — see `dependenciesReady`) — is cut
+   * from the newest such run's branch instead of `origin/main`, and every OTHER one is merged in
+   * via `mergeBranchesIntoWorktree`. The auto sibling is recomputed here directly (not read back
+   * from the admission gate) because by the time a `done` sibling unblocks its dependent,
+   * `readiness()` no longer reports it as an overlap at all — a `done` state falls outside
+   * `IN_FLIGHT_FOR_OVERLAP` — so there is no admission-time snapshot left to read; only a `done`
+   * sibling has committed edits worth composing, so recomputing directly here is also simpler
+   * than threading admission-time state through to spawn. By the time a run reaches here every
+   * `run.deps` entry is `done` (the admission gate would not have released it otherwise); a
+   * `failed` auto sibling (finding 22 — a failed sibling no longer blocks) is simply not `done`,
+   * so it is never a composition candidate. A defensive fallback to `origin/main` covers the
+   * (should-never-happen) case of a dep going missing between admission and spawn.
    */
   private async prepareWorktree(run: Run, repoRoot: string): Promise<string> {
     const firstTouch = !run.workspace;
@@ -1187,10 +1195,25 @@ export class RunSupervisor {
     const depRuns = firstTouch ? run.deps.map((id) => this.store.get(id)) : [];
     const doneDeps = depRuns.filter((d): d is Run => d !== null && d.state === "done");
     // A cancelled dep clears readiness (deps.ts) but has nothing to compose — build on the done
-    // ones only, and only when every dep has settled one way or the other.
+    // ones only, and only when every explicit dep has settled one way or the other.
     const settled = depRuns.every((d) => d === null || d.state === "done" || d.state === "cancelled");
-    let composeReady = run.deps.length > 0 && settled && doneDeps.length > 0;
-    const baseRef = composeReady ? doneDeps[doneDeps.length - 1]!.branch : "origin/main";
+    const autoDoneSiblings =
+      firstTouch && run.files.length > 0
+        ? this.store
+            .list()
+            .filter(
+              (sib) =>
+                sib.id !== run.id &&
+                sib.repo === run.repo &&
+                sib.state === "done" &&
+                !run.deps.includes(sib.id) &&
+                pathOverlaps(run.files, sib.files).length > 0,
+            )
+            .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+        : [];
+    const composable = [...doneDeps, ...autoDoneSiblings];
+    let composeReady = settled && composable.length > 0;
+    const baseRef = composeReady ? composable[composable.length - 1]!.branch : "origin/main";
     try {
       await this.git.createWorktree({ repoRoot, workspace, branch: run.branch, baseRef, reuseIfExists: true });
     } catch (err) {
@@ -1202,10 +1225,10 @@ export class RunSupervisor {
       composeReady = false;
       await this.git.createWorktree({ repoRoot, workspace, branch: run.branch, baseRef: "origin/main", reuseIfExists: true });
     }
-    if (composeReady && doneDeps.length > 1) {
+    if (composeReady && composable.length > 1) {
       await this.git.mergeBranchesIntoWorktree(
         workspace,
-        doneDeps.slice(0, -1).map((d) => d.branch),
+        composable.slice(0, -1).map((d) => d.branch),
       );
     }
     this.trace(run, "worktree", "passed", workspace);
