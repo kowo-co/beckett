@@ -1952,8 +1952,15 @@ export class RunSupervisor {
       return "unknown";
     }
     if (opts.answer !== undefined) {
-      if (run.state !== "awaiting_input") return "not-awaiting";
-      return this.answerRun(run, opts.answer);
+      if (run.state === "awaiting_input") return this.answerRun(run, opts.answer);
+      // The question already timed out and the run parked with a `question` blocker — its remedy
+      // says `--answer`, so an answer arriving late must still work: it is a resume whose steering
+      // is the answer, in the same words the live path uses.
+      if (run.state === "parked" && run.blocker?.class === "question") {
+        opts = { note: `Answer to your question ("${run.blocker.detail}"): ${opts.answer}` };
+      } else {
+        return "not-awaiting";
+      }
     }
     if (run.state !== "parked") return "not-parked";
     if (

@@ -1826,6 +1826,20 @@ describe("elicitation (overhaul B8)", () => {
     expect(parked.blocker?.class).toBe("question");
     expect(parked.blocker?.actor).toBe("human");
     expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(1); // no resume spawn
+
+    // The blocker's remedy says `--answer`; a late answer must still resume the run (as a
+    // resume whose steering is the answer), not bounce with "not-awaiting".
+    const late = await supervisor.resume(run.id, { answer: "GitHub" });
+    expect(late).toBe("resumed");
+    await settle();
+    const resumed = store.get(run.id)!;
+    expect(resumed.state).toBe("implementing");
+    expect(resumed.blocker).toBeNull();
+    const implSpawns = spawnCalls.filter((c) => c.stage === "implement");
+    expect(implSpawns).toHaveLength(2);
+    const steer = implSpawns[1]!.steering?.join("\n") ?? "";
+    expect(steer).toContain("Answer to your question");
+    expect(steer).toContain("GitHub");
   });
 
   test("a run left awaiting_input by a dead daemon re-arms its timer at boot", async () => {
