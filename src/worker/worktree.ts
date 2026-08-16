@@ -20,7 +20,6 @@
 import { mkdirSync, existsSync, appendFileSync, readFileSync, writeFileSync, chmodSync, realpathSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { log } from "../log.ts";
-import { parseNumstat } from "../git/diff.ts";
 
 const logger = log.child("worktree");
 
@@ -118,16 +117,6 @@ export interface DiffStat {
 export interface CommitResult {
   committed: boolean;
   sha: string | null;
-}
-
-/** Result of merging a worker branch back into an integration branch (Spec 04 INTEGRATE). */
-export interface MergeResult {
-  clean: boolean;
-  conflicted: boolean;
-  conflictFiles: string[];
-  mergeSha: string | null;
-  stdout: string;
-  stderr: string;
 }
 
 /** Optional author identity for commits (Beckett's identity, Spec 07). */
@@ -452,15 +441,6 @@ export async function readDiff(workspace: string, baseRef?: string): Promise<str
   return r.stdout;
 }
 
-/** Diff size for a worktree via `git diff --numstat` (Spec 02 §7.4). Binary files counted as 1 file, 0/0. */
-export async function readDiffStat(workspace: string, baseRef?: string): Promise<DiffStat> {
-  await runGit(["add", "-A", "-N"], workspace);
-  const r = await runGit(["diff", "--numstat", baseRef ?? "HEAD"], workspace);
-  const acc = { added: 0, removed: 0, paths: new Set<string>() };
-  parseNumstat(r.stdout, acc);
-  return { files: acc.paths.size, added: acc.added, removed: acc.removed };
-}
-
 // =======================================================================================
 // Commit + merge (INTEGRATE; Spec 04 / Spec 01 §3 step 9)
 // =======================================================================================
@@ -506,61 +486,6 @@ export async function commitWorktree(
   const sha = (await git(["rev-parse", "HEAD"], workspace)).trim();
   logger.info("worktree committed", { workspace, sha });
   return { committed: true, sha };
-}
-
-/**
- * Merge a worker branch into an integration branch (INTEGRATE = real `git merge`, Spec 04).
- * Runs in the main repo working dir. On conflict, leaves the merge in progress is undesirable
- * for a daemon, so we `--no-commit`-detect by attempting a normal merge and aborting on conflict,
- * returning the conflicted file list for an integration worker to resolve (Spec 01 §3 step 9).
- */
-export async function mergeBranch(
-  repoRoot: string,
-  branch: string,
-  into: string,
-  author?: CommitAuthor,
-): Promise<MergeResult> {
-  // Ensure the integration branch exists and is checked out in the main repo dir.
-  const intoExists = (await runGit(["rev-parse", "--verify", "--quiet", into], repoRoot)).code === 0;
-  if (intoExists) {
-    await git(["checkout", into], repoRoot);
-  } else {
-    await git(["checkout", "-b", into], repoRoot);
-  }
-
-  const env: Record<string, string> = author
-    ? {
-        GIT_AUTHOR_NAME: author.name,
-        GIT_AUTHOR_EMAIL: author.email,
-        GIT_COMMITTER_NAME: author.name,
-        GIT_COMMITTER_EMAIL: author.email,
-      }
-    : {};
-  const proc = Bun.spawn(["git", "merge", "--no-ff", "-m", `integrate ${branch}`, branch], {
-    cwd: repoRoot,
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env, ...env },
-  });
-  const stdout = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
-  const code = await proc.exited;
-
-  if (code === 0) {
-    const mergeSha = (await git(["rev-parse", "HEAD"], repoRoot)).trim();
-    logger.info("merge clean", { branch, into, mergeSha });
-    return { clean: true, conflicted: false, conflictFiles: [], mergeSha, stdout, stderr };
-  }
-
-  // Conflict (or other failure). Collect conflicted files, then abort so the repo is left clean.
-  const conflictFiles = (await runGit(["diff", "--name-only", "--diff-filter=U"], repoRoot)).stdout
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-  await runGit(["merge", "--abort"], repoRoot);
-  logger.warn("merge conflict", { branch, into, conflictFiles });
-  return { clean: false, conflicted: conflictFiles.length > 0, conflictFiles, mergeSha: null, stdout, stderr };
 }
 
 /** Convenience: does this repo path have any commits yet (a valid HEAD)? */
