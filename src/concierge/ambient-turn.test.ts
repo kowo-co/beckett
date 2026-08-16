@@ -201,6 +201,7 @@ test("candidate reply auto-posts plainly (no native reply) and frames the transc
   expect(frame).toContain("SYSTEM (ambient candidate");
   expect(frame).toContain("wish it just gave me a csv");
   expect(frame).toContain("Triage says: feature-wish (confidence 0.90)");
+  expect(frame).not.toContain("Do not deploy any work yet");
 });
 
 test("the cold candidate frame carries the classifier's addressee read + the decline backstop", async () => {
@@ -559,6 +560,7 @@ test("engaged continuation sends typing (the 'seen you' signal) and flushes on t
   expect(frame).toContain("reply to beckett");
   expect(frame).toContain("makes a continuation plausible, not certain");
   expect(frame).toContain("Never reply merely because you spoke earlier");
+  expect(frame).not.toContain("Do not deploy any work yet");
   expect(h.typings.length).toBe(typingsAfterMention + 1);
   expect(h.typings[h.typings.length - 1]).toBe(CHAN);
   expect(h.posts).toHaveLength(2);

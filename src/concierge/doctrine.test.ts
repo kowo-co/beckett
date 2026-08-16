@@ -56,4 +56,16 @@ describe("concierge doctrine instance rendering", () => {
 
     expect(rendered).toBe("publish to acme-labs/demo");
   });
+
+  test("the prompt corpus tells ambient turns to act, not to hold", () => {
+    // An ambient turn used to be told, every time, that it may not deploy work — a smaller
+    // license than every other turn gets. §Volition now governs ambient turns too (overhaul
+    // B-P9): the doctrine bullet says so, and the old literal is gone from both the corpus and
+    // the private frame-builder in index.ts (reading the source is the only way to pin a
+    // private function's text without exporting it).
+    expect(promptCorpus).toContain("An overheard turn is not a smaller license");
+    expect(promptCorpus).not.toContain("Do not deploy any work yet");
+    const conciergeIndexSrc = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
+    expect(conciergeIndexSrc).not.toContain("Do not deploy any work yet");
+  });
 });
