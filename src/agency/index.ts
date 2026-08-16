@@ -990,8 +990,16 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
       // FIRST network action of the publish, unconditional: the run's finished work leaves this
       // machine before the trunk integration that might fail. A publish that dies after this line
       // still has `beckett/<ticket>` durable on GitHub instead of stranded on one disk.
-      await this.pushRunBranch(p.sourceDir, repo, branch);
+      //
+      // EXCEPT when the trunk doesn't exist yet (an owned repo with zero refs pushed): GitHub sets a
+      // branchless repo's default branch to whichever ref lands FIRST. Pushing the run branch first
+      // would make `beckett/<ticket>` the repo's new default — the exact kowo-co/babble
+      // misconfiguration `resolveTrunk` above exists to refuse — and every later publish onto this
+      // repo would hit that refusal permanently. In that one case, push the trunk first so it claims
+      // the default, then push the run branch for durability.
+      if (trunk.exists) await this.pushRunBranch(p.sourceDir, repo, branch);
       const sha = await this.pushToBranch(p.sourceDir, repo, trunk.base, p.baseSha, commitSummary);
+      if (!trunk.exists) await this.pushRunBranch(p.sourceDir, repo, branch);
       this.opts.logger.info("published via push to branch", { repo, branch: trunk.base });
       // #246: `prUrl` is what the Discord publish announcement renders — it must point at something
       // real (the landed commit), never the bare repo root. `url` stays the repo root for callers
@@ -1080,10 +1088,27 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
    * (case 2), run before trunk is ever touched: once it lands, the run's finished work exists on
    * GitHub even if the trunk integration that follows fails and the run parks. A repo we cannot push
    * to has nothing else to try, so a failure here propagates as-is.
+   *
+   * A retry after a partially-successful earlier attempt can hit this as a non-fast-forward reject
+   * (the branch already carries this run's earlier tip; local HEAD moved since, e.g. through a rebase
+   * fallback). That is durability already satisfied, not a failure — swallow it rather than let it
+   * wedge every retry at this step before the trunk push is ever reattempted. Any other push failure
+   * (auth, network, repo gone) still propagates.
    */
   private async pushRunBranch(cwd: string, repo: string, branch: string): Promise<void> {
-    await this.gitPush(cwd, repo, "HEAD", branch);
-    this.opts.logger.info("run branch pushed (durability)", { repo, branch });
+    try {
+      await this.gitPush(cwd, repo, "HEAD", branch);
+      this.opts.logger.info("run branch pushed (durability)", { repo, branch });
+    } catch (err) {
+      if (/non-fast-forward|fetch first|\[rejected\]/i.test(String(err))) {
+        this.opts.logger.warn("run branch already on the remote at an earlier tip - durability satisfied, continuing", {
+          repo,
+          branch,
+        });
+        return;
+      }
+      throw err;
+    }
   }
 
   /**
