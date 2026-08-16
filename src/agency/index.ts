@@ -978,14 +978,21 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
     // holds the ticket for a human (never a silent false-done).
     if (await this.repoExists(repo)) {
       await this.setPublicSafe(repo);
-      // A ticket cast onto a non-main integration branch (the V5 `v5-daemon` funnel — OPS-185) ships
-      // THERE and must never advance `main`. When an integration target is present we push to it and
-      // only it (integrating that branch's own tip first, exactly like the default path integrates
-      // main's), so no fetch/rebase/push ever references the default branch. Absent ⇒ the default
-      // branch, byte-for-byte as before.
-      const target = this.integrationTarget(p.targetBranch);
-      const sha = await this.pushToBranch(p.sourceDir, repo, target ?? undefined, p.baseSha, p.commitMessage ?? title);
-      this.opts.logger.info("published via push to branch", { repo, branch: target ?? "(default)" });
+      const commitSummary = p.commitMessage ?? title;
+      // Finish the commit BEFORE anything leaves the machine: the branch pushed below (durability)
+      // must already be the run's single finished commit, not a scratch draft a later squash still
+      // has to touch (#261/#246 stay correct under the new push-first order).
+      await this.commitStrayWorkingTree(p.sourceDir, commitSummary);
+      await this.squashLocalCommits(p.sourceDir, p.baseSha, commitSummary);
+      // Resolve + validate the trunk before any network action — refuses outright if the repo's
+      // default branch is itself a sibling run's branch (`kowo-co/babble`, 2026-08-14).
+      const trunk = await this.resolveTrunk(repo, p.targetBranch);
+      // FIRST network action of the publish, unconditional: the run's finished work leaves this
+      // machine before the trunk integration that might fail. A publish that dies after this line
+      // still has `beckett/<ticket>` durable on GitHub instead of stranded on one disk.
+      await this.pushRunBranch(p.sourceDir, repo, branch);
+      const sha = await this.pushToBranch(p.sourceDir, repo, trunk.base, p.baseSha, commitSummary);
+      this.opts.logger.info("published via push to branch", { repo, branch: trunk.base });
       // #246: `prUrl` is what the Discord publish announcement renders — it must point at something
       // real (the landed commit), never the bare repo root. `url` stays the repo root for callers
       // that want the repo itself (e.g. the task registry's publication link).
@@ -1044,32 +1051,66 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
   }
 
   /**
-   * Push the checkout's HEAD to a repo we own, on a branch, WITHOUT a non-fast-forward reject: fetch
-   * that branch's remote tip and rebase local commits onto it first, then push. `branch` defaults to
-   * the repo's default branch (`main` for the self-repo) — a ticket cast onto a non-main integration
-   * branch passes it explicitly so `main` is never fetched, rebased, or pushed. If the remote branch
-   * doesn't exist yet (a just-created/empty repo, or a fresh integration branch) the fetch fails
-   * harmlessly and the push creates it. On a rebase conflict, a dependent worker may be carrying a
-   * predecessor's pre-squash commits. In that one shape, retry its recorded *own* base..tip delta as
-   * one patch over a freshly fetched remote tip; this avoids replaying already-landed checkpoints.
+   * The remote trunk an owned-repo publish (case 2) integrates onto, resolved and validated BEFORE
+   * any push. `base` is the explicit integration target when the ticket carries one (OPS-185 — the
+   * repo default is never even consulted in that case), else the repo's actual default branch.
    *
-   * Before any of that, {@link squashLocalCommits} collapses `workerBaseSha..HEAD` into ONE commit
-   * carrying `summary` (#246): a feature run's worktree accumulates one raw `checkpoint (wk_…)`
-   * commit per worker turn, and those must never land on the shared branch — squash-on-publish is
-   * the option ro picked over reserving direct-push for release bumps only. Returns the pushed
-   * commit's sha (for a real, non-root `prUrl`), or `undefined` if it couldn't be determined.
+   * Refuses outright when the resolved base looks like a run's own branch
+   * (`beckett/run-<date>-<slug>`): a repo whose GitHub-side default branch has been left pointed at a
+   * sibling run's branch turns every subsequent publish into a rebase onto that run's private work
+   * instead of trunk (`kowo-co/babble`, 2026-08-14) — a misconfiguration only a human can fix, so this
+   * is a permanent failure (`needs a human`), never a retry target.
+   */
+  private async resolveTrunk(repo: string, targetBranch?: string): Promise<{ base: string; exists: boolean }> {
+    const base = this.integrationTarget(targetBranch) ?? (await this.defaultBranch(repo));
+    if (/^beckett\/run-/i.test(base)) {
+      throw new Error(
+        `refusing to publish onto \`${base}\`: that is a run branch, not a trunk — the repo's default ` +
+          `branch is misconfigured (fix it on GitHub with \`gh repo edit ${repo} --default-branch main\`) ` +
+          `— needs a human`,
+      );
+    }
+    const exists = await this.branchExists(repo, base);
+    return { base, exists };
+  }
+
+  /**
+   * Push the run's OWN branch (`beckett/<ticket>`) to `repo` as a pure durability checkpoint —
+   * unconditional, no rebase, no force. This is the FIRST network action of an owned-repo publish
+   * (case 2), run before trunk is ever touched: once it lands, the run's finished work exists on
+   * GitHub even if the trunk integration that follows fails and the run parks. A repo we cannot push
+   * to has nothing else to try, so a failure here propagates as-is.
+   */
+  private async pushRunBranch(cwd: string, repo: string, branch: string): Promise<void> {
+    await this.gitPush(cwd, repo, "HEAD", branch);
+    this.opts.logger.info("run branch pushed (durability)", { repo, branch });
+  }
+
+  /**
+   * Push the checkout's HEAD to a repo we own, on `base`, WITHOUT a non-fast-forward reject: fetch
+   * that branch's remote tip and rebase local commits onto it first, then push. `base` is resolved
+   * and validated by {@link resolveTrunk} before this is called — a ticket cast onto a non-main
+   * integration branch passes ITS resolved base so `main` is never fetched, rebased, or pushed. If
+   * the remote branch doesn't exist yet (a just-created/empty repo, or a fresh integration branch)
+   * the fetch fails harmlessly and the push creates it. On a rebase conflict, a dependent worker may
+   * be carrying a predecessor's pre-squash commits. In that one shape, retry its recorded *own*
+   * base..tip delta as one patch over a freshly fetched remote tip; this avoids replaying
+   * already-landed checkpoints.
+   *
+   * The checkout's finished commit — {@link commitStrayWorkingTree} + {@link squashLocalCommits} —
+   * is the caller's job now (case 2 runs them once, before the branch push, so the branch pushed for
+   * durability is already the finished single commit); this only re-touches history on the conflict
+   * fallback below. Returns the pushed commit's sha (for a real, non-root `prUrl`), or `undefined` if
+   * it couldn't be determined.
    */
   private async pushToBranch(
     cwd: string,
     repo: string,
-    branch?: string,
+    base: string,
     workerBaseSha?: string,
     summary?: string,
   ): Promise<string | undefined> {
-    const base = branch ?? await this.defaultBranch(repo);
     const url = `${this.gitHost()}/${repo}.git`;
-    await this.commitStrayWorkingTree(cwd, summary);
-    await this.squashLocalCommits(cwd, workerBaseSha, summary);
     const fetch = await this.runner(["git", "fetch", url, base], { cwd, env: this.gitEnv() });
     if (fetch.code === 0) {
       const rebase = await this.runner(["git", "rebase", "FETCH_HEAD"], { cwd, env: this.gitEnv() });
