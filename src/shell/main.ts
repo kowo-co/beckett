@@ -52,6 +52,7 @@ import type { BrowserRuntime } from "../browser/runtime.ts";
 import type { BrowserAgent } from "../browser/agent.ts";
 import { defaultKeychainReader } from "../secret/keychain-read.ts";
 import { defaultKeychainStore } from "../secret/keychain.ts";
+import { createCapabilityPreflight } from "../capability/preflight.ts";
 import { GitHubCli, githubAuth, githubConfigured, loadIdentity } from "../agency/index.ts";
 import { resolveProjectOwner } from "../github/owner.ts";
 import { LiveAgentRegistry } from "../agent/registry.ts";
@@ -315,6 +316,17 @@ async function boot(): Promise<BootedSystem> {
     logger: logger.child("task-sync"),
   });
 
+  // The capability preflight's browser-lane probe (overhaul B10). `browserExtension` is
+  // constructed AFTER the supervisor (its lifecycle callbacks close over the concierge), so this
+  // is a late-bound closure: null until the extension exists, and reads as healthy while it does
+  // — a run's admission must never treat "not built yet" as "the lane is down".
+  let browserLaneHealth: (() => { ok: boolean; detail: string }) | null = null;
+  const capabilityPreflight = createCapabilityPreflight({
+    ...(githubAuth(identity).app ? { github: githubAuth(identity).app! } : {}),
+    keychain: defaultKeychainReader,
+    browserLane: () => browserLaneHealth?.() ?? { ok: true, detail: "unknown" },
+  });
+
   // The RUN engine — `beckett task deploy` files a Run, and this drives it implement → review →
   // publish → done. It is the daemon's ONLY staffing loop.
   const runSupervisor = createRunSupervisor({
@@ -327,6 +339,7 @@ async function boot(): Promise<BootedSystem> {
     // point at two different repositories.
     resolveRepoRoot: (run) => join(PROJECTS_ROOT, runProjectSlug(run)),
     publishRepo,
+    capabilityPreflight,
     progress: concierge.progressSink(),
     dispatchEventsPath: join(paths.eventsDir, "dispatch.jsonl"),
     dispatchLiveSink: (event) => {
@@ -485,6 +498,15 @@ async function boot(): Promise<BootedSystem> {
     onOutcome: (run) => concierge.notifyBrowserOutcome(run),
   })({ config, paths, logger });
   extensions.register(browserExtension);
+  // Backfills the capability preflight's late-bound probe (declared above the supervisor,
+  // before this extension existed) now that `lifecycle.health` is reachable. The browser
+  // module's own `health()` is synchronous (`src/capability/modules/browser.ts`) even though the
+  // generic `ExtensionLifecycle` contract allows an async one — cast rather than widen the
+  // preflight's dep type to a Promise it never actually returns here.
+  browserLaneHealth = () => {
+    const h = browserExtension.lifecycle?.health?.() as { ok: boolean; detail?: string } | undefined;
+    return h ? { ok: h.ok, detail: h.detail ?? "" } : { ok: true, detail: "unknown" };
+  };
   // Phase 3 — the quick organ (the no-ticket lane) rides the extension lifecycle: init
   // constructs the runner (the quick-dir mkdir + artifact-retention sweep boot always did),
   // stop kills straggler runs on the teardown sweep — which runs BEFORE concierge.stop(), so
