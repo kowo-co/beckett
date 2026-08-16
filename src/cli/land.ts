@@ -3,7 +3,7 @@
  * =======================================================================================
  * One engine for "get these commits onto `main`" when `main` refuses a direct push. Branch
  * protection on `kowo-co/beckett` requires a pull request and the `check` status check, so a
- * `git push origin main` — from a person, from `beckett finish`, or from the deploy script —
+ * `git push origin main` — from a person or from `beckett finish` —
  * cannot land anything: GitHub answers `GH006: Protected branch update failed`. The only path that
  * works is push a branch → open (or reuse) its PR → wait for CI → merge, and that path is here,
  * ONCE, rather than re-implemented per caller.
@@ -12,9 +12,9 @@
  * (the run engine's owned-repo publish). `deploy/deploy-prod.sh` no longer lands through here —
  * since 2026-08-12 the release bump pushes straight at main under the App's ruleset bypass.
  * Both push through {@link GitHubCli} — the single credential boundary, which hands `git` the
- * GitHub App installation token as `x-access-token` — because the deploy re-execs itself into a
- * `systemd --user --scope` that has NO ambient git credentials, and a bare `git push` there dies
- * with `could not read Username for 'https://github.com'`.
+ * GitHub App installation token as `x-access-token`, because neither `beckett finish` nor the run
+ * engine's publish has ambient git credentials for kowo-co: a bare `git push` there dies with
+ * `could not read Username for 'https://github.com'`.
  *
  * Everything that can stop a landing is NAMED here: {@link gateMerge} turns GitHub's collapsed
  * `mergeStateStatus` into a specific cause plus the command that clears it, and every message
