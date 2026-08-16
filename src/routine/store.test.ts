@@ -148,6 +148,83 @@ test("a routine already on \"x-account\" is left alone by the migration", async 
   if (routine!.action.kind === "browser") expect(routine!.action.credsEntry).toBe("x-account");
 });
 
+// ── boot-time drop of routines carrying a retired action kind (overhaul P16: rip-dream) ──────
+
+const RETIRED_DREAM_ROW = {
+  id: "nightly-dream",
+  name: "nightly dream pass",
+  builtin: true,
+  enabled: true,
+  action: { kind: "dream" },
+  schedule: { cadence: { kind: "daily" }, window: { start: "03:00", end: "05:00", tz: "America/Los_Angeles" } },
+  state: { periodKey: null, chosenFireAt: null, lastFiredPeriodKey: null, lastFiredAt: null },
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+};
+
+test("a routines.json carrying a retired dream action loads, drops the row, and records it in removedBuiltins", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-routines-retired-"));
+  dirs.push(dir);
+  const path = join(dir, "routines.json");
+  writeFileSync(path, JSON.stringify({ version: 1, removedBuiltins: [], routines: [RETIRED_DREAM_ROW] }));
+
+  const store = new RoutineStore(path, { seedBuiltins: false });
+  const routines = await store.list();
+  expect(routines.find((r) => r.id === "nightly-dream")).toBeUndefined();
+
+  const onDisk = JSON.parse(readFileSync(path, "utf8"));
+  expect(onDisk.routines.find((r: { id: string }) => r.id === "nightly-dream")).toBeUndefined();
+  expect(onDisk.removedBuiltins).toContain("nightly-dream");
+});
+
+test("a dropped retired routine does not reseed on the next load", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-routines-retired-noreseed-"));
+  dirs.push(dir);
+  const path = join(dir, "routines.json");
+  writeFileSync(path, JSON.stringify({ version: 1, removedBuiltins: [], routines: [RETIRED_DREAM_ROW] }));
+
+  const first = new RoutineStore(path, { seedBuiltins: false });
+  await first.list(); // drops + writes back
+
+  const second = new RoutineStore(path, { seedBuiltins: false });
+  const routines = await second.list();
+  expect(routines.find((r) => r.id === "nightly-dream")).toBeUndefined();
+  const onDisk = JSON.parse(readFileSync(path, "utf8"));
+  expect(onDisk.removedBuiltins).toContain("nightly-dream");
+});
+
+test("a registry with no retired rows is not rewritten", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-routines-retired-noop-"));
+  dirs.push(dir);
+  const path = join(dir, "routines.json");
+  writeFileSync(
+    path,
+    JSON.stringify({
+      version: 1,
+      removedBuiltins: [],
+      routines: [
+        {
+          id: "hourly-check",
+          name: "hourly check",
+          builtin: false,
+          enabled: true,
+          action: { kind: "browser", task: "check the thing" },
+          schedule: { cadence: { kind: "daily" }, window: { start: "09:00", end: "09:40", tz: "America/New_York" } },
+          state: { periodKey: null, chosenFireAt: null, lastFiredPeriodKey: null, lastFiredAt: null },
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    }),
+  );
+  const before = readFileSync(path, "utf8");
+
+  const store = new RoutineStore(path, { seedBuiltins: false });
+  await store.list();
+
+  expect(readFileSync(path, "utf8")).toBe(before);
+});
+
 test("definitions and chosen fire time persist and restore across a new store", async () => {
   const { path, store } = makeStore();
   await store.setState("daily-x-shitpost", {

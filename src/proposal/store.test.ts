@@ -190,7 +190,7 @@ test("the block shows the claim, never the rationale, and caps hard", () => {
   const claimLines = block.split("\n").filter((l) => l.startsWith("- "));
   expect(claimLines.length).toBe(PROPOSALS_BLOCK_MAX_LINES);
   expect(block).toContain("+4 more");
-  expect(block).toContain("beckett dream proposals ls");
+  expect(block).toContain("beckett proposals ls");
 });
 
 test("an unreadable proposals directory never keeps a session from launching", () => {

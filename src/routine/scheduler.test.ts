@@ -46,24 +46,20 @@ test("fires exactly once per period (idempotent) and delegates dispatch off-proc
   await scheduler.tick();
   await scheduler.tick();
 
-  // Three dispatches total across three ticks — the shitpost, the nightly dream (issue #36; with
-  // rng 0 its 03:00 PT roll is long past by 12:30 PT), AND the proactive rot sweep (issue #79; its
-  // 09:00–10:30 PT window is also past by 12:30 PT), each exactly once per period.
-  expect(calls.length).toBe(3);
+  // Two dispatches total across three ticks — the shitpost (with rng 0 its 12:00 PT roll is
+  // already due at 12:30 PT) AND the proactive rot sweep (issue #79; its 09:00–10:30 PT window
+  // is past by 12:30 PT), each exactly once per period.
+  expect(calls.length).toBe(2);
   expect(calls.map((c) => c.routineId).sort()).toEqual([
     "daily-x-shitpost",
-    "nightly-dream",
     "proactive-sweep",
   ]);
   const shitpost = calls.find((c) => c.routineId === "daily-x-shitpost")!;
   expect(shitpost.credsEntry).toBe("x-account");
-  const dream = calls.find((c) => c.routineId === "nightly-dream")!;
-  expect(dream.lane).toBe("self");
-  expect(dream.dream).toBe(true);
   // The period is claimed on disk, for both.
   const state = (await store.get("daily-x-shitpost"))!.state;
   expect(state.lastFiredPeriodKey).toBe("2026-07-20");
-  expect((await store.get("nightly-dream"))!.state.lastFiredPeriodKey).toBe("2026-07-20");
+  expect((await store.get("proactive-sweep"))!.state.lastFiredPeriodKey).toBe("2026-07-20");
 });
 
 test("a restart inside the window neither re-rolls the chosen time nor double-fires", async () => {
@@ -93,8 +89,8 @@ test("a restart inside the window neither re-rolls the chosen time nor double-fi
 
   const state = (await restarted.get("daily-x-shitpost"))!.state;
   expect(state.chosenFireAt).toBe("2026-07-20T19:20:00.000Z"); // NOT re-rolled
-  // Exactly one shitpost fire (the seeded nightly-dream also catches up its own period here —
-  // its 03:00–05:00 PT window is past at 12:30 PT — but never affects this routine's state).
+  // Exactly one shitpost fire (the seeded proactive-sweep also catches up its own period here —
+  // its 09:00–10:30 PT window is past at 12:30 PT — but never affects this routine's state).
   expect(calls.filter((c) => c.routineId === "daily-x-shitpost").length).toBe(1);
 
   // A second restart after firing must not double-fire.
@@ -134,7 +130,7 @@ test("a deferred fire does NOT claim its period, and the next tick fires it (doc
   // The period is deliberately UNCLAIMED — that is what makes the retry possible.
   expect((await store.get("daily-x-shitpost"))!.state.lastFiredPeriodKey).toBeNull();
   // …and every other routine claimed and fired as always: deferral is per-fire, not a pause.
-  expect((await store.get("nightly-dream"))!.state.lastFiredPeriodKey).toBe("2026-07-20");
+  expect((await store.get("proactive-sweep"))!.state.lastFiredPeriodKey).toBe("2026-07-20");
 
   busy = false;
   await scheduler.tick();
@@ -160,10 +156,10 @@ test("does not fire before the chosen time", async () => {
   });
   stoppers.push(scheduler.stop);
   await scheduler.tick();
-  // The pre-rolled 12:45 PT shitpost must NOT fire at 12:30 (only the seeded routines whose windows
-  // are long past — nightly-dream and the proactive sweep — dispatch this tick).
+  // The pre-rolled 12:45 PT shitpost must NOT fire at 12:30 (only the seeded proactive sweep,
+  // whose window is long past, dispatches this tick).
   expect(calls.filter((c) => c.routineId === "daily-x-shitpost").length).toBe(0);
-  expect(calls.every((c) => c.routineId === "nightly-dream" || c.routineId === "proactive-sweep")).toBe(true);
+  expect(calls.every((c) => c.routineId === "proactive-sweep")).toBe(true);
 });
 
 test("fireNow dry-run returns the plan WITHOUT dispatching (no live post)", async () => {

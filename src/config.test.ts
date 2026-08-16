@@ -87,6 +87,14 @@ describe("retired sections", () => {
     expect(config.concurrency.max_workers).toBe(4);
   });
 
+  test("a config.toml still carrying [dream] loads with a deprecation warning instead of failing strict validation", () => {
+    const config = loadToml(
+      `[dream]\noutput_token_budget = 1000\nmodel = "opus"\n\n[concurrency]\nmax_workers = 4\n`,
+    );
+    expect(config).not.toHaveProperty("dream");
+    expect(config.concurrency.max_workers).toBe(4);
+  });
+
   test("stripping is announced once per retired section, and silent when there are none", () => {
     const seen: string[] = [];
     const warn = (message: string) => void seen.push(message);

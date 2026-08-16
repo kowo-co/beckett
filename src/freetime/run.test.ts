@@ -14,7 +14,7 @@ import { buildPaths } from "../paths.ts";
 import type { Config, Logger, Paths } from "../types.ts";
 import { createMemory } from "../memory/index.ts";
 import { SELF_AUDIENCE } from "../memory/search.ts";
-import { localDate } from "../dream/run.ts";
+import { localDate } from "./model.ts";
 import { isAttempt, readSpendLedger } from "../spend.ts";
 import {
   FREE_TIME_DENIED_PERMISSIONS,

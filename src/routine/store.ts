@@ -35,6 +35,38 @@ const LOCK_ATTEMPTS = 200;
  *  has never had an entry by this name. Anything still carrying it is healed on the next load. */
 const DEAD_X_CREDS_ENTRY = "x.com";
 
+/** Action kinds retired from the schema. A row still carrying one is dropped before the strict
+ *  parse, so a live routines.json written by an older build cannot make the daemon refuse to boot. */
+const RETIRED_ACTION_KINDS = ["dream"] as const;
+
+/**
+ * Strip retired-kind routines from RAW json before `RoutineRegistrySchema.parse` sees it —
+ * running it after the parse is too late, the parse is what throws. Returns the sanitized raw
+ * plus the ids it dropped (recorded in `removedBuiltins` on write-back so a dropped built-in
+ * never reseeds).
+ */
+function dropRetiredRoutines(raw: unknown): { raw: unknown; dropped: string[] } {
+  if (raw === null || typeof raw !== "object" || !Array.isArray((raw as Record<string, unknown>).routines)) {
+    return { raw, dropped: [] };
+  }
+  const root = raw as Record<string, unknown>;
+  const routines = root.routines as unknown[];
+  const dropped: string[] = [];
+  const kept = routines.filter((r) => {
+    if (r === null || typeof r !== "object") return true;
+    const action = (r as Record<string, unknown>).action;
+    const kind = action && typeof action === "object" ? (action as Record<string, unknown>).kind : undefined;
+    if (typeof kind === "string" && (RETIRED_ACTION_KINDS as readonly string[]).includes(kind)) {
+      const id = (r as Record<string, unknown>).id;
+      dropped.push(typeof id === "string" ? id : "<unknown>");
+      return false;
+    }
+    return true;
+  });
+  if (dropped.length === 0) return { raw, dropped };
+  return { raw: { ...root, routines: kept }, dropped };
+}
+
 export interface RoutineStoreOptions {
   now?: () => Date;
   id?: () => string;
@@ -63,6 +95,8 @@ export class RoutineStore {
   private readonly seedBuiltins: boolean;
   private readonly builtinOverrides: BuiltinRoutineOverrides;
   private readonly logger: Logger;
+  /** Ids of routines dropped by {@link dropRetiredRoutines} on the most recent `read()`. */
+  private droppedRetiredIds: string[] = [];
 
   constructor(path: string, opts: RoutineStoreOptions = {}) {
     this.path = path;
@@ -174,9 +208,15 @@ export class RoutineStore {
   // --- persistence internals (mirrors TaskStore) --------------------------------------------
 
   private read(): RoutineRegistry {
+    this.droppedRetiredIds = [];
     try {
       const raw = readFileSync(this.path, "utf8");
-      return RoutineRegistrySchema.parse(JSON.parse(raw));
+      const { raw: cleaned, dropped } = dropRetiredRoutines(JSON.parse(raw));
+      this.droppedRetiredIds = dropped;
+      for (const id of dropped) {
+        this.logger.info("dropped routine carrying a retired action kind", { routineId: id });
+      }
+      return RoutineRegistrySchema.parse(cleaned);
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === "ENOENT") return structuredClone(EMPTY);
@@ -230,11 +270,16 @@ export class RoutineStore {
     await this.acquireLock();
     try {
       const reg = this.read();
+      let droppedRetired = false;
+      for (const id of this.droppedRetiredIds) {
+        if (!reg.removedBuiltins.includes(id)) reg.removedBuiltins.push(id);
+        droppedRetired = true;
+      }
       const migrated = this.migrateCredsEntry(reg);
       const seeded = this.seed(reg);
       const before = JSON.stringify(reg);
       const result = change(reg);
-      if (migrated || seeded || JSON.stringify(reg) !== before) this.write(reg);
+      if (droppedRetired || migrated || seeded || JSON.stringify(reg) !== before) this.write(reg);
       return result;
     } finally {
       rmSync(this.lockPath, { recursive: true, force: true });

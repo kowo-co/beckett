@@ -67,7 +67,7 @@ disagree.
 | `src/progress/journal.ts` | 240 | **DELETE**, folds into event stream | `store/` — event rows are the journal; Wire renders beats off them |
 | `src/concierge/index.ts` | 7,656 | **DELETE** | `frontdesk/` (600, Haiku seat) + `mind/` (600, Sonnet seat) |
 | `src/routine/` | 2,281 (+1,398 test) + `capability/modules/routines.ts` 1,292 | **DELETE**, doctrine survives | `initiative/` (300) + `trigger`/`trigger_fire` rows — humanized fire times and the 1/hr·3/24h cap become columns, the scheduler/store/rate-limiter do not survive as code ([initiative.md](initiative.md)) |
-| `src/dream/` | 1,663 (+936 test) | **DELETE**, deferred as a feature | — not in the v1 map; if revived it is one `schedule` trigger filing one ordinary job, on the ordinary ledger |
+| `src/dream/` | deleted in the v7 debt sweep (overhaul P16) | — | not in the v1 map; if revived it is one `schedule` trigger filing one ordinary job, on the ordinary ledger |
 | `src/discord/*` | 5,331 (+4,793 test) | **KEEP**, mostly verbatim | `wire/` — gateway, relay, cards, filed-line, thread-attach, hold-and-cancel |
 | `src/drivers/claude.ts` + `base.ts`/`proc.ts` | portion of 3,351 | **DELETE**, replaced natively | `run/` — Agent SDK `query()` sessions replace `claude -p` subprocess driving |
 | `src/drivers/codex.ts`, `src/drivers/pi.ts` + cooldown/failure/preflight-probe | portion of 3,351 (+test) | **DELETE outright** | — casting narrows to claude-family + `run/terra.ts` (200 LOC, opt-in, behind preflight) |
@@ -176,8 +176,9 @@ requires it, and what rolling back looks like at that point.
    nothing calls it, not before.
 
 10. **Arm initiative, one trigger at a time.** Land `trigger`/`trigger_fire`, the ~300-line
-    evaluator, and `beckett initiative`/`why`/`signal`; delete `src/routine/` and `src/dream/`
-    with their tests. Then arm exactly one trigger — `job_stuck`, `posture='ask'` — and leave it
+    evaluator, and `beckett initiative`/`why`/`signal`; delete `src/routine/`
+    with its tests (`src/dream/` is already gone, deleted in the v7 debt sweep). Then arm exactly
+    one trigger — `job_stuck`, `posture='ask'` — and leave it
     there for a week against [initiative.md](initiative.md)'s three-conversation gate: a quiet
     week shows zero attributable tokens in the ledger, a true condition produces exactly one job,
     and `beckett initiative off` mid-fire kills it and survives a restart with the latch intact.

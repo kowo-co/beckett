@@ -14,10 +14,6 @@
  *     path as `daily-x-shitpost`, instead of waiting for the next scheduled lane. The acceptance
  *     vehicle for the `watch` action: it has no `schedule` (see {@link ../routine/types.ts}) and
  *     is driven by its own interval loop ({@link ../routine/watch.ts}), not the fuzz-window one.
- *   - `nightly-dream` (issue #36) — once a night at a random minute in 03:00–05:00 PT, the self
- *     lane spawns the contained dream pass (`beckett dream run`): a budgeted, read-mostly replay
- *     of the day whose outputs are inferences (journal entry + `dream`-namespace memories), never
- *     facts, never doctrine.
  *   - `weekly-free-time` (docs/freetime.md) — once a week in the small hours, one unprompted
  *     session inside a scratch directory on a hard token budget, whose only durable outputs are a
  *     journal entry and create-only `free-time`-namespace memories that seed the next session.
@@ -62,14 +58,6 @@ export const DAILY_SHITPOST_INPUT =
  * Exported so the executor and its tests can name it without restating the string.
  */
 export const WEEKLY_DEPS_UPDATE_ID = "weekly-deps-update";
-
-/**
- * Id of the nightly dream routine (issue #36): once a night, at a random minute inside
- * 03:00–05:00 PT, the self lane spawns the contained `beckett dream run` pass — a budgeted,
- * read-mostly replay of the day whose outputs are inferences, never facts. The engine's
- * per-period idempotency (`lastFiredPeriodKey`) is the once-per-night guard.
- */
-export const NIGHTLY_DREAM_ID = "nightly-dream";
 
 /**
  * Id of the proactive rot-sweep routine (issue #79): ro's ask — "let me open PRs on rot in repos
@@ -171,21 +159,6 @@ export function builtinRoutineDefs(
       },
     },
     {
-      id: NIGHTLY_DREAM_ID,
-      name: "nightly dream pass",
-      builtin: true,
-      enabled: true,
-      // No prompt, no creds, no channel baked in: the pass's shape lives in code
-      // (`beckett dream run`), and channel/requester attribution comes from env at fire time.
-      action: { kind: "dream" },
-      // Deep night PT, fuzzed inside the owner's asked-for window. Daily period key doubles as
-      // the once-per-night guard; a restart mid-window neither re-rolls nor double-fires.
-      schedule: {
-        cadence: { kind: "daily" },
-        window: { start: "03:00", end: "05:00", tz: "America/Los_Angeles" },
-      },
-    },
-    {
       id: PROACTIVE_SWEEP_ID,
       name: "proactive rot sweep",
       builtin: true,
@@ -221,7 +194,7 @@ export function builtinRoutineDefs(
       name: "weekly free time",
       builtin: true,
       enabled: true,
-      // No prompt, no creds, no channel baked in — for the same reason `dream` has none: the
+      // No prompt, no creds, no channel baked in: the
       // session's shape (its walls, its budget, its writeback contract) lives in code under
       // `src/freetime/`, so editing the routine can never widen what free time is allowed to do.
       action: { kind: "free-time" },

@@ -813,9 +813,7 @@ export interface Paths {
   announcedFile: string; // <beckettDir>/announced.txt — last commit SHA announced on restart (changelog)
   presetsFile: string; // <beckettDir>/presets.json — user-defined named cast presets (OPS-110)
   journalDir: string; // <beckettDir>/journal — private per-ticket worker progress journals
-  dreamsDir: string; // <beckettDir>/dreams — nightly dream journal entries (issue #36)
-  proposalsDir: string; // <beckettDir>/proposals — the dream proposal queue (issue #37)
-  spikesDir: string; // <beckettDir>/dreams/spikes — overnight spike records + durable findings (issue #38)
+  proposalsDir: string; // <beckettDir>/proposals — the proposal queue (issue #37)
   workspacesFile: string; // <beckettDir>/workspaces.json — user-opened thread → ticket routing
 }
 
@@ -1146,26 +1144,6 @@ export interface Config {
      *  human must speak. Unlike the per-minute burst cap this is what makes a two-bot exchange
      *  provably END rather than merely slow down; the count resets on any human message. Default 6. */
     peer_max_consecutive_turns: number;
-  };
-  /**
-   * The nightly dream pass (issue #36): a budgeted, read-mostly replay of Beckett's own day on
-   * the self lane. Outputs are INFERENCES, never facts — they land only in the `dream` memory
-   * namespace and the `~/.beckett/dreams` journal, never in doctrine or persona.
-   */
-  dream: {
-    /** Hard ceiling on model OUTPUT tokens per pass. A ceiling, not a target — a quiet day
-     *  should finish far below it. On hitting it the pass stops cleanly and writes a partial
-     *  journal entry marked truncated. Default 150_000. */
-    output_token_budget: number;
-    /** Model for the pass. Empty = the concierge model (a dream is Beckett, not a specialist). */
-    model: string;
-    /** Sub-budget for the overnight spike (issue #38), carved OUT OF `output_token_budget` —
-     *  never in addition to it. The spike gets `min(this, whatever the pass has left)`; a pass
-     *  that already spent its ceiling abandons the spike with a note instead. Default 60_000. */
-    spike_output_token_budget: number;
-    /** Repo the spike's throwaway worktree is cut from. Empty = `<projects>/beckett`
-     *  (Beckett's own project checkout — the loops a dream can pair are Beckett's own). */
-    spike_repo: string;
   };
   /**
    * Free time (docs/freetime.md): one weekly, budgeted, unprompted session in a scratch
