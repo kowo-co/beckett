@@ -1088,6 +1088,7 @@ export class RunSupervisor {
   private async continueImplement(run: Run, summary: string): Promise<void> {
     const n = run.continuations + 1;
     const cap = this.config.runs?.continuation_max ?? 2;
+    this.trace(run, "implement:verdict", "bounced", `worker ran out of turn — continuation ${n}/${cap}`);
     await this.patchRun(run.id, { continuations: n, error: null });
     if (n >= cap) {
       const parked = this.store.get(run.id) ?? run;

@@ -80,7 +80,7 @@ function parseDoneBlocker(value: unknown): DoneBlocker | null | undefined {
   if (typeof o.class !== "string" || !DONE_BLOCKER_CLASSES.has(o.class as DoneBlockerClass)) return undefined;
   if (typeof o.detail !== "string") return undefined;
   if (typeof o.remedy !== "string") return undefined;
-  if (o.defaultAnswer !== null && typeof o.defaultAnswer !== "string") return undefined;
+  if (o.defaultAnswer !== undefined && o.defaultAnswer !== null && typeof o.defaultAnswer !== "string") return undefined;
   return {
     class: o.class as DoneBlockerClass,
     detail: o.detail,

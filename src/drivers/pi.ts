@@ -655,7 +655,7 @@ export class PiDriver extends OneShotDriver implements HarnessDriver {
       return;
     }
 
-    // A completed run (no pending steering) IS success; the done-signal's own status drives the
+    // A completed run (no pending steering) IS success; the done-signal's own `done` drives the
     // dispatcher's pass/fail verdict downstream.
     this.emit({
       kind: "finished",

@@ -369,6 +369,22 @@ describe("parseDoneSignal", () => {
     expect(signal).toBeNull();
   });
 
+  test("a blocker with no defaultAnswer key reads as null", () => {
+    const signal = parseDoneSignal({
+      done: false,
+      summary: "stuck",
+      filesChanged: [],
+      checksRun: null,
+      blocker: { class: "credential", detail: "needs a token", remedy: "ask jason for the key" },
+    });
+    expect(signal).toEqual({
+      done: false,
+      summary: "stuck",
+      filesChanged: [],
+      blocker: { class: "credential", detail: "needs a token", remedy: "ask jason for the key", defaultAnswer: null },
+    });
+  });
+
   test("the legacy {status:'complete'} shape no longer parses", () => {
     const signal = parseDoneSignal({
       status: "complete",

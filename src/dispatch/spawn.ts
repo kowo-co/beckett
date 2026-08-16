@@ -63,7 +63,7 @@ export interface WorkerResult {
   status: "success" | "error";
   /** A short human summary (done-signal `summary`, else the last assistant text). */
   summary: string;
-  /** The raw structured done-signal (`{ status, summary, filesChanged, ... }`), if any. */
+  /** The raw structured done-signal (`{ done, summary, filesChanged, blocker, ... }`), if any. */
   structured: unknown | null;
   /**
    * True when this run ended because it tripped the generous backstop wall-clock cap (the driver's
