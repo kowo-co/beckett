@@ -728,6 +728,15 @@ export class RunSupervisor {
     }
   }
 
+  /**
+   * True when `run` is `queued` and an operator hold (`beckett pause`) is in effect. Shared by
+   * `spawnGuarded` (which refuses to admit new work while held) and the staffing watchdog's skip
+   * list (which must forget the run's wedge clock instead of treating the hold as a stall).
+   */
+  private pausedFor(run: Run): boolean {
+    return run.state === "queued" && readPause(this.pauseFile) !== null;
+  }
+
   /** Spawn immediately if a slot is free, else enqueue for {@link pump}. */
   private spawnGuarded(run: Run, stage: RunStage): void {
     // `finishing` is deliberately NOT consulted here: the stage-advance call comes FROM inside a
@@ -2491,7 +2500,9 @@ export class RunSupervisor {
           this.isPending(run.id) ||
           this.finishing.has(run.id) ||
           (this.publishOutbox?.has(run.id) ?? false) ||
-          this.budgetCeiling(run).over
+          this.budgetCeiling(run).over ||
+          this.pausedFor(run) ||
+          (run.state === "queued" && !this.dependenciesReady(run))
         ) {
           this.forgetWedgeClock(run.id);
           continue;
