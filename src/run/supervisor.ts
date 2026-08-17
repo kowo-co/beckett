@@ -442,6 +442,15 @@ export class RunSupervisor {
    * whatever the model happened to be saying.
    */
   private shuttingDown = false;
+  /**
+   * Run ids currently inside {@link cancel}, from the moment it commits to cancelling up to its
+   * final state write. A worker's own terminal event can race the kill `cancel()` sends it — the
+   * driver reports before the process actually dies — and land in {@link handleWorkerDeath} or
+   * {@link onWorkerDone} before `cancel()`'s own `patchRun(..., {state:"cancelled"})` has run, at
+   * which point `run.state` still reads whatever it was before the cancel. This set is the signal
+   * that survives that race: a human decision must be respected, not misread as a crash.
+   */
+  private readonly cancelling = new Set<string>();
 
   constructor(deps: RunSupervisorDeps) {
     this.store = deps.store;
@@ -1287,7 +1296,9 @@ export class RunSupervisor {
     // Without this guard a cancelled run would still commit, advance to review, spawn a reviewer,
     // publish, and open a PR: precisely the work the owner just stopped. Deliberately narrower
     // than `RUN_TERMINAL`: `parked` is set BY this path, and re-entering a park is not a race.
-    if (run.state === "cancelled" || run.state === "done" || run.state === "failed") {
+    // `this.cancelling` covers the window BEFORE that patch lands — a worker's own terminal event
+    // can race `cancel()`'s kill and arrive while `run.state` still reads its pre-cancel value.
+    if (run.state === "cancelled" || run.state === "done" || run.state === "failed" || this.cancelling.has(runId)) {
       this.logger.info("ignoring a worker finish on a terminal run", { run: runId, stage, state: run.state });
       this.spendMetaByWorker.delete(handle.id);
       return;
@@ -2185,61 +2196,69 @@ export class RunSupervisor {
     }
     if (run.state === "done" || run.state === "failed" || run.state === "cancelled") return "already-terminal";
 
-    this.trace(run, "cancel", "cancelled", reason);
-    this.staffing.delete(runId); // mid-spawn reservation → doSpawn discards its worker
-    this.publishOutbox?.cancel(runId);
-    this.dropPending(runId);
-    this.unstaffedSince.delete(runId);
-    this.publishStallClock.delete(runId);
-    this.clearAskTimer(runId); // an awaiting_input run's answer timer must not outlive its cancel
-    this.watchdogRestaffed.delete(runId);
-    this.budgetBlocked.delete(runId);
-    this.restartInterrupted.delete(runId);
-    this.resumables.delete(runId);
-    // Cancelled = the work is not wanted; held steering dies with it (the dispatcher's issue #22
-    // posture, kept verbatim).
-    let persist = this.pendingSteers.delete(runId);
-    persist = this.liveLedger.delete(runId) || persist;
-    if (persist) this.persistRuntimeState();
-    this.forgetActivity(runId);
+    // Raised for the whole cancel, so a worker death that races the kill below (see
+    // `this.cancelling`'s doc comment) is classified as a cancel, not a crash, no matter when it
+    // lands relative to the terminal state write at the bottom of this method.
+    this.cancelling.add(runId);
+    try {
+      this.trace(run, "cancel", "cancelled", reason);
+      this.staffing.delete(runId); // mid-spawn reservation → doSpawn discards its worker
+      this.publishOutbox?.cancel(runId);
+      this.dropPending(runId);
+      this.unstaffedSince.delete(runId);
+      this.publishStallClock.delete(runId);
+      this.clearAskTimer(runId); // an awaiting_input run's answer timer must not outlive its cancel
+      this.watchdogRestaffed.delete(runId);
+      this.budgetBlocked.delete(runId);
+      this.restartInterrupted.delete(runId);
+      this.resumables.delete(runId);
+      // Cancelled = the work is not wanted; held steering dies with it (the dispatcher's issue #22
+      // posture, kept verbatim).
+      let persist = this.pendingSteers.delete(runId);
+      persist = this.liveLedger.delete(runId) || persist;
+      if (persist) this.persistRuntimeState();
+      this.forgetActivity(runId);
 
-    const handle = this.workers.get(runId);
-    if (handle) {
-      this.workers.delete(runId);
-      const meta = this.spendMetaByWorker.get(handle.id);
-      this.spendMetaByWorker.delete(handle.id);
-      if (meta) this.recordSpend(run, handle.stage as RunStage, handle, "error", meta, "cancelled");
-      this.logger.warn("run cancelled — aborting worker", { run: runId, workerId: handle.id });
-      try {
-        await handle.abort(reason);
-      } catch (err) {
-        this.logger.warn("worker abort failed during cancel", { run: runId, error: String(err) });
+      const handle = this.workers.get(runId);
+      if (handle) {
+        this.workers.delete(runId);
+        const meta = this.spendMetaByWorker.get(handle.id);
+        this.spendMetaByWorker.delete(handle.id);
+        if (meta) this.recordSpend(run, handle.stage as RunStage, handle, "error", meta, "cancelled");
+        this.logger.warn("run cancelled — aborting worker", { run: runId, workerId: handle.id });
+        try {
+          await handle.abort(reason);
+        } catch (err) {
+          this.logger.warn("worker abort failed during cancel", { run: runId, error: String(err) });
+        }
+        try {
+          await handle.reap();
+        } catch (err) {
+          this.logger.warn("worker reap failed during cancel", { run: runId, error: String(err) });
+        }
       }
-      try {
-        await handle.reap();
-      } catch (err) {
-        this.logger.warn("worker reap failed during cancel", { run: runId, error: String(err) });
+      // Re-read RIGHT before the terminal write: the entry check above ran on a stale snapshot, and
+      // the awaits in between are wide enough for an in-flight publish to finish. A run that reached
+      // its own real terminal while we were reaping keeps that outcome — a late cancel must never
+      // rewrite a shipped run to "cancelled" (the runs.json half of #228: the spatial-3d run
+      // deployed, passed review 14/14, and was still recorded cancelled).
+      const fresh = this.store.get(runId);
+      if (fresh && (fresh.state === "done" || fresh.state === "failed")) {
+        this.logger.warn("cancel arrived after the run reached its own terminal — keeping it", {
+          run: runId,
+          state: fresh.state,
+        });
+        this.pump();
+        return "already-terminal";
       }
-    }
-    // Re-read RIGHT before the terminal write: the entry check above ran on a stale snapshot, and
-    // the awaits in between are wide enough for an in-flight publish to finish. A run that reached
-    // its own real terminal while we were reaping keeps that outcome — a late cancel must never
-    // rewrite a shipped run to "cancelled" (the runs.json half of #228: the spatial-3d run
-    // deployed, passed review 14/14, and was still recorded cancelled).
-    const fresh = this.store.get(runId);
-    if (fresh && (fresh.state === "done" || fresh.state === "failed")) {
-      this.logger.warn("cancel arrived after the run reached its own terminal — keeping it", {
-        run: runId,
-        state: fresh.state,
-      });
+      // A cancel of a `parked` run must not leave its typed blocker behind — `blocker` is documented
+      // non-null iff `state === "parked"`, and a stale one can misroute a later `resume()`.
+      await this.patchRun(runId, { state: "cancelled", error: reason, question: null, blocker: null });
       this.pump();
-      return "already-terminal";
+      return "cancelled";
+    } finally {
+      this.cancelling.delete(runId);
     }
-    // A cancel of a `parked` run must not leave its typed blocker behind — `blocker` is documented
-    // non-null iff `state === "parked"`, and a stale one can misroute a later `resume()`.
-    await this.patchRun(runId, { state: "cancelled", error: reason, question: null, blocker: null });
-    this.pump();
-    return "cancelled";
   }
 
   // ── resuming a held run ──────────────────────────────────────────────────────────────────
@@ -2739,11 +2758,26 @@ export class RunSupervisor {
   private async handleWorkerDeath(run: Run, stage: RunStage, handle: WorkerHandle): Promise<void> {
     if (stage === "implement") await this.commitWip(run, handle);
 
+    const cancelled = this.cancelling.has(run.id) || run.state === "cancelled";
     const kind = classifyDeath({
       timedOut: handle.result?.timedOut ?? false,
       shuttingDown: this.shuttingDown,
+      cancelled,
       errorClass: handle.result?.errorClass,
     });
+
+    // A human cancelled this run — `cancel()` owns the final state write (it may not have landed
+    // yet, hence `this.cancelling` rather than `run.state` alone; see that field's doc comment).
+    // Nothing to park and nothing to owe a retry on: whatever the driver's terminal event says
+    // (it may still claim `errorClass: "crash"` if it raced the kill), a deliberate cancel is
+    // final and must not be second-guessed as machinery failure.
+    if (kind === "cancelled") {
+      this.logger.info("worker death during cancel — the cancel path owns the final state", {
+        run: run.id,
+        stage,
+      });
+      return;
+    }
 
     // Only a self-inflicted death (beckett's own wall-clock cap, or the daemon draining) owes this
     // run another try — the boot requeue re-dispatches ANY parked run with an owed row, no cause

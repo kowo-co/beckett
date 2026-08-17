@@ -41,3 +41,13 @@ test("spawn/rate_limit/crash all map to transient", () => {
     expect(b.class).toBe("transient");
   }
 });
+
+test("a cancelled death is `cancelled`, even carrying a crash errorClass from a raced terminal event", () => {
+  expect(classifyDeath({ timedOut: false, shuttingDown: false, cancelled: true, errorClass: "crash" })).toBe(
+    "cancelled",
+  );
+});
+
+test("cancelled wins over timedOut and shuttingDown — a human's cancel is never re-read as beckett's own stop", () => {
+  expect(classifyDeath({ timedOut: true, shuttingDown: true, cancelled: true })).toBe("cancelled");
+});
