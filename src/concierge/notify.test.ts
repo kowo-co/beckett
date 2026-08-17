@@ -298,6 +298,32 @@ test("a card-less run still gets the plain cancellation ping", async () => {
   expect(asks[0]).toContain("cancelled");
 });
 
+test("a cancel notice never claims a crash, a park, or a resume remedy — a cancel is final", async () => {
+  const { concierge, asks } = harness();
+  // `error` here is the cancel path's default reason string (no `--reason` given) — it must not
+  // be echoed back as though it were a meaningful reason, and none of the parked/crash vocabulary
+  // belongs on a cancel notice regardless of what a raced worker death happened to report.
+  concierge.notify(change("cancelled", { error: "cancelled" }));
+  await new Promise((r) => setTimeout(r, 0));
+  expect(asks.length).toBe(1);
+  expect(asks[0]).toContain("The run was cancelled.");
+  expect(asks[0]).not.toContain("parked");
+  expect(asks[0]).not.toContain("failure class");
+  expect(asks[0]).not.toContain("beckett task resume");
+  // The default reason ("cancelled") is not a real reason — don't repeat it as though it were one.
+  expect(asks[0]!.match(/cancelled/gi)?.length).toBe(1);
+});
+
+test("a cancel notice includes the human's real reason when one was given", async () => {
+  const { concierge, asks } = harness();
+  concierge.notify(change("cancelled", { error: "duplicate of another run" }));
+  await new Promise((r) => setTimeout(r, 0));
+  expect(asks.length).toBe(1);
+  expect(asks[0]).toContain("The run was cancelled.");
+  expect(asks[0]).toContain("duplicate of another run");
+  expect(asks[0]).not.toContain("beckett task resume");
+});
+
 test("drops (does not surface) an update for a run with no origin channel", () => {
   const { concierge, asks } = harness();
   concierge.notify(change("failed", { channelId: null }));

@@ -6071,10 +6071,16 @@ export class Concierge {
               ? `\nIf nobody replies by ${run.question.expiresAt} I will proceed with: ${run.question.defaultAnswer}`
               : ""),
         );
-      case "cancelled":
+      case "cancelled": {
         // A cancellation is a machine state, not shipped/stuck/a question — the card shows it.
         if (this.taskHasCard(run.taskRef)) return null;
-        return this.runUpdateTurn(run, "The run was cancelled.");
+        // A cancel is final and needs no clearing — no remedy command, no "parked" language. The
+        // cancel path (`RunSupervisor#cancel`) writes `run.error` to the `--reason` given, or the
+        // literal string `"cancelled"` when none was — only surface it when it says something a
+        // bare "cancelled" doesn't already say.
+        const reason = run.error && run.error !== "cancelled" ? run.error : null;
+        return this.runUpdateTurn(run, `The run was cancelled.${reason ? `\n\n${reason}` : ""}`);
+      }
       case "implementing":
       case "reviewing": {
         if (this.taskHasCard(run.taskRef)) return null;

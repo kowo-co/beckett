@@ -21,23 +21,34 @@ import type { ErrorClass } from "../types.ts";
 import type { Blocker, BlockerClass } from "./types.ts";
 import { makeBlocker } from "./blocker.ts";
 
-export type DeathKind = "self-inflicted" | "external";
+export type DeathKind = "self-inflicted" | "external" | "cancelled";
 
 export interface DeathInput {
   /** The driver stopped this worker on the wall-clock backstop (`error_wall_clock_cap`). */
   timedOut: boolean;
   /** The daemon itself is draining (`RunSupervisor.stop()` already ran) — this death is a restart. */
   shuttingDown: boolean;
+  /**
+   * A human explicitly cancelled this run (`beckett task cancel`, or the run card's cancel
+   * button) and `RunSupervisor#cancel` is the one tearing this worker down. Checked first, ahead
+   * of every other signal: a cancel is a deliberate human decision, final and not to be second-
+   * guessed by whatever the driver's own terminal event happens to say (it may still report
+   * `errorClass: "crash"` if it races the kill). `cancel()` owns writing the run's final state —
+   * this classification exists only so nothing else parks or auto-resumes on top of it.
+   */
+  cancelled?: boolean;
   /** The driver's own failure taxonomy (issue #17); absent on a clean success path. */
   errorClass?: ErrorClass;
 }
 
 /**
- * `self-inflicted` iff beckett itself stopped the worker — the wall-clock cap, or the daemon
- * going down. Everything else is `external`: the worker died to something outside beckett's
- * control, and re-spawning it verbatim would just re-run into the same wall.
+ * `cancelled` iff a human explicitly cancelled the run — that wins over every other signal.
+ * Otherwise `self-inflicted` iff beckett itself stopped the worker — the wall-clock cap, or the
+ * daemon going down. Everything else is `external`: the worker died to something outside
+ * beckett's control, and re-spawning it verbatim would just re-run into the same wall.
  */
 export function classifyDeath(input: DeathInput): DeathKind {
+  if (input.cancelled) return "cancelled";
   return input.timedOut || input.shuttingDown ? "self-inflicted" : "external";
 }
 

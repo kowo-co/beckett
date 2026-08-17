@@ -282,6 +282,7 @@ function newSupervisor(
     pauseFilePath?: string;
     verifyPr?: (prUrl: string) => Promise<{ resolves: boolean; ci: import("./types.ts").CiVerdict }>;
     frontendProof?: (args: { run: Run; workspace: string; baseRef: string }) => Promise<string | null>;
+    onStateChange?: (event: import("./types.ts").RunStateChange) => void;
   } = {},
 ): Harness {
   const dir = scratch();
@@ -327,6 +328,7 @@ function newSupervisor(
     ...(opts.pauseFilePath ? { pauseFilePath: opts.pauseFilePath } : {}),
     ...(opts.verifyPr ? { verifyPr: opts.verifyPr } : {}),
     ...(opts.frontendProof ? { frontendProof: opts.frontendProof } : {}),
+    ...(opts.onStateChange ? { onStateChange: opts.onStateChange } : {}),
   });
   return { supervisor, store, repos, publishCalls, events };
 }
@@ -3159,6 +3161,36 @@ describe("cancel", () => {
     await settle();
     expect(spawnCalls).toHaveLength(1);
     expect(store.get(run.id)!.state).toBe("cancelled");
+  });
+
+  test("a worker death that races the kill during cancel reports as a cancel, not a crash", async () => {
+    // The real race this guards: the driver's own terminal event (claude's `result` line) can
+    // arrive WHILE `handle.abort()` is tearing the process down, before `abort()` even resolves —
+    // reporting `errorClass: "crash"` for a worker beckett itself just stopped on a human's
+    // explicit cancel. Simulated here by having the fake `abort()` synchronously fire the
+    // worker's own death BEFORE returning, exactly like a same-tick `result` line would.
+    const stateChanges: import("./types.ts").RunStateChange[] = [];
+    const { supervisor, store } = newSupervisor({ onStateChange: (e) => stateChanges.push(e) });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    const worker = created[0]!;
+    worker.abort = async (reason?: string) => {
+      worker.finish("error", "worker terminated", null, { errorClass: "crash" });
+    };
+
+    expect(await supervisor.cancel(run.id, "duplicate of another run")).toBe("cancelled");
+    await settle();
+
+    const cancelled = store.get(run.id)!;
+    expect(cancelled.state).toBe("cancelled");
+    expect(cancelled.error).toBe("duplicate of another run");
+    expect(cancelled.error).not.toContain("failure class");
+    expect(cancelled.error).not.toContain("beckett task resume");
+    // No spurious "parked" transition ever reached the concierge's event feed — the death that
+    // raced the kill was classified as a cancel and dropped, not written to the ledger at all.
+    expect(stateChanges.some((e) => e.to === "parked")).toBe(false);
+    expect(stateChanges.map((e) => e.to)).toContain("cancelled");
   });
 
   test("a queued (never-staffed) run cancels cleanly, and a finished one is refused", async () => {
