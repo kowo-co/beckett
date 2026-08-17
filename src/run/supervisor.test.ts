@@ -3222,6 +3222,147 @@ describe("cancel", () => {
     await settle();
     expect(spawnCalls.map((c) => c.itemId)).toEqual([first.id, second.id]);
   });
+
+  // Cancel must beat crash-recovery under EVERY ordering against a worker's death report — not
+  // just the one order a human happened to observe live. All three below must end the same way:
+  // exactly one run, `cancelled`, no successor, no auto-resume worker.
+  describe("cancel vs. crash-recovery ordering", () => {
+    test("cancel-then-worker-death: a late self-inflicted death report after cancel does not auto-resume", async () => {
+      const { supervisor, store } = newSupervisor();
+      const run = seedRun(store, makeRun({ state: "implementing" }));
+      await supervisor.admit(run.id);
+      await tick();
+      const worker = created[0]!;
+
+      expect(await supervisor.cancel(run.id)).toBe("cancelled");
+      expect(store.get(run.id)!.state).toBe("cancelled");
+
+      // The driver reports the abort as a death AFTER cancel already returned — the exact shape of
+      // a process-exit callback that lands slightly behind `cancel()`'s own terminal write.
+      worker.finish("error", "", null, { timedOut: true, errorClass: "timeout" });
+      await settle();
+
+      const finalRun = store.get(run.id)!;
+      expect(finalRun.state).toBe("cancelled");
+      expect(finalRun.autoResumes).toBe(0);
+      expect(finalRun.blocker).toBeNull();
+      expect(store.list().filter((r) => r.slug === run.slug)).toHaveLength(1);
+      expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(1); // no auto-resume worker
+    });
+
+    test("worker-death-then-cancel: cancelling after an in-process auto-resume still wins, no successor run", async () => {
+      const { supervisor, store } = newSupervisor();
+      const run = seedRun(store, makeRun({ state: "implementing" }));
+      await supervisor.admit(run.id);
+      await tick();
+      // A self-inflicted death (the wall-clock cap) auto-resumes IN-PROCESS — the recovery this
+      // ticket must never weaken for a run nobody cancelled.
+      created[0]!.finish("error", "", null, { timedOut: true, errorClass: "timeout" });
+      await settle();
+      expect(store.get(run.id)!.state).toBe("implementing");
+      expect(store.get(run.id)!.autoResumes).toBe(1);
+      expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(2);
+
+      const resumedWorker = created[1]!;
+      let aborted = false;
+      resumedWorker.abort = async () => void (aborted = true);
+
+      expect(await supervisor.cancel(run.id)).toBe("cancelled");
+      expect(aborted).toBe(true);
+      expect(store.get(run.id)!.state).toBe("cancelled");
+      expect(store.list().filter((r) => r.slug === run.slug)).toHaveLength(1);
+
+      // A late finish from the just-aborted resumed worker still cannot resurrect it.
+      resumedWorker.finish("error", "", null, { timedOut: true, errorClass: "timeout" });
+      await settle();
+      expect(store.get(run.id)!.state).toBe("cancelled");
+      expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(2);
+    });
+
+    test("cancel-while-the-death-handler-is-mid-flight: a cancel landing during commitWip still wins, no misleading restart trace", async () => {
+      let releaseCommit: (() => void) | undefined;
+      const stuck = new Promise<void>((resolve) => {
+        releaseCommit = resolve;
+      });
+      const originalCommit = gitFakes.commitWorktree!;
+      gitFakes.commitWorktree = async (workspace: string, message: string) => {
+        await stuck;
+        return originalCommit(workspace, message);
+      };
+      try {
+        const { supervisor, store, events } = newSupervisor();
+        const run = seedRun(store, makeRun({ state: "implementing" }));
+        await supervisor.admit(run.id);
+        await tick();
+        const worker = created[0]!;
+
+        // A self-inflicted death (the wall-clock cap) — nothing to do with cancel. `handleWorkerDeath`
+        // starts, commits WIP, and is now stuck awaiting that git op (the one await wide enough to
+        // race). This is deliberately the SELF-INFLICTED branch, not an external one: that branch is
+        // what fires the `restart-restaff`/`started` trace BEFORE its own state patch, so it is the
+        // one that would leak a misleading "the daemon restarted" event into the channel if the
+        // re-check inside `handleWorkerDeath` did not run before it.
+        worker.finish("error", "", null, { timedOut: true, errorClass: "timeout" });
+        await tick();
+
+        // A human cancels WHILE that death is still mid-flight.
+        expect(await supervisor.cancel(run.id)).toBe("cancelled");
+        expect(store.get(run.id)!.state).toBe("cancelled");
+
+        // Let the stuck death-handling pass finish.
+        releaseCommit!();
+        await settle();
+
+        const finalRun = store.get(run.id)!;
+        expect(finalRun.state).toBe("cancelled");
+        expect(finalRun.blocker).toBeNull();
+        expect(finalRun.autoResumes).toBe(0); // the resume never actually happened
+        expect(store.list().filter((r) => r.slug === run.slug)).toHaveLength(1);
+        expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(1); // no resume, no successor
+        // No "the daemon restarted — resuming interrupted work" event reached the channel.
+        expect(events.some((e) => e.stage === "restart-restaff" && e.outcome === "started")).toBe(false);
+      } finally {
+        gitFakes.commitWorktree = originalCommit;
+      }
+    });
+
+    test("a cancelled run's stale owed-resume row is not requeued at the next boot", async () => {
+      const dir = scratch();
+      const statePath = join(dir, "run-state.json");
+      const storePath = join(dir, "runs.json");
+      const { supervisor, store } = newSupervisor({
+        runtimeStatePath: statePath,
+        store: new RunStore(storePath),
+        config: cfg({ runs: { max_live: 3, review_cycles_max: 2, budget_usd_per_run: 0, auto_resume_max: 1 } }),
+      });
+      const run = seedRun(store, makeRun({ state: "implementing" }));
+      await supervisor.admit(run.id);
+      await tick();
+      // First self-inflicted death auto-resumes in-process (paying its own owed row). The SECOND
+      // exhausts `auto_resume_max` and parks — that death still writes a fresh owed row (#244) at
+      // the top of `handleWorkerDeath` before the cap check, deliberately left in place so a boot
+      // after a restart gets one more try. This is the exact shape `cancel()` must not leave lying
+      // around for the next boot to misread as still-owed work.
+      created[0]!.finish("error", "", null, { timedOut: true, errorClass: "timeout" });
+      await settle();
+      created[1]!.finish("error", "", null, { timedOut: true, errorClass: "timeout" });
+      await settle();
+      expect(store.get(run.id)!.state).toBe("parked");
+      const owedBefore = JSON.parse(readFileSync(statePath, "utf8")) as { owedResumes?: Record<string, unknown> };
+      expect(Object.keys(owedBefore.owedResumes ?? {})).toContain(run.id);
+
+      expect(await supervisor.cancel(run.id)).toBe("cancelled");
+      const owedAfter = JSON.parse(readFileSync(statePath, "utf8")) as { owedResumes?: Record<string, unknown> };
+      expect(owedAfter.owedResumes ?? {}).toEqual({});
+
+      const rebooted = newSupervisor({ runtimeStatePath: statePath, store: new RunStore(storePath) });
+      await rebooted.supervisor.start();
+      await settle();
+      rebooted.supervisor.stop();
+      expect(rebooted.store.get(run.id)!.state).toBe("cancelled");
+      expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(2); // no boot-requeued 3rd worker
+    });
+  });
 });
 
 // #228: a human takes publishing over by hand after the outbox stops driving it. This is its OWN

@@ -373,6 +373,17 @@ export class RunSupervisor {
 
   /** Live worker handles, keyed by run id. */
   private readonly workers = new Map<string, WorkerHandle>();
+  /**
+   * Run ids with a {@link cancel} in flight right now — set synchronously as the FIRST thing
+   * `cancel()` does, before it ever awaits `handle.abort()`. `cancel()`'s own abort can be what
+   * makes the worker report its death, and that report lands on `onWorkerDone` via a driver
+   * callback whose timing relative to `cancel()`'s own terminal state write is not guaranteed
+   * (a review-stage death has no `commitWip` await standing between them to widen the window).
+   * This flag is the deterministic signal `onWorkerDone`'s entry guard needs instead of racing a
+   * store read against `cancel()`'s own eventual `state: "cancelled"` patch. Cleared once `cancel()`
+   * returns, by which point the store write has landed and the state-based checks take back over.
+   */
+  private readonly cancelling = new Set<string>();
   /** Claim-before-dispatch reservations. The Symbol is the token a `finally` compares against. */
   private readonly staffing = new Map<string, symbol>();
   private readonly pending: PendingRunSpawn[] = [];
@@ -741,6 +752,11 @@ export class RunSupervisor {
 
   /** Spawn immediately if a slot is free, else enqueue for {@link pump}. */
   private spawnGuarded(run: Run, stage: RunStage): void {
+    // A caller racing a concurrent cancel (or any other terminal transition) can still reach here
+    // with a stale `run` object — `doSpawn`'s own post-provision freshness check already catches
+    // this, but only AFTER paying for a worktree + a real worker spawn. Bail here instead: cheaper,
+    // and it means a cancelled run never even starts the provisioning that check would discard.
+    if (RUN_TERMINAL.has(run.state)) return;
     // `finishing` is deliberately NOT consulted here: the stage-advance call comes FROM inside a
     // finish handler, and the flag exists only to keep the watchdog from reading a mid-finish run
     // as wedged. `isStaffed` is the real dedup.
@@ -1282,13 +1298,18 @@ export class RunSupervisor {
     const run = this.store.get(runId);
     if (!run) return;
     // A run that is already finished-or-killed must not be advanced by a late worker callback.
-    // {@link cancel} drops the handle, bills the partial spend, and patches `cancelled` BEFORE it
-    // aborts — an abort the driver may answer with its ordinary terminal event, which lands here.
+    // {@link cancel} aborts + reaps the worker BEFORE it patches `cancelled` (it needs the worker
+    // truly stopped before emitting the terminal event) — so the driver's own terminal callback for
+    // THAT SAME abort can land here before `cancel()`'s state write does. `this.cancelling` is the
+    // deterministic half of this guard: it is set as literally the first thing `cancel()` does,
+    // before it ever awaits the abort, so it is already true for every callback that abort can
+    // possibly trigger, no matter how the awaits interleave. The `run.state` check alone would still
+    // be right most of the time, but only `cancelling` is racy-interleaving-proof.
     // Without this guard a cancelled run would still commit, advance to review, spawn a reviewer,
     // publish, and open a PR: precisely the work the owner just stopped. Deliberately narrower
     // than `RUN_TERMINAL`: `parked` is set BY this path, and re-entering a park is not a race.
-    if (run.state === "cancelled" || run.state === "done" || run.state === "failed") {
-      this.logger.info("ignoring a worker finish on a terminal run", { run: runId, stage, state: run.state });
+    if (run.state === "cancelled" || run.state === "done" || run.state === "failed" || this.cancelling.has(runId)) {
+      this.logger.info("ignoring a worker finish on a terminal (or cancelling) run", { run: runId, stage, state: run.state });
       this.spendMetaByWorker.delete(handle.id);
       return;
     }
@@ -2166,13 +2187,18 @@ export class RunSupervisor {
    * that could ever stop a live worker.
    *
    * Order matters and is the dispatcher's verbatim:
-   *   1. drop the mid-spawn reservation FIRST, so a `doSpawn` racing us discards its own worker at
-   *      its post-spawn reservation check instead of registering one nobody wants;
+   *   0. mark `this.cancelling` FIRST, synchronously, before the worker is even touched — the
+   *      abort below can BE what makes the worker report its own death, and that report must never
+   *      read as a crash (see `this.cancelling`'s field doc and `onWorkerDone`'s entry guard);
+   *   1. drop the mid-spawn reservation, so a `doSpawn` racing us discards its own worker at its
+   *      post-spawn reservation check instead of registering one nobody wants;
    *   2. cancel the durable publish row (a queued retry must not resurrect unwanted work) and the
    *      queued spawn, and drop buffered steering — cancelled work does not get corrected;
    *   3. abort + reap the live worker, billing its partial spend as `cancelled`;
    *   4. only then patch the state, so the `cancelled` event the concierge sees is emitted with
-   *      nothing still running behind it.
+   *      nothing still running behind it. `RunStore.update` itself refuses to move a `cancelled`
+   *      row's state again once this lands — belt-and-suspenders for a death-handling pass that was
+   *      already mid-flight when this cancel arrived (see `handleWorkerDeath`'s own re-check).
    *
    * Returns what actually happened so a caller can say so honestly. `parked` runs ARE cancellable
    * (a park is held-for-a-human, not finished); `done`/`failed`/`cancelled` are not.
@@ -2185,61 +2211,74 @@ export class RunSupervisor {
     }
     if (run.state === "done" || run.state === "failed" || run.state === "cancelled") return "already-terminal";
 
-    this.trace(run, "cancel", "cancelled", reason);
-    this.staffing.delete(runId); // mid-spawn reservation → doSpawn discards its worker
-    this.publishOutbox?.cancel(runId);
-    this.dropPending(runId);
-    this.unstaffedSince.delete(runId);
-    this.publishStallClock.delete(runId);
-    this.clearAskTimer(runId); // an awaiting_input run's answer timer must not outlive its cancel
-    this.watchdogRestaffed.delete(runId);
-    this.budgetBlocked.delete(runId);
-    this.restartInterrupted.delete(runId);
-    this.resumables.delete(runId);
-    // Cancelled = the work is not wanted; held steering dies with it (the dispatcher's issue #22
-    // posture, kept verbatim).
-    let persist = this.pendingSteers.delete(runId);
-    persist = this.liveLedger.delete(runId) || persist;
-    if (persist) this.persistRuntimeState();
-    this.forgetActivity(runId);
+    // Set FIRST, synchronously, before anything below ever awaits — see the field doc. Cleared in
+    // `finally` once this function is done deciding the run's fate one way or the other.
+    this.cancelling.add(runId);
+    try {
+      this.trace(run, "cancel", "cancelled", reason);
+      this.staffing.delete(runId); // mid-spawn reservation → doSpawn discards its worker
+      this.publishOutbox?.cancel(runId);
+      this.dropPending(runId);
+      this.unstaffedSince.delete(runId);
+      this.publishStallClock.delete(runId);
+      this.clearAskTimer(runId); // an awaiting_input run's answer timer must not outlive its cancel
+      this.watchdogRestaffed.delete(runId);
+      this.budgetBlocked.delete(runId);
+      this.restartInterrupted.delete(runId);
+      this.resumables.delete(runId);
+      // A stage owed to this run (#244) is debt for work nobody wants any more — leaving it would
+      // be harmless in the steady state (`requeueOwedStages` already drops anything not `parked`
+      // at boot), but it is exactly the kind of stray recovery state cancel should not leave lying
+      // around, and every other in-process recovery ledger gets the same cleanup right here.
+      const owedRuntimeChanged = this.owedResumes.delete(runId);
+      // Cancelled = the work is not wanted; held steering dies with it (the dispatcher's issue #22
+      // posture, kept verbatim).
+      let persist = this.pendingSteers.delete(runId);
+      persist = this.liveLedger.delete(runId) || persist;
+      persist = owedRuntimeChanged || persist;
+      if (persist) this.persistRuntimeState();
+      this.forgetActivity(runId);
 
-    const handle = this.workers.get(runId);
-    if (handle) {
-      this.workers.delete(runId);
-      const meta = this.spendMetaByWorker.get(handle.id);
-      this.spendMetaByWorker.delete(handle.id);
-      if (meta) this.recordSpend(run, handle.stage as RunStage, handle, "error", meta, "cancelled");
-      this.logger.warn("run cancelled — aborting worker", { run: runId, workerId: handle.id });
-      try {
-        await handle.abort(reason);
-      } catch (err) {
-        this.logger.warn("worker abort failed during cancel", { run: runId, error: String(err) });
+      const handle = this.workers.get(runId);
+      if (handle) {
+        this.workers.delete(runId);
+        const meta = this.spendMetaByWorker.get(handle.id);
+        this.spendMetaByWorker.delete(handle.id);
+        if (meta) this.recordSpend(run, handle.stage as RunStage, handle, "error", meta, "cancelled");
+        this.logger.warn("run cancelled — aborting worker", { run: runId, workerId: handle.id });
+        try {
+          await handle.abort(reason);
+        } catch (err) {
+          this.logger.warn("worker abort failed during cancel", { run: runId, error: String(err) });
+        }
+        try {
+          await handle.reap();
+        } catch (err) {
+          this.logger.warn("worker reap failed during cancel", { run: runId, error: String(err) });
+        }
       }
-      try {
-        await handle.reap();
-      } catch (err) {
-        this.logger.warn("worker reap failed during cancel", { run: runId, error: String(err) });
+      // Re-read RIGHT before the terminal write: the entry check above ran on a stale snapshot, and
+      // the awaits in between are wide enough for an in-flight publish to finish. A run that reached
+      // its own real terminal while we were reaping keeps that outcome — a late cancel must never
+      // rewrite a shipped run to "cancelled" (the runs.json half of #228: the spatial-3d run
+      // deployed, passed review 14/14, and was still recorded cancelled).
+      const fresh = this.store.get(runId);
+      if (fresh && (fresh.state === "done" || fresh.state === "failed")) {
+        this.logger.warn("cancel arrived after the run reached its own terminal — keeping it", {
+          run: runId,
+          state: fresh.state,
+        });
+        this.pump();
+        return "already-terminal";
       }
-    }
-    // Re-read RIGHT before the terminal write: the entry check above ran on a stale snapshot, and
-    // the awaits in between are wide enough for an in-flight publish to finish. A run that reached
-    // its own real terminal while we were reaping keeps that outcome — a late cancel must never
-    // rewrite a shipped run to "cancelled" (the runs.json half of #228: the spatial-3d run
-    // deployed, passed review 14/14, and was still recorded cancelled).
-    const fresh = this.store.get(runId);
-    if (fresh && (fresh.state === "done" || fresh.state === "failed")) {
-      this.logger.warn("cancel arrived after the run reached its own terminal — keeping it", {
-        run: runId,
-        state: fresh.state,
-      });
+      // A cancel of a `parked` run must not leave its typed blocker behind — `blocker` is documented
+      // non-null iff `state === "parked"`, and a stale one can misroute a later `resume()`.
+      await this.patchRun(runId, { state: "cancelled", error: reason, question: null, blocker: null });
       this.pump();
-      return "already-terminal";
+      return "cancelled";
+    } finally {
+      this.cancelling.delete(runId);
     }
-    // A cancel of a `parked` run must not leave its typed blocker behind — `blocker` is documented
-    // non-null iff `state === "parked"`, and a stale one can misroute a later `resume()`.
-    await this.patchRun(runId, { state: "cancelled", error: reason, question: null, blocker: null });
-    this.pump();
-    return "cancelled";
   }
 
   // ── resuming a held run ──────────────────────────────────────────────────────────────────
@@ -2739,6 +2778,17 @@ export class RunSupervisor {
   private async handleWorkerDeath(run: Run, stage: RunStage, handle: WorkerHandle): Promise<void> {
     if (stage === "implement") await this.commitWip(run, handle);
 
+    // `commitWip` is a real git op — the one await wide enough for a `cancel()` to land while this
+    // death is being handled. `onWorkerDone`'s own entry guard only checked state (and `cancelling`)
+    // once, before this await; re-check fresh here, before classifying anything or touching
+    // `owedResumes`/the typed blocker/a resume spawn, so a cancel that wins the race never gets a
+    // "restarted it" trace event on top of the state write the store itself already refuses
+    // (`RunStore.update`).
+    if (this.cancelling.has(run.id) || this.store.get(run.id)?.state === "cancelled") {
+      this.trace(run, "restart-restaff", "held", "run was cancelled while its death was being handled — not resuming");
+      return;
+    }
+
     const kind = classifyDeath({
       timedOut: handle.result?.timedOut ?? false,
       shuttingDown: this.shuttingDown,
@@ -2969,9 +3019,14 @@ export class RunSupervisor {
     try {
       const before = this.store.get(runId)?.state;
       const updated = await this.store.update(runId, patch);
-      if (this.onStateChange && patch.state !== undefined && patch.state !== before) {
+      // Read the ACTUAL result, not the intended `patch.state`: `RunStore.update` silently drops a
+      // patch that would move an already-`cancelled` row away from it (a concurrent cancel can win
+      // the race inside the store's own lock after this caller already decided to patch), and
+      // trusting `patch.state` here would fire a phantom transition — a "parked"/"implementing"
+      // event for a state change that never actually happened on disk.
+      if (this.onStateChange && updated.state !== before) {
         try {
-          this.onStateChange({ kind: "state_changed", run: updated, from: before ?? null, to: patch.state });
+          this.onStateChange({ kind: "state_changed", run: updated, from: before ?? null, to: updated.state });
         } catch (err) {
           this.logger.warn("run state-change listener threw (ignored)", { run: runId, error: String(err) });
         }
@@ -2981,7 +3036,7 @@ export class RunSupervisor {
       // is exactly the event that can clear another run's `readiness()` — walk every queued run
       // and re-admit it. Cheap (queued runs are rare relative to live ones) and correct even when
       // nothing is actually waiting.
-      if (patch.state !== undefined && patch.state !== before && RUN_FINAL.has(patch.state)) {
+      if (updated.state !== before && RUN_FINAL.has(updated.state)) {
         for (const queued of this.store.list({ states: ["queued"] })) this.admitRun(queued);
       }
       return updated;

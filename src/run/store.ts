@@ -315,11 +315,24 @@ export class RunStore {
    * `slug`/`branch`/`sessionName`/`createdAt` are minted once by `create()` and never patched:
    * `bySlug()` and the collision-dedupe in `uniqueSlug()` both assume a run's slug (and the
    * branch/sessionName derived from it) is stable identity, not a mutable field.
+   *
+   * `cancelled` is STICKY once persisted: a patch that would move the state away from it is
+   * dropped (the row is returned unchanged) instead of applied. This is the one place that check
+   * can be made atomic — every caller (the death classifier, the owed-stage requeue, an
+   * in-process auto-resume, a boot replay) reads the run, decides, and writes on its own timeline,
+   * so a check made anywhere outside this locked critical section can race a concurrent cancel and
+   * lose. Scoped to `cancelled` only (not `done`/`failed`, the rest of `RUN_FINAL`): those two
+   * already have their own bespoke protection at the call sites that can reach them (`cancel()`'s
+   * own re-read-before-overwrite), and widening this to them is unrelated to what cancellation
+   * needs.
    */
   async update(id: string, patch: Partial<Omit<Run, "id" | "slug" | "branch" | "sessionName" | "createdAt">>): Promise<Run> {
     return this.mutate((ledger) => {
       const run = ledger.runs.find((candidate) => candidate.id === id);
       if (!run) throw new Error(`no such run: ${id}`);
+      if (run.state === "cancelled" && patch.state !== undefined && patch.state !== "cancelled") {
+        return structuredClone(run);
+      }
       Object.assign(run, patch);
       run.updatedAt = this.now().toISOString();
       return structuredClone(run);
