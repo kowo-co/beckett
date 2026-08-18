@@ -12,11 +12,30 @@
  * bubbles after it post plainly, the same way a second Discord message in a human's own burst
  * would. Every bubble is `singleMessage: true`: chilltext already sized them, so Beckett's own
  * chunker/humanizer must not re-split or re-delay past `bubble_delay_ms`.
+ *
+ * Two structural guards run on the rewritten bubbles before they post, neither trusting the
+ * rewrite model to have honored its contract:
+ *
+ *   - `enforceMentions` (`src/discord/mentions.ts`) repairs a `<@id>` ping the rewrite mangled
+ *     into inert text.
+ *   - `detectEchoedInput` (`./echo-guard.ts`) catches the OTHER way the rewrite has drifted: on
+ *     2026-08-18 it handed the user's own triggering message back as Beckett's reply, pronouns
+ *     inverted ("you're the CTO" — backwards). Run PER BUBBLE, because only one bubble in a
+ *     multi-bubble delivery drifted that time; a tripped bubble falls back to the un-chilled
+ *     `text` this call was asked to restyle, same fail-open shape as everything else here.
  */
 
 import type { Config, DiscordGateway, Logger, ReplyOptions } from "../types.ts";
 import { chillTransform, shouldBypassChill, type ChillTransformResult } from "../chilltext.ts";
 import { enforceMentions } from "../discord/mentions.ts";
+import { detectEchoedInput } from "./echo-guard.ts";
+
+/** How much of a bubble/input to keep in a trip's warning log — enough to diagnose, not a full dump. */
+const LOG_SNIPPET_CHARS = 200;
+
+function truncateForLog(text: string): string {
+  return text.length > LOG_SNIPPET_CHARS ? `${text.slice(0, LOG_SNIPPET_CHARS)}…` : text;
+}
 
 export interface DeliverChilledOptions {
   /** The user's triggering message, forwarded to chilltext as `input` (recommended, not required). */
@@ -48,6 +67,8 @@ export interface DeliverChilledOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Test seam: inject a fake transform instead of `chillTransform` (and its real fetch/network). */
   transform?: typeof chillTransform;
+  /** Test seam: inject a fake echo guard instead of `detectEchoedInput`. */
+  echoGuard?: typeof detectEchoedInput;
 }
 
 const defaultSleep = (ms: number): Promise<void> => (ms > 0 ? Bun.sleep(ms) : Promise.resolve());
@@ -66,6 +87,7 @@ export async function deliverChilled(
   const { gateway, cfg, postOpts, input, single, logger, recordPost } = opts;
   const sleep = opts.sleep ?? defaultSleep;
   const transform = opts.transform ?? chillTransform;
+  const echoGuard = opts.echoGuard ?? detectEchoedInput;
 
   if (shouldBypassChill(text, cfg)) {
     const messageId = await gateway.post(channelId, text, postOpts);
@@ -89,12 +111,38 @@ export async function deliverChilled(
     return messageId;
   }
 
-  // The chilltext rewrite is a lossy LLM pass that has, intermittently, mangled a `<@id>` ping
-  // into inert text (bare `@id`, angle brackets stripped) — which renders as a raw number and
-  // notifies nobody, defeating the whole point of `--ping`. `enforceMentions` structurally repairs
-  // every id in `postOpts.pingUserIds` back to a real `<@id>` in the FIRST bubble (the only one the
-  // gateway allow-lists), regardless of what the model returned. Belt-and-braces to any prompt ask.
-  const messages = enforceMentions(result.messages, postOpts?.pingUserIds ?? []);
+  // The chilltext rewrite is a lossy LLM pass that has, on at least one real delivery, handed the
+  // user's own triggering message back as Beckett's reply (pronouns inverted). Score each bubble
+  // against `input` and fall back to the un-chilled `text` for just the bubble that drifted — the
+  // other bubbles in the same delivery are very likely fine and should post exactly as rewritten.
+  const echoChecked = input
+    ? result.messages.map((bubble) => {
+        try {
+          const check = echoGuard(bubble, input);
+          if (!check.echoed) return bubble;
+          logger?.warn("chilltext bubble echoed the user's own input back — falling back to the original text", {
+            contentScore: check.contentScore,
+            fullScore: check.fullScore,
+            bubble: truncateForLog(bubble),
+            input: truncateForLog(input),
+          });
+          return text;
+        } catch (err) {
+          // Mirrors the transform's own fail-open contract: a broken guard must never block or
+          // drop a bubble that chilltext already successfully produced.
+          logger?.warn("echo guard threw — keeping the rewritten bubble", { error: String(err) });
+          return bubble;
+        }
+      })
+    : result.messages;
+
+  // The chilltext rewrite has also, intermittently, mangled a `<@id>` ping into inert text (bare
+  // `@id`, angle brackets stripped) — which renders as a raw number and notifies nobody, defeating
+  // the whole point of `--ping`. `enforceMentions` structurally repairs every id in
+  // `postOpts.pingUserIds` back to a real `<@id>` in the FIRST bubble (the only one the gateway
+  // allow-lists), regardless of what the model returned. Runs AFTER the echo guard so it still
+  // lands the ping correctly even when the first bubble was just replaced with the original text.
+  const messages = enforceMentions(echoChecked, postOpts?.pingUserIds ?? []);
 
   let firstId: string | null = null;
   for (let i = 0; i < messages.length; i++) {

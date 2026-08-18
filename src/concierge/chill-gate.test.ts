@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deliverChilled } from "./chill-gate.ts";
 import { chillTransform, type ChilltextConfig, type ChillTransformResult } from "../chilltext.ts";
-import type { DiscordGateway, ReplyOptions } from "../types.ts";
+import type { DiscordGateway, Logger, ReplyOptions } from "../types.ts";
 
 const CHAN = "chan-1";
 
@@ -320,6 +320,109 @@ describe("deliverChilled — a --ping mention survives a mangling chilltext rewr
       transform: async () => ({ messages: ["yeah all good", "talk soon"] }),
     });
     expect(posts.map((p) => p.text)).toEqual(["yeah all good", "talk soon"]);
+  });
+});
+
+describe("deliverChilled — a bubble that echoes the user's own input falls back per-bubble", () => {
+  // Channel 1520986792373911622, message 1539063244914950257 (2026-08-18): chilltext handed the
+  // user's own triggering message back as Beckett's reply, pronouns inverted, as ONE of three
+  // bubbles in the delivery. The other two bubbles were fine and must post exactly as rewritten.
+  const INPUT =
+    "right thats the correct flow. questions or like 90% of things should go to you, not me. " +
+    "cuz imagine bothering the ceo with every task, you da cto so you gotta step up and be a leader lol.";
+  const ECHOED_BUBBLE =
+    "yeah that's the right flow. questions or like 90% of stuff should go to you, not me. " +
+    "imagine bothering the ceo with every task, you're the cto, so you gotta step up and lead lol.";
+  const ORIGINAL_TEXT = "the real reply beckett actually meant to send";
+
+  test("only the echoed bubble falls back to the original text; the other bubbles post as rewritten", async () => {
+    const { gateway, posts } = fakeGateway();
+    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+      gateway,
+      cfg: cfg(),
+      input: INPUT,
+      sleep: async () => {},
+      transform: async () => ({
+        messages: ["wrote three, they're in the graph now", ECHOED_BUBBLE, "want me to walk you through them?"],
+      }),
+    });
+    expect(posts.map((p) => p.text)).toEqual([
+      "wrote three, they're in the graph now",
+      ORIGINAL_TEXT,
+      "want me to walk you through them?",
+    ]);
+  });
+
+  test("logs a warning with the similarity score on a trip", async () => {
+    const { gateway } = fakeGateway();
+    const warnings: Array<[string, unknown]> = [];
+    const logger = { warn: (msg: string, meta?: unknown) => warnings.push([msg, meta]) } as unknown as Logger;
+    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+      gateway,
+      cfg: cfg(),
+      input: INPUT,
+      logger,
+      sleep: async () => {},
+      transform: async () => ({ messages: [ECHOED_BUBBLE] }),
+    });
+    const trip = warnings.find(([msg]) => msg.includes("echoed the user's own input"));
+    expect(trip).toBeDefined();
+    const meta = trip![1] as { contentScore: number; bubble: string; input: string };
+    expect(meta.contentScore).toBeGreaterThanOrEqual(0.65);
+    expect(meta.bubble).toContain("cto");
+    expect(meta.input).toContain("cto");
+  });
+
+  test("a legitimate short agreement is not treated as an echo", async () => {
+    const { gateway, posts } = fakeGateway();
+    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+      gateway,
+      cfg: cfg(),
+      input: INPUT,
+      sleep: async () => {},
+      transform: async () => ({ messages: ["yeah, agreed"] }),
+    });
+    expect(posts.map((p) => p.text)).toEqual(["yeah, agreed"]);
+  });
+
+  test("no input provided: the guard never runs, bubbles post exactly as rewritten", async () => {
+    const { gateway, posts } = fakeGateway();
+    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+      gateway,
+      cfg: cfg(),
+      sleep: async () => {},
+      transform: async () => ({ messages: [ECHOED_BUBBLE] }),
+    });
+    expect(posts.map((p) => p.text)).toEqual([ECHOED_BUBBLE]);
+  });
+
+  test("a throwing echo guard fails open: the rewritten bubble is kept, not dropped or blocked", async () => {
+    const { gateway, posts } = fakeGateway();
+    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+      gateway,
+      cfg: cfg(),
+      input: INPUT,
+      sleep: async () => {},
+      transform: async () => ({ messages: ["hey", "so about that"] }),
+      echoGuard: () => {
+        throw new Error("boom");
+      },
+    });
+    expect(posts.map((p) => p.text)).toEqual(["hey", "so about that"]);
+  });
+
+  test("the fallback still composes with ping repair: an echoed first bubble still gets the ping", async () => {
+    const RO = "1151230208783945818";
+    const { gateway, posts } = fakeGateway();
+    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+      gateway,
+      cfg: cfg(),
+      input: INPUT,
+      postOpts: { pingUserIds: [RO] },
+      sleep: async () => {},
+      transform: async () => ({ messages: [ECHOED_BUBBLE] }),
+    });
+    expect(posts[0]!.text).toBe(`<@${RO}>\n${ORIGINAL_TEXT}`);
   });
 });
 
