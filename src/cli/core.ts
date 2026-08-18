@@ -22,6 +22,7 @@ import { config, paths, SOCK } from "./context.ts";
 import { loadAccess, requestGrant, revokeAccess, loadPending, ACCESS_CAP, PENDING_GRANT_TTL_MS } from "../discord/access.ts";
 import { bundledMaintainersFile, loadMaintainers, requestMaintainerGrant, revokeMaintainer } from "../discord/maintainers.ts";
 import { loadPeers, addPeer, removePeer } from "../discord/peers.ts";
+import { loadObservedBots, addObservedBot, removeObservedBot } from "../discord/observed-bots.ts";
 import {
   loadIdentities,
   getIdentity,
@@ -679,6 +680,37 @@ export async function runFederation(argv: string[]): Promise<void> {
     out({ ok: true, status: r.status, id: r.id, peers: r.ids });
   }
   fail("usage: beckett federation ls | add <id> | remove <id>");
+}
+
+// ── observed bots (bots Beckett may READ but never talk to; observed.ts) ──────────────────
+// The living observed-bots list (observed-bots.txt), grown by the OWNER live from Discord
+// ("@beckett add booper to what you can see"). Mirrors federation's shape exactly, but this is
+// the strictly weaker list: an id here is never a peer and can never address Beckett — see
+// `observed.ts` for the full trust distinction. The Concierge shells these; owner-gating is the
+// Concierge's job (doctrine), same as `federation`. Takes effect with no restart.
+export async function runObserved(argv: string[]): Promise<void> {
+  const [sub, ...rest] = argv;
+  // Tolerate a pasted Discord mention: "<@123…>" / "<@!123…>" → the bare id.
+  const bareId = (s: string | undefined): string => (s ?? "").replace(/^<@!?/, "").replace(/>$/, "").trim();
+  if (sub === "ls" || sub === "list") {
+    const ids = [...loadObservedBots(paths.observedBotsFile)];
+    const baseline = config.observed_bots.ids;
+    out({ ids, count: ids.length, baseline, observedBotsFile: paths.observedBotsFile });
+  }
+  if (sub === "add") {
+    const id = bareId(rest[0]);
+    if (!id) fail('usage: beckett observed add <bot-id | @mention>');
+    const r = addObservedBot(paths.observedBotsFile, id);
+    if (!r.ok) fail(`not a valid Discord bot id: "${id}" (expected 17–20 digits)`);
+    out({ ok: true, status: r.status, id: r.id, observed: r.ids });
+  }
+  if (sub === "remove" || sub === "rm") {
+    const id = bareId(rest[0]);
+    if (!id) fail('usage: beckett observed remove <bot-id | @mention>');
+    const r = removeObservedBot(paths.observedBotsFile, id);
+    out({ ok: true, status: r.status, id: r.id, observed: r.ids });
+  }
+  fail("usage: beckett observed ls | add <id> | remove <id>");
 }
 
 // ── channels (OPS-80 + server memory v4.1: the shared channel-context store) ──────────────

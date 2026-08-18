@@ -81,6 +81,8 @@ import { isInternalUrl } from "../net/url-safety.ts";
 import { EMBED_SETTLE_MS, settleEmbeds } from "./embed-settle.ts";
 import { isFederatedPeer, PeerBurstLimiter } from "./federation.ts";
 import { loadPeers } from "./peers.ts";
+import { isObservedBot } from "./observed.ts";
+import { loadObservedBots } from "./observed-bots.ts";
 import { buildPaths } from "../paths.ts";
 import { chunkReply, delaySchedule, TOTAL_DELAY_BUDGET_MS } from "./chunk.ts";
 import { contentWithForwardedSnapshots } from "../concierge/forwarded-message.ts";
@@ -181,6 +183,8 @@ export interface GatewayOptions {
   config?: Config;
   /** Override the living peer-file path (tests). Defaults to `buildPaths(config).peersFile`. */
   peersFile?: string;
+  /** Override the living observed-bots file path (tests). Defaults to `buildPaths(config).observedBotsFile`. */
+  observedBotsFile?: string;
   /** Logger to bind under the `discord` component. Defaults to the root logger child. */
   logger?: Logger;
 }
@@ -202,6 +206,18 @@ export class DiscordJsGateway implements DiscordGateway {
   private readonly peersFile: string | undefined;
   /** Runaway backstop for peer-bot traffic — caps processed peer messages per channel per minute. */
   private readonly peerBurst: PeerBurstLimiter;
+
+  /** Baseline observed-bot ids from config (`observed_bots.ids`) — bots Beckett may READ but
+   *  never talk to (observed.ts). The owner-added live list (`observed-bots.txt`) is unioned
+   *  on top at read time, same pattern as peers. */
+  private readonly baselineObserved: ReadonlySet<string>;
+  /** Path to the living observed-bots file (`observed-bots.txt`), read fresh per bot message so
+   *  owner adds take effect with NO restart. Undefined only when no config was supplied (tests). */
+  private readonly observedBotsFile: string | undefined;
+  /** Runaway backstop for observed-bot traffic — reuses {@link PeerBurstLimiter}'s generic
+   *  per-channel rolling-window cap (it isn't peer-specific despite the name) with its own
+   *  instance/budget, so a chatty observed bot can't flood the channel store. */
+  private readonly observedBurst: PeerBurstLimiter;
 
   /** The single inbound handler the Orchestrator registers via {@link onMessage}. */
   private handler: ((m: IncomingMessage) => void | Promise<void>) | undefined;
@@ -251,6 +267,11 @@ export class DiscordJsGateway implements DiscordGateway {
     this.baselinePeers = new Set(fed?.peers ?? []);
     this.peersFile = opts.peersFile ?? (opts.config ? buildPaths(opts.config).peersFile : undefined);
     this.peerBurst = new PeerBurstLimiter(fed?.peer_burst_per_min ?? 5);
+    const observed = opts.config?.observed_bots;
+    this.baselineObserved = new Set(observed?.ids ?? []);
+    this.observedBotsFile =
+      opts.observedBotsFile ?? (opts.config ? buildPaths(opts.config).observedBotsFile : undefined);
+    this.observedBurst = new PeerBurstLimiter(observed?.burst_per_min ?? 5);
   }
 
   /**
@@ -263,6 +284,19 @@ export class DiscordJsGateway implements DiscordGateway {
     const live = loadPeers(this.peersFile);
     if (this.baselinePeers.size === 0) return live;
     for (const id of this.baselinePeers) live.add(id);
+    return live;
+  }
+
+  /**
+   * The effective observed-bot set for THIS message: the config baseline unioned with the live
+   * `observed-bots.txt` (owner-added, no restart). Read fresh — but only ever on the rare
+   * `author.bot` path, so a normal human message never touches disk here.
+   */
+  private effectiveObserved(): ReadonlySet<string> {
+    if (!this.observedBotsFile) return this.baselineObserved;
+    const live = loadObservedBots(this.observedBotsFile);
+    if (this.baselineObserved.size === 0) return live;
+    for (const id of this.baselineObserved) live.add(id);
     return live;
   }
 
@@ -402,11 +436,17 @@ export class DiscordJsGateway implements DiscordGateway {
       const raw = [...page.values()].sort((a, b) => a.createdTimestamp - b.createdTimestamp);
       const missed = raw.filter((msg) => snowflakeAfter(msg.id, after));
       for (const msg of missed) {
-        // Match MessageCreate's bot guard. A trusted federated peer is still a conversational
-        // input; every other bot (including us) is never put through downtime catch-up.
+        // Match MessageCreate's bot guard exactly: a trusted federated peer or an allow-listed
+        // observed bot still gets caught up; every other bot (including us) is never put through
+        // downtime catch-up.
         if (msg.author.bot) {
-          if (!isFederatedPeer(msg.author.id, client.user?.id, this.effectivePeers())) continue;
-          if (!this.peerBurst.allow(msg.channelId)) continue;
+          if (isFederatedPeer(msg.author.id, client.user?.id, this.effectivePeers())) {
+            if (!this.peerBurst.allow(msg.channelId)) continue;
+          } else if (isObservedBot(msg.author.id, client.user?.id, this.effectiveObserved())) {
+            if (!this.observedBurst.allow(msg.channelId)) continue;
+          } else {
+            continue;
+          }
         }
         try {
           messages.push(await this.normalize(msg));
@@ -803,23 +843,43 @@ export class DiscordJsGateway implements DiscordGateway {
       this.lastEventTs = Date.now();
       // Loop guard: never react to bots, including ourselves (Spec 05 §2.2 / §9.2). This MUST come
       // before any logging — otherwise the Discord log-mirror's own posts get re-logged and amplify
-      // into a feedback loop. Federation exemption: a *trusted peer* Beckett (config
-      // `federation.peers`) is let through so sibling Becketts can address each other — but never
-      // ourselves, and never past the per-channel burst backstop (federation.ts).
+      // into a feedback loop. Two exemptions, two different trust levels (never conflated — see
+      // federation.ts and observed.ts): a *trusted peer* Beckett (config `federation.peers`) is let
+      // through so sibling Becketts can address each other; an *observed* bot (config
+      // `observed_bots.ids`, e.g. booper) is let through ONLY so its messages reach channel
+      // context/storage — it can never address Beckett (normalize() forces `mentionsBot` false for
+      // it). Neither exemption ever applies to ourselves, and neither ever bypasses its own
+      // per-channel burst backstop.
       if (msg.author.bot) {
-        if (!isFederatedPeer(msg.author.id, this.client?.user?.id, this.effectivePeers())) return;
-        if (!this.peerBurst.allow(msg.channelId)) {
-          this.logger.warn("discord peer message dropped — channel burst cap", {
+        if (isFederatedPeer(msg.author.id, this.client?.user?.id, this.effectivePeers())) {
+          if (!this.peerBurst.allow(msg.channelId)) {
+            this.logger.warn("discord peer message dropped — channel burst cap", {
+              peerId: msg.author.id,
+              channelId: msg.channelId,
+            });
+            return;
+          }
+          this.logger.info("discord peer message accepted", {
             peerId: msg.author.id,
+            peer: msg.author.username,
             channelId: msg.channelId,
           });
+        } else if (isObservedBot(msg.author.id, this.client?.user?.id, this.effectiveObserved())) {
+          if (!this.observedBurst.allow(msg.channelId)) {
+            this.logger.warn("discord observed-bot message dropped — channel burst cap", {
+              observedBotId: msg.author.id,
+              channelId: msg.channelId,
+            });
+            return;
+          }
+          this.logger.info("discord observed-bot message accepted", {
+            observedBotId: msg.author.id,
+            observedBot: msg.author.username,
+            channelId: msg.channelId,
+          });
+        } else {
           return;
         }
-        this.logger.info("discord peer message accepted", {
-          peerId: msg.author.id,
-          peer: msg.author.username,
-          channelId: msg.channelId,
-        });
       }
       // Observability: record every inbound (non-bot) message to confirm gateway receipt + intent.
       this.logger.info("discord message received", {
@@ -996,6 +1056,14 @@ export class DiscordJsGateway implements DiscordGateway {
       msg.author.bot && isFederatedPeer(msg.author.id, botId, this.effectivePeers())
         ? { botId: msg.author.id, displayName: displayName ?? msg.author.username }
         : undefined;
+    // Same re-derivation for the OTHER, weaker bot guard (observed.ts): a bot message only ever
+    // reaches here past that guard as a *trusted peer* or an *observed* bot, never both — peer
+    // wins if a fork's misconfig somehow lists an id in both. Stamped so the Concierge can tell
+    // this is a bot's output rather than a person's words, without ever reading it as `role:peer`.
+    const observedBot =
+      !peer && msg.author.bot && isObservedBot(msg.author.id, botId, this.effectiveObserved())
+        ? { botId: msg.author.id, displayName: displayName ?? msg.author.username }
+        : undefined;
     // Issue #235: a bare URL arrives BEFORE Discord unfurls it. Wait the one short beat here, at
     // the single choke point, so the turn sees the preview (or learns there is none) instead of
     // improvising. No-op for every message without a bare, un-suppressed link.
@@ -1022,13 +1090,16 @@ export class DiscordJsGateway implements DiscordGateway {
       repliedToId: msg.reference?.messageId ?? null,
       ...(reference.browserQuestion ? { repliedToBrowserQuestion: true } : {}),
       ...(reference.unverified ? { repliedToBotUnverified: true } : {}),
-      mentionsBot: isDM || directMention || reference.toBot,
+      // An observed bot can never address Beckett — force this false regardless of an @mention,
+      // reply-to-Beckett, or DM, so it can't claim a turn or a reply on its own (see observed.ts).
+      mentionsBot: observedBot ? false : isDM || directMention || reference.toBot,
       ...(mentionedUsers.length > 0 ? { mentionedUsers } : {}),
       // An empty array is meaningful: it says the gateway looked and Discord attached nothing.
       // Omitted entirely only when the raw message had no `embeds` collection at all.
       ...(settled.embeds ? { embeds: linkEmbeds(settled.embeds) } : {}),
       authorIsBot: msg.author.bot,
       ...(peer ? { peer } : {}),
+      ...(observedBot ? { observedBot } : {}),
       createdAt: msg.createdTimestamp,
       // Every file dragged into the message (images, txt, pdf, md, anything). The shell
       // downloads these locally so the parent can Read them; the gateway just captures the

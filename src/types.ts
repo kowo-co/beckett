@@ -351,6 +351,16 @@ export interface IncomingMessage {
    * `authorIsBot` is also true; the two are read together, never in isolation.
    */
   peer?: { botId: string; displayName: string };
+  /**
+   * Present ONLY when the author is an allow-listed observed bot (`observed_bots` config,
+   * `src/discord/observed.ts`) — a bot Beckett is allowed to READ (e.g. booper) but that is
+   * explicitly NOT a trusted peer: it cannot address Beckett, claim a turn, or trigger a reply
+   * on its own (`mentionsBot` is forced false for it — see `normalize()`). Its sole effect is
+   * letting the message through the loop-guard and into channel context/recall, distinguishably
+   * from both a human and a `peer`. Mutually exclusive with `peer`; when set, `authorIsBot` is
+   * also true.
+   */
+  observedBot?: { botId: string; displayName: string };
   createdAt: number;
   attachments: IncomingAttachment[]; // files dragged into the message (empty when none)
   /** Quoted originals attached to a Discord forward (empty/absent for ordinary messages). */
@@ -833,6 +843,7 @@ export interface Paths {
   maintainersFile: string; // <beckettDir>/maintainers.txt — owner-approved additions to the bundled maintainer seed (OPS-144)
   maintainersPendingFile: string; // <beckettDir>/maintainers-pending.json — maintainer grants awaiting owner approval
   peersFile: string; // <beckettDir>/peers.txt — owner-added trusted peer Beckett bot ids (federation)
+  observedBotsFile: string; // <beckettDir>/observed-bots.txt — owner-added observed (read-only) bot ids
   announcedFile: string; // <beckettDir>/announced.txt — last commit SHA announced on restart (changelog)
   presetsFile: string; // <beckettDir>/presets.json — user-defined named cast presets (OPS-110)
   pauseFile: string; // <beckettDir>/pause.json — chat-only hold; existence IS the flag (src/pause.ts)
@@ -1209,6 +1220,25 @@ export interface Config {
      *  human must speak. Unlike the per-minute burst cap this is what makes a two-bot exchange
      *  provably END rather than merely slow down; the count resets on any human message. Default 6. */
     peer_max_consecutive_turns: number;
+  };
+  /**
+   * Observed bots — a bot Beckett is allowed to READ (e.g. booper, a from-scratch language
+   * model that posts its generations into channels Beckett sits in) without treating it as a
+   * peer Beckett. This is a strictly WEAKER trust level than `federation`: an observed bot's
+   * messages are normalized and stored like any other message — they show up in channel
+   * context and `beckett channels recall`/`search` — but the bot can never address Beckett,
+   * claim a turn, or trigger a reply on its own (`normalize()` forces `mentionsBot` false for
+   * it). Two different trust levels, two different lists: an id here is never treated as a
+   * federation peer, and the peer set is never consulted for this gate. Ships INERT for a
+   * fork with an empty `ids` list; this instance's default seeds booper's id.
+   */
+  observed_bots: {
+    /** Discord bot user ids Beckett may read but never talk to. Your OWN id is always ignored
+     *  even if listed (same loop-guard as federation); an unlisted bot is dropped as before. */
+    ids: string[];
+    /** Runaway backstop: max observed-bot messages the gateway will store per channel per
+     *  rolling minute, so a chatty bot can never flood the channel store. Default 5. */
+    burst_per_min: number;
   };
   /**
    * Free time (docs/freetime.md): one weekly, budgeted, unprompted session in a scratch

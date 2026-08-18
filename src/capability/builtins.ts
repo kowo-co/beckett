@@ -670,6 +670,25 @@ export const configFragments = {
       peer_max_consecutive_turns: posInt.default(6),
     })
     .default({}),
+  // Observed bots — a bot Beckett may READ but that is never a peer (e.g. booper, a
+  // from-scratch language model whose generations land in channels Beckett sits in). Weaker
+  // than federation: a listed id's messages are normalized and stored like any other message
+  // (channel context, `channels recall`/`search`) but can never address Beckett, claim a turn,
+  // or trigger a reply — `mentionsBot` is forced false for it. Two different trust levels, two
+  // different lists; this one is never consulted by `isFederatedPeer` and vice versa. Default
+  // seeds booper's id and a second bot the owner asked for.
+  observed_bots: z
+    .object({
+      // Discord bot user ids Beckett may read but never talk to. The daemon's own id is always
+      // ignored even if listed (same self-loop guard as federation.peers).
+      ids: z
+        .array(z.string().regex(/^\d{17,20}$/, "must be a Discord user id (17–20 digits)"))
+        .default(["1537651257328672778", "1527859594741682347"]),
+      // Runaway backstop: max observed-bot messages stored per channel per rolling minute, so a
+      // chatty bot can't flood the channel store.
+      burst_per_min: posInt.default(5),
+    })
+    .default({}),
   // Free time (docs/freetime.md): one weekly, budgeted, unprompted session inside a scratch
   // directory, with structured memory writeback seeding the next one. Every value here is a WALL
   // the session runs INSIDE — the session's process has no write path back to this file, so it
@@ -758,6 +777,7 @@ const BUILTIN_CAPABILITY_INFO: {
   quick: { id: "quick", summary: "Quick agents (the short-lived lane) + the computer-use browser host." },
   announce: { id: "announce", summary: "Restart changelog announcements." },
   federation: { id: "federation", summary: "Peer-Beckett federation over Discord." },
+  observed_bots: { id: "observed-bots", summary: "Bots Beckett may read but never talk to (e.g. booper)." },
   free_time: { id: "free-time", summary: "Weekly self-directed session: trigger, walls, token ceiling, share channel." },
   social: { id: "social", summary: "Social-media agent's chilltext chill-pass toggle." },
   ops_log: { id: "ops-log", summary: "Discord ops-log mirror: legible event lines, batching, turn heartbeat." },

@@ -181,6 +181,10 @@ peers = []
 peer_burst_per_min = 5
 peer_max_consecutive_turns = 6
 
+[observed_bots]
+ids = ["1537651257328672778", "1527859594741682347"]
+burst_per_min = 5
+
 [free_time]
 enabled = true
 weekday = "sunday"
