@@ -6063,10 +6063,18 @@ export class Concierge {
       case "awaiting_input":
         // B8: LIVE, not parked — a worker asked one question. `run.error` is deliberately not
         // consulted here (unlike `parked`): the question text lives on `run.question`, not there.
+        // Answer-first, escalate-second: a plain `question` blocker routes to the concierge
+        // (`./blocker.ts`'s ACTOR_BY_CLASS), not straight to a human, because most of what a
+        // worker parks to ask is answerable right here from the spec, the repo, or the original
+        // ask — relaying every one of them to the channel by default just spends a human
+        // round-trip on a call the concierge could make itself.
         return this.runUpdateTurn(
           run,
           `This run is waiting on one answer: ${run.question?.text ?? ""}\n` +
-            `Ask the person in-channel, then answer it with \`beckett task resume ${run.id} --answer "…"\`.` +
+            `Answer it yourself if you can, from the spec, the repo, or the original ask, with ` +
+            `\`beckett task resume ${run.id} --answer "…"\`. Escalate to the owner in-channel ` +
+            `only when this is genuinely his call — money, product direction, a credential, or ` +
+            `something irreversible.` +
             (run.question?.defaultAnswer
               ? `\nIf nobody replies by ${run.question.expiresAt} I will proceed with: ${run.question.defaultAnswer}`
               : ""),

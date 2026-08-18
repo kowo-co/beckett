@@ -381,6 +381,12 @@ function workerSystemAppend(
     `— you will be given another pass with that summary as your brief. Use blocker ONLY for ` +
     `something you cannot do from here (a missing credential, an admin permission, a product ` +
     `decision, money, or one factual question).\n` +
+    `BIAS TOWARD CONTINUING: a "question" blocker parks the whole run and costs someone a ` +
+    `round-trip, so it is the exception, not the default. If you can make a reasonable call and ` +
+    `keep working, make it, note the assumption in the spec, and continue — do NOT stop. Ask only ` +
+    `when proceeding under any assumption would be wrong or wasteful. When you do ask, ALWAYS set ` +
+    `defaultAnswer to what should happen if nobody replies in time — a "question" blocker with no ` +
+    `defaultAnswer strands the run on silence instead of letting it proceed, and is a defect.\n` +
     `</persona>`
   );
 }

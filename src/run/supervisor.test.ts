@@ -2294,7 +2294,9 @@ describe("elicitation (overhaul B8)", () => {
     expect(parked.state).toBe("parked");
     expect(parked.question).toBeNull();
     expect(parked.blocker?.class).toBe("question");
-    expect(parked.blocker?.actor).toBe("human");
+    // A question routes to the concierge (not straight to ro) — but it still stops the run when
+    // nobody, concierge included, answers before the clock runs out.
+    expect(parked.blocker?.actor).toBe("concierge");
     expect(spawnCalls.filter((c) => c.stage === "implement")).toHaveLength(1); // no resume spawn
 
     // The blocker's remedy says `--answer`; a late answer must still resume the run (as a
