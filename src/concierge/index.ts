@@ -6168,6 +6168,17 @@ export class Concierge {
     this.inboundMessageIds.add(m.messageId);
     if (this.inboundMessageIds.size > 10_000) this.inboundMessageIds.delete(this.inboundMessageIds.values().next().value!);
 
+    // Observed bot (observed.ts, e.g. booper): read, never addressed. Unlike a peer it is never
+    // given a chance to reach the directed path — there is no "does it address me" branch here,
+    // because an observed bot has no standing to address Beckett at all (the gateway already
+    // forces `mentionsBot` false for it; this is belt-and-suspenders). Its words are captured into
+    // channel context so Beckett can see them, then dropped before the ambient split, so they can
+    // never seed a triage burst or trigger a reply on their own.
+    if (m.observedBot) {
+      this.captureInbound(m, "outsider");
+      return;
+    }
+
     // Federation loop control (federation.ts). A human message ends any bot-to-bot exchange, so
     // clear the channel's consecutive-peer-turn budget; a peer message never resets it. This is
     // the ONLY peer-specific handling on the human path — human traffic is otherwise untouched.
@@ -7251,7 +7262,12 @@ export class Concierge {
    * time (§3.1). Best-effort by store contract: a capture failure can never break a turn.
    */
   private captureInbound(m: IncomingMessage, level: AccessLevel): void {
-    if (!this.channelStore || level === "outsider") return;
+    if (!this.channelStore) return;
+    // An observed bot (`m.observedBot`, observed.ts) is never on the access list — it classifies
+    // as "outsider" like any unknown Discord id — but the whole point of the feature is that its
+    // words ARE read: booper's generations should reach channel context/recall even though the
+    // bot itself has no standing to converse. Every other outsider is still refused capture.
+    if (level === "outsider" && !m.observedBot) return;
     // A replayed mention (issue #3) was already captured by the run that RECEIVED it — capture
     // happens before the turn, so it is the one part of that run that provably completed. The
     // store appends blind (no dedupe by message id), so re-capturing here would leave the shared

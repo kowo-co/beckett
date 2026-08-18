@@ -87,6 +87,7 @@ export function buildPaths(config: Config, env: PathEnv = process.env): Paths {
     maintainersFile: join(beckettDir, "maintainers.txt"),
     maintainersPendingFile: join(beckettDir, "maintainers-pending.json"),
     peersFile: join(beckettDir, "peers.txt"),
+    observedBotsFile: join(beckettDir, "observed-bots.txt"),
     announcedFile: join(beckettDir, "announced.txt"),
     presetsFile: join(beckettDir, "presets.json"),
     pauseFile: join(beckettDir, "pause.json"),
