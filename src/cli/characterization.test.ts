@@ -166,6 +166,11 @@ const CASES: Case[] = [
   { name: "journal: unknown ident reports no journal", argv: ["journal", "run-20260810-ghost"] },
   { name: "journal: non-integer --tail is rejected", argv: ["journal", "OPS-1", "--tail", "x"] },
 
+  // ── chilltext-log ───────────────────────────────────────────────────────────────────────
+  { name: "chilltext-log: empty ledger", argv: ["chilltext-log"] },
+  { name: "chilltext-log: non-integer --tail is rejected", argv: ["chilltext-log", "--tail", "x"] },
+  { name: "chilltext-log: zero --tail is rejected", argv: ["chilltext-log", "--tail", "0"] },
+
   // ── identity ────────────────────────────────────────────────────────────────────────────
   { name: "identity: set without --user prints usage", argv: ["identity", "set"] },
   { name: "identity: set with --user but nothing to set fails", argv: ["identity", "set", "--user", "123456789012345678"] },

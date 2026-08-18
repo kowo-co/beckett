@@ -840,6 +840,7 @@ export interface Paths {
   proposalsDir: string; // <beckettDir>/proposals — the proposal queue (issue #37)
   companyFile: string; // <beckettDir>/company.md — the CTO seat's company brief (src/company.ts)
   workspacesFile: string; // <beckettDir>/workspaces.json — user-opened thread → ticket routing
+  chilltextLog: string; // <beckettDir>/chilltext-transforms.jsonl — chilltext rewrite before/after transcript (src/concierge/chilltext-log.ts)
 }
 
 /** The full validated config (Spec 01 §4). Every key has a default so an empty config boots. */

@@ -5653,6 +5653,7 @@ export class Concierge {
                     cfg: this.config.concierge.chilltext,
                     personaPath: personaFilePath(this.config),
                     logger: this.log,
+                    logPath: buildPaths(this.config).chilltextLog,
                     // OPS-80: a CLI reply is Beckett speaking in a channel — `deliverChilled` records
                     // every message it actually posts (one entry per bubble, or one plain entry on
                     // bypass); recording `text` again here on top of that produced the "mega message"
@@ -5754,6 +5755,7 @@ export class Concierge {
                     cfg: this.config.concierge.chilltext,
                     personaPath: personaFilePath(this.config),
                     logger: this.log,
+                    logPath: buildPaths(this.config).chilltextLog,
                     single: true,
                   });
                   // Deliberately NOT recorded into the shared context and NOT marked repliedViaCli: an ack
@@ -6525,6 +6527,7 @@ export class Concierge {
               cfg: this.config.concierge.chilltext,
               personaPath: personaFilePath(this.config),
               logger: this.log,
+              logPath: buildPaths(this.config).chilltextLog,
               recordPost: (chId, bubbleText, bubbleId) => this.recordBeckettPost(chId, bubbleText, bubbleId),
             });
         mention.ackMessageId = ackId;
@@ -6660,6 +6663,7 @@ export class Concierge {
         cfg: this.config.concierge.chilltext,
         personaPath: personaFilePath(this.config),
         logger: this.log,
+        logPath: buildPaths(this.config).chilltextLog,
         recordPost: (chId, bubbleText, bubbleId) => this.recordBeckettPost(chId, bubbleText, bubbleId),
       });
       firstId ??= postedId;
@@ -7152,6 +7156,7 @@ export class Concierge {
           cfg: this.config.concierge.chilltext,
           personaPath: personaFilePath(this.config),
           logger: this.log,
+          logPath: buildPaths(this.config).chilltextLog,
           recordPost: (chId, bubbleText, bubbleId) => this.recordBeckettPost(chId, bubbleText, bubbleId),
         });
       }
