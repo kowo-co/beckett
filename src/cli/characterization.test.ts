@@ -123,8 +123,18 @@ const CASES: Case[] = [
   // ── mail ────────────────────────────────────────────────────────────────────────────────
   { name: "mail: bare prints help", argv: ["mail"] },
   { name: "mail: --help prints help", argv: ["mail", "--help"] },
-  { name: "mail: inbox without AGENTMAIL_API_KEY is refused", argv: ["mail", "inbox"] },
-  { name: "mail: unknown sub without AGENTMAIL_API_KEY is refused first", argv: ["mail", "bogus"] },
+  // Reads work with NO mail credential at all — they touch only the on-box store. That is a
+  // behavior change from the AgentMail-only era and is exactly what these pin.
+  { name: "mail: inbox reports both halves and names the missing secrets", argv: ["mail", "inbox"] },
+  { name: "mail: ls on an empty store prints the header and (no messages)", argv: ["mail", "ls"] },
+  { name: "mail: read of an unknown id fails with the ls hint", argv: ["mail", "read", "mail-abcdefabcdefabcdabcdefabcdefabcd"] },
+  { name: "mail: mark-read of an unknown id fails with the ls hint", argv: ["mail", "mark-read", "mail-abcdefabcdefabcdabcdefabcdefabcd"] },
+  // The outbox gate: the failure must name the exact secret that is missing.
+  {
+    name: "mail: send without RESEND_API_KEY names the missing secret",
+    argv: ["mail", "send", "--to", "a@b.com", "--subject", "hi", "--body", "yo"],
+  },
+  { name: "mail: unknown sub prints the verb list", argv: ["mail", "bogus"] },
 
   // ── recall / memory ─────────────────────────────────────────────────────────────────────
   { name: "recall: no query prints usage", argv: ["recall"] },

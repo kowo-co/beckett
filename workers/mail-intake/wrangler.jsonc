@@ -1,0 +1,20 @@
+{
+  // beckett-mail-intake: the inbound email bridge. Cloudflare Email Routing
+  // delivers mail addressed to @0xbeckett.me here; this worker forwards it,
+  // signed, to Beckett's intake endpoint over HTTPS. No routes/assets — this
+  // worker is only ever invoked via the `email()` handler, not HTTP.
+  //
+  // BECKETT_MAIL_INTAKE_SECRET is a Worker *secret*, set with
+  // `wrangler secret put BECKETT_MAIL_INTAKE_SECRET` — it is NEVER committed
+  // here or anywhere else in this repo.
+  //
+  // No `account_id`: it comes from the CLOUDFLARE_ACCOUNT_ID env var at
+  // deploy time, same as the other workers in this repo.
+  "name": "beckett-mail-intake",
+  "compatibility_date": "2026-06-01",
+  "main": "src/index.ts",
+  "vars": {
+    "BECKETT_INTAKE_URL": "https://mail-intake.0xbeckett.me/intake"
+  },
+  "observability": { "enabled": true }
+}
