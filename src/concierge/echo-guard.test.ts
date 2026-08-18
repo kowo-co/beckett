@@ -80,6 +80,55 @@ describe("detectEchoedInput — degenerate near-identical case, regardless of le
   });
 });
 
+describe("detectEchoedInput — a leading (prepended) echo, not a whole-bubble replacement", () => {
+  // The user's message to ro: "yeah merge it". What Beckett actually wrote for that bubble, and
+  // what chilltext's rewrite handed back — the user's own words prepended verbatim onto the front
+  // of the real reply, joined by ". ". Scored as a whole bubble this is nowhere near threshold
+  // (the echoed span is 3 tokens out of ~25), which is exactly why the whole-bubble check alone
+  // missed it.
+  const INPUT = "yeah merge it";
+  const ORIGINAL_TEXT =
+    "all three are on main already, the deploy was just stuck. it's armed now and fires the second " +
+    "those two workers finish, no babysitting needed.";
+  const PREPENDED_BUBBLE = `${INPUT}. ${ORIGINAL_TEXT}`;
+
+  test("trips on the real prepended bubble and repairs it when given the original text", () => {
+    const result = detectEchoedInput(PREPENDED_BUBBLE, INPUT, ORIGINAL_TEXT);
+    expect(result.echoed).toBe(true);
+    expect(result.repaired).toBe(ORIGINAL_TEXT);
+  });
+
+  test("whole-bubble scores stay low — this trips ONLY via the new leading-span check", () => {
+    const result = detectEchoedInput(PREPENDED_BUBBLE, INPUT, ORIGINAL_TEXT);
+    expect(result.contentScore).toBeLessThan(0.65);
+    expect(result.fullScore).toBeLessThan(0.85);
+  });
+
+  test("still trips without the original text, but offers nothing to repair — caller falls back", () => {
+    const result = detectEchoedInput(PREPENDED_BUBBLE, INPUT);
+    expect(result.echoed).toBe(true);
+    expect(result.repaired).toBeNull();
+  });
+
+  test("a bubble that merely starts with a shared short word does not trip", () => {
+    const input = "it looks fine";
+    const bubble = "it took a while but the migration finished clean and everything checks out now";
+    expect(detectEchoedInput(bubble, input).echoed).toBe(false);
+  });
+});
+
+describe("detectEchoedInput — a trailing (appended) echo, mirrored", () => {
+  const INPUT = "thanks appreciate it";
+  const ORIGINAL_TEXT = "all set, ship it now";
+  const APPENDED_BUBBLE = `${ORIGINAL_TEXT}. ${INPUT}`;
+
+  test("trips on a trailing echo and repairs it when given the original text", () => {
+    const result = detectEchoedInput(APPENDED_BUBBLE, INPUT, ORIGINAL_TEXT);
+    expect(result.echoed).toBe(true);
+    expect(result.repaired).toBe(ORIGINAL_TEXT);
+  });
+});
+
 describe("detectEchoedInput — edge inputs", () => {
   test("an empty input never trips", () => {
     expect(detectEchoedInput("anything at all", "").echoed).toBe(false);
