@@ -10,6 +10,7 @@ import {
   stripHtml,
   type AgentMailApi,
 } from "./index.ts";
+import { MAIL_FENCE_CLOSE } from "./render.ts";
 
 const temps: string[] = [];
 function stateFile(): string {
@@ -92,7 +93,11 @@ test("message output is compact and read output prefers text", () => {
   });
   expect(rendered).toContain("X-Test: value");
   expect(rendered).toContain("Bcc: bcc@example.com");
-  expect(rendered).toEndWith("plain text");
+  // The body is third-party content, so it comes back fenced behind the gutter rather than bare —
+  // this output can land in a model's context as tool output. Text is still preferred over html.
+  expect(rendered).toContain("  | plain text");
+  expect(rendered).not.toContain("html text");
+  expect(rendered).toEndWith(MAIL_FENCE_CLOSE);
   expect(stripHtml("<p>Hello<br>world</p><script>bad()</script>")).toBe("Hello\nworld");
 });
 

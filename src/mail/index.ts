@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { AgentMailClient } from "agentmail";
+import { fenceUntrusted, headerLine, stripHtml } from "./render.ts";
 
 const MAIL_STATE_VERSION = 1;
 const BECKETT_MAIL_CLIENT_ID = "beckett-mail-v1";
@@ -181,24 +182,19 @@ function formatDate(value: Date | string): string {
   return Number.isNaN(date.valueOf()) ? String(value) : date.toISOString().replace(".000Z", "Z");
 }
 
-/** Deliberately small HTML fallback for terminal output; text bodies are always preferred. */
-export function stripHtml(html: string): string {
-  return html
-    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, "")
-    .replace(/<\s*br\s*\/?>/gi, "\n")
-    .replace(/<\s*\/p\s*>/gi, "\n")
-    .replace(/<[^>]*>/g, "")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
+/**
+ * The HTML-to-text fallback lives in {@link ./render.ts} with the rest of the rendering rules;
+ * re-exported here so this module's long-standing importers keep the same import site.
+ */
+export { stripHtml };
 
-/** Render full headers and a text-first body for `beckett mail read`. */
+/**
+ * Render full headers and a text-first body for `beckett mail read`.
+ *
+ * The body is wrapped by {@link fenceUntrusted}: an AgentMail message is third-party content
+ * exactly like one that arrives through the domain intake, and this output can land in a model's
+ * context as tool output, so it gets the same fence rather than a bare body.
+ */
 export function renderMessage(message: MailMessage): string {
   const headers: Array<[string, string | undefined]> = [
     ["Message-ID", message.messageId],
@@ -214,9 +210,11 @@ export function renderMessage(message: MailMessage): string {
   for (const [name, value] of Object.entries(message.headers ?? {})) headers.push([name, value]);
   const renderedHeaders = headers
     .filter(([, value]) => value !== undefined && value !== "")
-    .map(([name, value]) => `${name}: ${value}`);
+    // Collapsed to one bounded line each: a header value is attacker-controlled and is rendered
+    // ABOVE the fence, so a raw newline in a Subject could otherwise forge frame structure here.
+    .map(([name, value]) => `${name}: ${headerLine(String(value))}`);
   const body = message.text?.trim() || message.extractedText?.trim() || stripHtml(message.html || message.extractedHtml || "") || "(no body)";
-  return [...renderedHeaders, "", body].join("\n");
+  return [...renderedHeaders, "", fenceUntrusted(body)].join("\n");
 }
 
 /** Keep an API/server error useful while ensuring a key can never leak through an SDK error. */

@@ -176,7 +176,7 @@ test("github/dns/deploy/mail register and advertise their capabilities with real
     "github.issue-create", "github.issue-list", "github.issue-comment", "github.push",
     "dns.list", "dns.upsert", "dns.remove",
     "deploy.list", "deploy.create", "deploy.remove",
-    "mail.inbox", "mail.send", "mail.list", "mail.read",
+    "mail.inbox", "mail.send", "mail.list", "mail.read", "mail.markRead",
   ]);
   for (const entry of catalog) {
     expect(entry.description.length).toBeGreaterThan(40);
@@ -239,11 +239,21 @@ test("preflight refusals fire BEFORE any side effect, from every organ's invoke"
   expect(deployR.ok).toBeFalse();
   expect(deployR.error).toContain("CLOUDFLARE_API_TOKEN");
 
-  const mailR = await withoutEnv(["AGENTMAIL_API_KEY"], () =>
-    registry.invoke({ capabilityId: "mail.inbox", args: {} }, deps),
+  // mail.inbox is a pure local read now (it reports the on-box store + which secrets are absent),
+  // so the mail organ's credential preflight lives on mail.send — the one capability that needs a
+  // provider. Origin is supplied so this lands on the CREDENTIAL gate, not the origin gate.
+  const mailR = await withoutEnv(["RESEND_API_KEY"], () =>
+    registry.invoke(
+      {
+        capabilityId: "mail.send",
+        args: { to: "a@b.com", subject: "hi", body: "yo" },
+        origin: { userId: "1" },
+      } as never,
+      deps,
+    ),
   );
   expect(mailR.ok).toBeFalse();
-  expect(mailR.error).toContain("AGENTMAIL_API_KEY");
+  expect(mailR.error).toContain("RESEND_API_KEY");
 
   // repo-star is FREE (no origin gate), so it reaches the credential preflight in buildGh. Provide
   // an account so identity resolution gets PAST the account check and lands on the preflight. Strip
@@ -310,7 +320,7 @@ test("asCapability projects the phase-4 organs' v5 facets (incl. the worker-appe
 
   expect(dns.cliHelp).toBe("dns ls|add|rm");
   expect(deploy.cliHelp).toBe("deploy <name>|ls|rm");
-  expect(mail.cliHelp).toBe("mail inbox|send|ls|read");
+  expect(mail.cliHelp).toBe("mail inbox|ls|read|mark-read|send");
 
   // All four project cleanly into the v5 spine (the CLI's exact move).
   const spine = new CapabilityRegistry();

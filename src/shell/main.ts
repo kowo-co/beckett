@@ -63,6 +63,14 @@ import { createBranchStatusService } from "../task/status.ts";
 import { createRunTaskSync } from "../task/run-sync.ts";
 import { createAgentMailApi, defaultMailStateFile, safeMailError } from "../mail/index.ts";
 import { createAgentMailPoller, defaultMailListenerStateFile, type AgentMailPoller } from "../mail/listener.ts";
+import { defaultMailDir } from "../mail/store.ts";
+import {
+  MAIL_INTAKE_SECRET_ENV,
+  MailRateLimiter,
+  resolveIntakeAddress,
+  resolveIntakePort,
+  serveMailIntake,
+} from "../mail/intake.ts";
 import { ExtensionRegistry, type ExtensionContext } from "../ext/index.ts";
 import { opsLogEnabled, startOpsLogSink, type OpsLogSink } from "../ops-log/index.ts";
 import { ActionClass } from "../capability/index.ts";
@@ -109,6 +117,8 @@ interface BootedSystem {
   prPoller: GitHubPrPoller | null;
   activityPoller: GitHubActivityPoller | null;
   mailPoller: AgentMailPoller | null;
+  /** The loopback endpoint the Cloudflare Email Worker POSTs inbound mail to. */
+  mailIntake: { stop: () => void; url: string; port: number } | null;
   /** The run engine (`src/run/supervisor.ts`) — the daemon's only staffing loop. */
   runSupervisor: RunSupervisor;
   concierge: Concierge;
@@ -815,6 +825,35 @@ async function boot(): Promise<BootedSystem> {
     logger.info("AgentMail incoming-email poller disabled (AGENTMAIL_API_KEY is not set)");
   }
 
+  // Inbound mail for this instance's own domain. Cloudflare Email Routing hands the message to
+  // the Email Worker in `workers/mail-intake/`, which signs it and POSTs it to this loopback
+  // listener; the Cloudflare tunnel is what makes that reachable, exactly as for every other
+  // Beckett service. Accepted mail lands in <beckettDir>/mail and produces ONE queued SYSTEM turn
+  // through the same Concierge.notifyIncomingEmail lane the poller above uses — the body is
+  // quoted as untrusted data there, and nothing about an arriving message triggers any action.
+  let mailIntake: { stop: () => void; url: string; port: number } | null = null;
+  const mailIntakeSecret = process.env[MAIL_INTAKE_SECRET_ENV]?.trim();
+  if (mailIntakeSecret) {
+    try {
+      mailIntake = serveMailIntake({
+        mailDir: defaultMailDir(beckettDir),
+        secret: mailIntakeSecret,
+        port: resolveIntakePort(),
+        logger,
+        limiter: new MailRateLimiter(),
+        onAccepted: (fields) => concierge.notifyIncomingEmail(fields),
+      });
+      logger.info("mail intake listening", { url: mailIntake.url, address: resolveIntakeAddress() });
+    } catch (err) {
+      // Intake is additive: a port clash must not stop Discord/tickets from coming up.
+      logger.warn("mail intake failed to start", { error: (err as Error).message });
+      mailIntake?.stop();
+      mailIntake = null;
+    }
+  } else {
+    logger.info(`mail intake disabled (${MAIL_INTAKE_SECRET_ENV} is not set)`);
+  }
+
   // Memory self-healing (OPS-121) now lives in the memory extension (Phase 6): the daily
   // maintain loop arms in the LATE startAll sweep below and stops inside extensions.stopAll.
 
@@ -850,7 +889,7 @@ async function boot(): Promise<BootedSystem> {
 
   logger.info("beckett online", { liveRuns: runSupervisor.live().length });
 
-  return { config, logger, prPoller, activityPoller, mailPoller, runSupervisor, concierge, voiceGateway, statusDashboard, quick, browserAgent, browser, extensions, lifecycleLedgerPath, opsLog };
+  return { config, logger, prPoller, activityPoller, mailPoller, mailIntake, runSupervisor, concierge, voiceGateway, statusDashboard, quick, browserAgent, browser, extensions, lifecycleLedgerPath, opsLog };
 }
 
 /** Tear the system down in reverse boot order. Best-effort: one failure never blocks the rest. */
@@ -873,6 +912,9 @@ async function shutdown(sys: BootedSystem, signal: string): Promise<void> {
   sys.prPoller?.stop();
   sys.activityPoller?.stop();
   sys.mailPoller?.stop();
+  // Close the intake socket before the concierge drains: a message accepted after this point
+  // would have nowhere to deliver its notification turn.
+  sys.mailIntake?.stop();
   // Mirrors startAll's boot position (just before the pollers started). The registry sweep is
   // best-effort per organ — a throwing stop is logged, never blocks the rest of the drain.
   // The browser organ tears down inside this sweep: agent.stopAll settles live runs as errors
