@@ -225,6 +225,16 @@ describe("worker persona composition (Phase 4)", () => {
     }
   });
 
+  // Worker questions route to the concierge, not straight to a human — but only if a worker
+  // actually offers a defaultAnswer and prefers a reasonable assumption over parking at all.
+  test("the implement persona biases the worker toward continuing over parking with a question", () => {
+    const append = stageRegistry.systemAppend("implement", { item: makeItem(), config, env: {} });
+    expect(append).toContain("BIAS TOWARD CONTINUING");
+    expect(append).toContain("do NOT stop");
+    expect(append).toContain("ALWAYS set defaultAnswer");
+    expect(append).toContain("a \"question\" blocker with no defaultAnswer");
+  });
+
   test("the composed guidance names the configured github owner", () => {
     const owned = validateConfig({ identity: { github_user: "someone-else" } });
     const append = stageRegistry.systemAppend("implement", { item: makeItem(), config: owned, env: {} });

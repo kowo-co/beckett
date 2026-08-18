@@ -65,8 +65,14 @@ export const RUN_FINAL: ReadonlySet<RunState> = new Set<RunState>(["done", "fail
  */
 export type BlockerClass = DoneBlockerClass;
 
-/** Who can clear this. ONLY `"human"` may stop a run — see `./blocker.ts`'s actor table. */
-export type BlockerActor = "human" | "supervisor";
+/**
+ * Who can clear this. `"human"` and `"concierge"` both stop a run — the difference is WHO decides
+ * the answer, not whether the run halts: an owner-class blocker (credential, money, a product
+ * call) needs ro; a plain `"question"` is answerable by the concierge itself from the spec, the
+ * repo, or the original ask, and only escalates to ro when it turns out to be his call after all.
+ * `"supervisor"` is the one value that does NOT stop a run — see `./blocker.ts`'s actor table.
+ */
+export type BlockerActor = "human" | "concierge" | "supervisor";
 
 /**
  * Why a run stopped, typed. The `class` decides the `actor` (`./blocker.ts`) — a worker's own

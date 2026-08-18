@@ -90,7 +90,7 @@ const BLOCKER_CLASSES = [
 
 const BlockerSchema = z.object({
   class: z.enum(BLOCKER_CLASSES),
-  actor: z.enum(["human", "supervisor"]),
+  actor: z.enum(["human", "concierge", "supervisor"]),
   reversible: z.boolean(),
   remedy: z.string(),
   detail: z.string(),

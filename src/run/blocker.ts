@@ -19,13 +19,20 @@ import type { Blocker, BlockerActor, BlockerClass } from "./types.ts";
  * Who can clear each blocker class. The supervisor treats this as the single source of truth:
  * `hold()` logs an error (never silently trusts the caller) if a blocker's `actor` disagrees with
  * this table, because that disagreement means something upstream tried to grant itself a stop.
+ *
+ * `question` maps to `"concierge"`, not `"human"` — a third of opus's runs were parking to ask
+ * something over a recent week, most of it answerable from the spec, the repo, or the original
+ * ask sitting right there. Routing a plain question straight to ro cost a human round-trip it
+ * usually didn't need. `credential`, `admin-permission`, `product-decision`, and `money` stay
+ * `"human"` — those are genuinely ro's call (a secret, a permission grant, a product direction, a
+ * spend) and nothing here should let a worker or the concierge route around him for those.
  */
 const ACTOR_BY_CLASS: Record<BlockerClass, BlockerActor> = {
   credential: "human",
   "admin-permission": "human",
   "product-decision": "human",
   money: "human",
-  question: "human",
+  question: "concierge",
   // "human" for now (not "supervisor") because nothing in this PR gives the supervisor a real
   // auto-resume transition for a transient failure — every harness-exit done-signal comes through
   // here with class "transient" (`src/drivers/pi.ts`), and an actor the run cannot itself clear
@@ -47,9 +54,13 @@ export function makeBlocker(
   return { ...input, actor: ACTOR_BY_CLASS[input.class], at: now().toISOString() };
 }
 
-/** Only a human-actor blocker stops a run. Everything else is the supervisor's own business. */
+/**
+ * A `"supervisor"`-actor blocker is the only one that does NOT stop a run — everything else
+ * (`"human"`, `"concierge"`) needs someone outside the run to decide the answer, whether that
+ * someone is ro or the concierge answering on its own.
+ */
 export function stopsTheRun(b: Blocker): boolean {
-  return b.actor === "human";
+  return b.actor !== "supervisor";
 }
 
 /**

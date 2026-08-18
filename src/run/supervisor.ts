@@ -1479,7 +1479,8 @@ export class RunSupervisor {
   /**
    * The `runs.question_wait_s` clock ran out with nobody answering. A `defaultAnswer` resumes the
    * run exactly as `--answer` would; its absence hands the same question to `hold()` as a typed
-   * `class: "question"` blocker — still a human-actor stop, but only after silence, not by default.
+   * `class: "question"` blocker — still a stop (the concierge actor, per `blocker.ts`'s
+   * ACTOR_BY_CLASS), but only after silence, not by default.
    */
   private async onQuestionTimeout(runId: string): Promise<void> {
     this.askTimers.delete(runId);

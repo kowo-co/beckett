@@ -201,6 +201,32 @@ test("a parked run always speaks — nothing will re-staff it, so silence would 
   expect(asks[0]).toContain("rework cycle 2/2");
 });
 
+test("awaiting_input tells the concierge to answer first, escalating only when it's the owner's call", async () => {
+  // Worker questions route to the concierge (`./blocker.ts`'s ACTOR_BY_CLASS: class "question" ->
+  // actor "concierge"), not straight to a human — this turn is where that policy actually reaches
+  // the concierge's own instructions, so pin the wording rather than just the routing.
+  const { concierge, asks } = harness();
+  concierge.notify(
+    change("awaiting_input", {
+      question: {
+        stage: "implement",
+        text: "Which OAuth provider should this integrate with?",
+        defaultAnswer: "GitHub",
+        askedAt: "2026-08-10T00:00:00.000Z",
+        expiresAt: "2026-08-10T00:30:00.000Z",
+      },
+    }),
+  );
+  await new Promise((r) => setTimeout(r, 0));
+  expect(asks.length).toBe(1);
+  expect(asks[0]).toContain("Which OAuth provider should this integrate with?");
+  expect(asks[0]).toContain("Answer it yourself if you can");
+  expect(asks[0]).toContain("beckett task resume run-20260810-healthz --answer");
+  expect(asks[0]).toContain("Escalate to the owner in-channel only when this is genuinely his call");
+  expect(asks[0]).not.toContain("Ask the person in-channel");
+  expect(asks[0]).toContain("I will proceed with: GitHub");
+});
+
 test("surfaces `done` and carries the shipped PR link so the person can click through", async () => {
   const { concierge, asks } = harness();
   concierge.notify(change("done", { prUrl: "https://github.com/0xbeckett/healthz/pull/3" }, "publishing"));

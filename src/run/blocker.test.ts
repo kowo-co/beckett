@@ -25,13 +25,28 @@ describe("blockerFromDoneSignal", () => {
     expect(blockerFromDoneSignal(continuation, NOW).actor).toBe("supervisor");
   });
 
+  test("a plain question routes to the concierge, not straight to ro", () => {
+    // Worker questions route to the concierge by default (most are answerable from the spec, the
+    // repo, or the original ask) — only the owner-class blockers below still name "human".
+    const question: DoneBlocker = {
+      class: "question",
+      detail: "should the retry limit be 3 or 5?",
+      remedy: "answer it",
+      defaultAnswer: "3",
+    };
+    expect(blockerFromDoneSignal(question, NOW).actor).toBe("concierge");
+  });
+
   test("every class maps to exactly the actor the table says, not the caller's preference", () => {
-    const cases: Array<[DoneBlocker["class"], "human" | "supervisor"]> = [
+    const cases: Array<[DoneBlocker["class"], "human" | "concierge" | "supervisor"]> = [
+      // Owner-class: only ro can clear these — a credential, an admin grant, a product call, or
+      // money — so they must still name "human", exactly as before this change.
       ["credential", "human"],
       ["admin-permission", "human"],
       ["product-decision", "human"],
       ["money", "human"],
-      ["question", "human"],
+      // A plain question is the concierge's to answer first (see the test above).
+      ["question", "concierge"],
       // "transient" maps to "human" (not "supervisor") for now: nothing in this PR gives the
       // supervisor a real auto-resume transition, so a worker-emitted transient blocker must
       // still stop the run rather than tripping hold()'s missing-transition guard on every
@@ -76,6 +91,18 @@ describe("stopsTheRun", () => {
       NOW,
     );
     expect(stopsTheRun(credential)).toBe(true);
+  });
+
+  test("a concierge-actor blocker also stops the run — it still needs someone to decide", () => {
+    // A "question" reaching hold() (the timeout-with-no-default path, `supervisor.ts`'s
+    // onQuestionTimeout) must still park the run rather than trip hold()'s missing-transition
+    // guard: "concierge" is a stop, exactly like "human", just a different decider.
+    const question = makeBlocker(
+      { class: "question", reversible: true, remedy: "answer it", detail: "d", defaultAnswer: null, stage: null },
+      NOW,
+    );
+    expect(question.actor).toBe("concierge");
+    expect(stopsTheRun(question)).toBe(true);
   });
 });
 
