@@ -448,6 +448,203 @@ test("a human message carries no peer stamp (empty allowlist is today's behavior
   expect(normalized.peer).toBeUndefined();
 });
 
+// ── observed bots (bots Beckett may READ but never talk to; observed.ts) ──────────────────
+
+test("an observed bot message is normalized with its own stamp, never as a peer, and cannot address Beckett", async () => {
+  const gateway = new DiscordJsGateway();
+  (gateway as unknown as { client: { user: { id: string } } }).client = { user: { id: "bot-1" } };
+  // The observed-bots allowlist (config baseline; no live observed-bots.txt needed for the test).
+  (gateway as unknown as { baselineObserved: Set<string> }).baselineObserved = new Set(["booper-2"]);
+
+  const normalized = await (
+    gateway as unknown as {
+      normalize: (msg: Record<string, unknown>) => Promise<{
+        peer?: { botId: string; displayName: string };
+        observedBot?: { botId: string; displayName: string };
+        authorIsBot: boolean;
+        mentionsBot: boolean;
+      }>;
+    }
+  ).normalize({
+    id: "observed-msg-1",
+    guildId: "guild-1",
+    channelId: "chan-1",
+    channel: { name: "booper-logs" },
+    // Even a literal @mention / addressing content must not read as an address (mentions.has
+    // below deliberately returns true, as if booper's raw text happened to ping the bot).
+    content: "@beckett some generated nonsense",
+    createdTimestamp: 0,
+    author: { id: "booper-2", bot: true, username: "booper", globalName: null },
+    member: null,
+    mentions: { has: () => true },
+    attachments: new Map(),
+  });
+
+  expect(normalized.authorIsBot).toBe(true);
+  expect(normalized.observedBot).toEqual({ botId: "booper-2", displayName: "booper" });
+  // Distinguishable from a peer — never stamped `peer`, so it can never be filed as `role:peer`.
+  expect(normalized.peer).toBeUndefined();
+  // The whole point: an observed bot cannot address Beckett, no matter what the raw event says.
+  expect(normalized.mentionsBot).toBe(false);
+});
+
+test("an id listed in both federation.peers and observed_bots is stamped only as a peer", async () => {
+  const gateway = new DiscordJsGateway();
+  (gateway as unknown as { client: { user: { id: string } } }).client = { user: { id: "bot-1" } };
+  (gateway as unknown as { baselinePeers: Set<string> }).baselinePeers = new Set(["dual-bot"]);
+  (gateway as unknown as { baselineObserved: Set<string> }).baselineObserved = new Set(["dual-bot"]);
+
+  const normalized = await (
+    gateway as unknown as {
+      normalize: (msg: Record<string, unknown>) => Promise<{
+        peer?: unknown;
+        observedBot?: unknown;
+      }>;
+    }
+  ).normalize({
+    id: "dual-msg-1",
+    guildId: "guild-1",
+    channelId: "chan-1",
+    channel: { name: "ops" },
+    content: "hi",
+    createdTimestamp: 0,
+    author: { id: "dual-bot", bot: true, username: "dual", globalName: null },
+    member: null,
+    mentions: { has: () => false },
+    attachments: new Map(),
+  });
+
+  expect(normalized.peer).toBeDefined();
+  expect(normalized.observedBot).toBeUndefined();
+});
+
+/** Wire the real listeners onto a fake client and hand back the captured event callback. */
+function messageCreateHarness(botId = "bot-1") {
+  const gateway = new DiscordJsGateway();
+  const listeners = new Map<string, (...args: any[]) => void>();
+  const client = {
+    user: { id: botId },
+    on: (event: string, cb: (...args: any[]) => void) => listeners.set(String(event), cb),
+    rest: { on: () => undefined },
+  };
+  (gateway as unknown as { client: unknown }).client = client;
+  (gateway as unknown as { wireListeners: (c: unknown) => void }).wireListeners(client);
+  return { gateway, emit: (msg: unknown) => listeners.get(Events.MessageCreate)!(msg) };
+}
+
+/** Minimal raw discord.js message shape normalize() can digest without further stubbing. */
+function rawBotMessage(over: Record<string, unknown> = {}) {
+  return {
+    id: "m-1",
+    guildId: "guild-1",
+    channelId: "chan-1",
+    channel: { name: "booper-logs" },
+    content: "generated line",
+    createdTimestamp: 0,
+    author: { id: "some-bot", bot: true, username: "bot", globalName: null },
+    member: null,
+    mentions: { has: () => false },
+    attachments: new Map(),
+    ...over,
+  };
+}
+
+test("an unlisted bot's message never reaches the handler", async () => {
+  const { gateway, emit } = messageCreateHarness();
+  (gateway as unknown as { baselineObserved: Set<string> }).baselineObserved = new Set(["booper-2"]);
+  const seen: unknown[] = [];
+  gateway.onMessage((m) => { seen.push(m); });
+
+  emit(rawBotMessage({ author: { id: "some-other-bot", bot: true, username: "x", globalName: null } }));
+  await new Promise((r) => setTimeout(r, 0));
+
+  expect(seen).toEqual([]);
+});
+
+test("an allow-listed observed bot's message reaches the handler, stamped observed", async () => {
+  const { gateway, emit } = messageCreateHarness();
+  (gateway as unknown as { baselineObserved: Set<string> }).baselineObserved = new Set(["booper-2"]);
+  const seen: any[] = [];
+  gateway.onMessage((m) => { seen.push(m); });
+
+  emit(rawBotMessage({ author: { id: "booper-2", bot: true, username: "booper", globalName: null } }));
+  await new Promise((r) => setTimeout(r, 0));
+
+  expect(seen).toHaveLength(1);
+  expect(seen[0].observedBot).toEqual({ botId: "booper-2", displayName: "booper" });
+  expect(seen[0].peer).toBeUndefined();
+});
+
+test("the daemon's own id is always dropped, even if mistakenly listed as observed", async () => {
+  const { gateway, emit } = messageCreateHarness("bot-1");
+  (gateway as unknown as { baselineObserved: Set<string> }).baselineObserved = new Set(["bot-1"]);
+  const seen: unknown[] = [];
+  gateway.onMessage((m) => { seen.push(m); });
+
+  emit(rawBotMessage({ author: { id: "bot-1", bot: true, username: "beckett", globalName: null } }));
+  await new Promise((r) => setTimeout(r, 0));
+
+  expect(seen).toEqual([]);
+});
+
+test("a chatty observed bot is capped by its own per-channel burst budget", async () => {
+  const { gateway, emit } = messageCreateHarness();
+  (gateway as unknown as { baselineObserved: Set<string> }).baselineObserved = new Set(["booper-2"]);
+  (gateway as unknown as { observedBurst: { allow: (c: string) => boolean } }).observedBurst = {
+    allow: (() => {
+      let n = 0;
+      return () => ++n <= 2;
+    })(),
+  };
+  const seen: unknown[] = [];
+  gateway.onMessage((m) => { seen.push(m); });
+
+  const author = { id: "booper-2", bot: true, username: "booper", globalName: null };
+  emit(rawBotMessage({ id: "m1", author }));
+  emit(rawBotMessage({ id: "m2", author }));
+  emit(rawBotMessage({ id: "m3", author }));
+  await new Promise((r) => setTimeout(r, 0));
+
+  expect(seen).toHaveLength(2); // the 3rd was dropped by the burst backstop
+});
+
+test("downtime catch-up carries an observed bot through, but never self even if listed", async () => {
+  const gateway = new DiscordJsGateway();
+  (gateway as unknown as { baselineObserved: Set<string> }).baselineObserved = new Set(["booper-2", "bot-1"]);
+  const raw = (id: string, authorId: string, bot: boolean) => ({
+    id,
+    createdTimestamp: Number(id.replace(/\D/g, "")) || 1,
+    guildId: "guild-1",
+    channelId: "chan-1",
+    channel: { name: "booper-logs" },
+    content: `message ${id}`,
+    author: { id: authorId, bot, username: authorId, globalName: null },
+    member: bot ? null : { displayName: authorId, roles: { cache: new Map() } },
+    mentions: { has: () => false },
+    reference: null,
+    attachments: new Map(),
+  });
+  const channel = {
+    isTextBased: () => true,
+    messages: {
+      fetch: async () =>
+        new Map([
+          ["observed-1", raw("observed-1", "booper-2", true)], // allow-listed observed bot
+          ["self-1", raw("self-1", "bot-1", true)], // our own id — never, even if listed
+          ["stranger-1", raw("stranger-1", "some-other-bot", true)], // unlisted bot — dropped
+        ]),
+    },
+  };
+  (gateway as unknown as { client: unknown }).client = {
+    user: { id: "bot-1" },
+    channels: { fetch: async () => channel },
+  };
+
+  const messages = await gateway.fetchMessagesAfter("chan-1", "stored-1");
+  expect(messages.map((m) => m.messageId)).toEqual(["observed-1"]);
+  expect(messages[0]!.observedBot).toEqual({ botId: "booper-2", displayName: "booper-2" });
+});
+
 test("interactionCreate defers component clicks ephemerally before routing", async () => {
   const gateway = new DiscordJsGateway();
   const listeners = new Map<string, (...args: any[]) => void>();

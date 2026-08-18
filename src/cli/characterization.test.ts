@@ -286,6 +286,12 @@ const CASES: Case[] = [
   { name: "federation: add of a valid bot id", argv: ["federation", "add", "12345678901234567"] },
   { name: "federation: remove without an id prints usage", argv: ["federation", "remove"] },
   { name: "federation: unknown sub prints usage", argv: ["federation", "bogus"] },
+  { name: "observed: ls on an empty live file (config baseline still shows)", argv: ["observed", "ls"] },
+  { name: "observed: add without an id prints usage", argv: ["observed", "add"] },
+  { name: "observed: add of an invalid id is rejected", argv: ["observed", "add", "abc"] },
+  { name: "observed: add of a valid bot id", argv: ["observed", "add", "12345678901234567"] },
+  { name: "observed: remove without an id prints usage", argv: ["observed", "remove"] },
+  { name: "observed: unknown sub prints usage", argv: ["observed", "bogus"] },
 
   // ── channels (daemon down → the at-rest files fallback) ─────────────────────────────────
   { name: "channels: list falls back to files with the daemon down", argv: ["channels", "list"] },

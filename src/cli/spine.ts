@@ -100,6 +100,7 @@ export const SPINE: SpineEntry[] = [
   { id: "access", cliHelp: "access ls|grant|revoke", verbs: [{ name: "access", load: core((m) => m.runAccess) }] },
   { id: "maintainer", cliHelp: "maintainer ls|grant|revoke", verbs: [{ name: "maintainer", load: core((m) => m.runMaintainer) }] },
   { id: "federation", cliHelp: "federation ls|add|remove", verbs: [{ name: "federation", load: core((m) => m.runFederation) }] },
+  { id: "observed", cliHelp: "observed ls|add|remove", verbs: [{ name: "observed", load: core((m) => m.runObserved) }] },
   { id: "channels", cliHelp: "channels list|search|recall|wipe", verbs: [{ name: "channels", load: core((m) => m.runChannels) }] },
   { id: "identity", cliHelp: "identity set|show|list", verbs: [{ name: "identity", load: core((m) => m.runIdentity) }] },
   {
