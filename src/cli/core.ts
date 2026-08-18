@@ -32,6 +32,7 @@ import {
 import { resolvePingTargets, renderMentions } from "../discord/mentions.ts";
 import { getPerson, upsertPerson } from "../memory/people.ts";
 import { readJournal, DEFAULT_TAIL_LINES } from "../progress/journal.ts";
+import { readChillTransformLog, formatChillTransformLog, DEFAULT_TAIL_RECORDS } from "../concierge/chilltext-log.ts";
 import type { Casting } from "../run/cast.ts";
 import { projectSlug } from "../run/cast.ts";
 import { parseSince, readSpendLedger, summarizeSpend } from "../spend.ts";
@@ -383,6 +384,19 @@ export async function runJournal(argv: string[]): Promise<void> {
   const body = readJournal(paths.journalDir, sub, tail);
   if (body === null) out(`(no journal for ${sub} — no worker has run for it on this host)`);
   out(body);
+}
+
+// ── chilltext-log (in-process: the chilltext rewrite before/after transcript) ──────────────
+// The direct answer to "show like exact logs and stuff" (ro, 2026-08-18): every `deliverChilled`
+// transform call appends a record to `paths.chilltextLog` (`src/concierge/chilltext-log.ts`); this
+// prints the last N of them, input/before/after side by side, so an incident is diagnosable from
+// disk without correlating channel transcripts by hand.
+export async function runChillTransformLog(argv: string[]): Promise<void> {
+  const { flags } = parse(argv);
+  const tail = flags.tail ? Number(flags.tail) : DEFAULT_TAIL_RECORDS;
+  if (!Number.isInteger(tail) || tail < 1) fail("--tail must be a positive integer");
+  const records = readChillTransformLog(paths.chilltextLog);
+  out(formatChillTransformLog(records, tail));
 }
 
 // ── identity (in-process: per-user Discord name map, ~/.beckett/identities.json) ───────────

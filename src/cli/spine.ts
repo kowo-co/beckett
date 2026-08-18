@@ -202,6 +202,11 @@ export const SPINE: SpineEntry[] = [
 
   { id: "spend", verbs: [{ name: "spend", load: core((m) => m.runSpend) }] },
   { id: "journal", verbs: [{ name: "journal", load: core((m) => m.runJournal) }] },
+  {
+    id: "chilltext-log",
+    cliHelp: "chilltext-log [--tail N]",
+    verbs: [{ name: "chilltext-log", load: core((m) => m.runChillTransformLog) }],
+  },
   { id: "config", verbs: [{ name: "config", load: core((m) => m.runConfig) }] },
 ];
 

@@ -94,6 +94,7 @@ export function buildPaths(config: Config, env: PathEnv = process.env): Paths {
     proposalsDir: join(beckettDir, "proposals"),
     companyFile: join(beckettDir, "company.md"),
     workspacesFile: join(beckettDir, "workspaces.json"),
+    chilltextLog: join(beckettDir, "chilltext-transforms.jsonl"),
   };
 }
 

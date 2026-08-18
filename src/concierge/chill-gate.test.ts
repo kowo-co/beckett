@@ -5,10 +5,11 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deliverChilled } from "./chill-gate.ts";
+import { readChillTransformLog } from "./chilltext-log.ts";
 import { chillTransform, type ChilltextConfig, type ChillTransformResult } from "../chilltext.ts";
 import type { DiscordGateway, Logger, ReplyOptions } from "../types.ts";
 
@@ -47,6 +48,10 @@ function fakeGateway(): { gateway: DiscordGateway; posts: Post[] } {
 function noSleep() {
   const calls: number[] = [];
   return { sleep: async (ms: number) => { calls.push(ms); }, calls };
+}
+
+function tmpLogPath(): string {
+  return join(mkdtempSync(join(tmpdir(), "beckett-gate-log-")), "chilltext-transforms.jsonl");
 }
 
 describe("deliverChilled — bypass / fallback (fail-open)", () => {
@@ -470,5 +475,146 @@ describe("deliverChilled — a missing persona file never costs a message", () =
       { channelId: CHAN, text: "a normal reply that would have been chilled", opts: undefined },
     ]);
     expect(id).toBe("msg-1");
+  });
+});
+
+describe("deliverChilled — chilltext transform transcript (logPath)", () => {
+  test("no logPath given: nothing is logged, delivery is unaffected", async () => {
+    const { gateway, posts } = fakeGateway();
+    const id = await deliverChilled(CHAN, "a normal reply here", {
+      gateway,
+      cfg: cfg(),
+      sleep: async () => {},
+      transform: async () => ({ messages: ["hey there"] }),
+    });
+    expect(posts).toHaveLength(1);
+    expect(id).toBe("msg-1");
+  });
+
+  test("a normal chilled transform writes one 'ok' record with input/before/after and per-bubble echo scores", async () => {
+    const { gateway } = fakeGateway();
+    const logPath = tmpLogPath();
+    await deliverChilled(CHAN, "the real reply beckett meant to send", {
+      gateway,
+      cfg: cfg(),
+      input: "what's the status",
+      sleep: async () => {},
+      transform: async () => ({ messages: ["hey", "so about that"] }),
+      logPath,
+    });
+    const rows = readChillTransformLog(logPath);
+    expect(rows).toHaveLength(1);
+    const row = rows[0]!;
+    expect(row.channelId).toBe(CHAN);
+    expect(row.input).toBe("what's the status");
+    expect(row.agentOutput).toBe("the real reply beckett meant to send");
+    expect(row.outcome).toBe("ok");
+    expect(row.durationMs).toBeGreaterThanOrEqual(0);
+    expect(row.bubbles).toEqual([
+      { rewritten: "hey", posted: "hey", echoFallback: false, echoContentScore: expect.any(Number), echoFullScore: expect.any(Number) },
+      {
+        rewritten: "so about that",
+        posted: "so about that",
+        echoFallback: false,
+        echoContentScore: expect.any(Number),
+        echoFullScore: expect.any(Number),
+      },
+    ]);
+  });
+
+  test("a bypassed delivery writes a 'bypassed' record with no bubbles", async () => {
+    const { gateway } = fakeGateway();
+    const logPath = tmpLogPath();
+    await deliverChilled(CHAN, "a normal reply here", {
+      gateway,
+      cfg: cfg({ enabled: false }),
+      logPath,
+    });
+    const rows = readChillTransformLog(logPath);
+    expect(rows).toEqual([
+      expect.objectContaining({ channelId: CHAN, outcome: "bypassed", agentOutput: "a normal reply here", bubbles: null }),
+    ]);
+  });
+
+  test("transform returns null: writes a 'fallback' record, not 'threw'", async () => {
+    const { gateway } = fakeGateway();
+    const logPath = tmpLogPath();
+    await deliverChilled(CHAN, "would have been chilled", {
+      gateway,
+      cfg: cfg(),
+      transform: async () => null,
+      logPath,
+    });
+    const rows = readChillTransformLog(logPath);
+    expect(rows).toEqual([expect.objectContaining({ outcome: "fallback", bubbles: null })]);
+  });
+
+  test("a throwing transform writes a 'threw' record", async () => {
+    const { gateway } = fakeGateway();
+    const logPath = tmpLogPath();
+    await deliverChilled(CHAN, "would have been chilled", {
+      gateway,
+      cfg: cfg(),
+      transform: async () => {
+        throw new Error("boom");
+      },
+      logPath,
+    });
+    const rows = readChillTransformLog(logPath);
+    expect(rows).toEqual([expect.objectContaining({ outcome: "threw", bubbles: null })]);
+  });
+
+  test("an echoed bubble is recorded with echoFallback true and its scores, alongside the un-echoed bubble", async () => {
+    const INPUT =
+      "right thats the correct flow. questions or like 90% of things should go to you, not me. " +
+      "cuz imagine bothering the ceo with every task, you da cto so you gotta step up and be a leader lol.";
+    const ECHOED_BUBBLE =
+      "yeah that's the right flow. questions or like 90% of stuff should go to you, not me. " +
+      "imagine bothering the ceo with every task, you're the cto, so you gotta step up and lead lol.";
+    const ORIGINAL_TEXT = "the real reply beckett actually meant to send";
+    const { gateway } = fakeGateway();
+    const logPath = tmpLogPath();
+    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+      gateway,
+      cfg: cfg(),
+      input: INPUT,
+      sleep: async () => {},
+      transform: async () => ({ messages: ["all good here", ECHOED_BUBBLE] }),
+      logPath,
+    });
+    const rows = readChillTransformLog(logPath);
+    const bubbles = rows[0]!.bubbles!;
+    expect(bubbles[0]).toEqual(
+      expect.objectContaining({ rewritten: "all good here", posted: "all good here", echoFallback: false }),
+    );
+    expect(bubbles[1]).toEqual(
+      expect.objectContaining({ rewritten: ECHOED_BUBBLE, posted: ORIGINAL_TEXT, echoFallback: true }),
+    );
+    expect(bubbles[1]!.echoContentScore).toBeGreaterThanOrEqual(0.65);
+  });
+
+  test("a log-write failure never breaks delivery — the reply still posts", async () => {
+    // The log's directory can't be created (its parent is a file, not a directory), so every
+    // append fails — the delivery itself must still succeed exactly as it would with no logPath.
+    const dir = mkdtempSync(join(tmpdir(), "beckett-gate-log-"));
+    const blocker = join(dir, "blocker");
+    writeFileSync(blocker, "not a directory");
+    const badLogPath = join(blocker, "chilltext-transforms.jsonl");
+    const { gateway, posts } = fakeGateway();
+    const warnings: Array<[string, unknown]> = [];
+    const logger = { warn: (msg: string, meta?: unknown) => warnings.push([msg, meta]) } as unknown as Logger;
+
+    const id = await deliverChilled(CHAN, "a normal reply here", {
+      gateway,
+      cfg: cfg(),
+      sleep: async () => {},
+      transform: async () => ({ messages: ["hey", "so about that"] }),
+      logPath: badLogPath,
+      logger,
+    });
+
+    expect(posts.map((p) => p.text)).toEqual(["hey", "so about that"]);
+    expect(id).toBe("msg-1");
+    expect(warnings.some(([msg]) => msg.includes("chilltext transform log write failed"))).toBe(true);
   });
 });
