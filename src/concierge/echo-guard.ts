@@ -41,6 +41,19 @@
  * plausibly corresponds to it, `repaired` carries that stripped remainder so the caller can REPAIR
  * the bubble instead of discarding the whole thing; otherwise `repaired` is `null` and the caller
  * should fall back to `originalText`, same as the whole-bubble case.
+ *
+ * Incident (2026-08-18, channel 1520986792373911622, a second delivery): the leading/trailing-span
+ * check above fired on a bubble that legitimately QUOTED the user's own message (`answered "for
+ * jesus"`) — the rewrite was byte-identical to `originalText`, nothing was echoed, but a 4-token
+ * trailing window happened to score just past the whole-bubble thresholds anyway (short windows
+ * against a short `input` make Dice coefficients noisy), and the repair then stripped the matched
+ * span AND everything after it, truncating the message at a dangling open quote. Three fixes:
+ * the leading/trailing-span check now requires BOTH Dice scores to cross threshold, not either —
+ * strictly more conservative than the whole-bubble OR, never looser (`tripsEdgeEchoThreshold`); a
+ * candidate span sitting inside quote characters is never treated as an echo, quotation being
+ * normal writing (`isQuotedSpan`); and — the cheapest and most direct fix — when `bubble` is
+ * byte-identical to `originalText` the rewrite touched nothing, so `detectEchoedInput` returns
+ * `echoed: false` unconditionally before scoring against `input` even begins.
  */
 
 const STOPWORDS = new Set([
@@ -223,9 +236,7 @@ interface EchoCheckResult {
 }
 
 /** Trip threshold for `contentScore` — tuned above the ~0.5 a legitimate shared filename/number
- * reply produces, and comfortably below the incident's ~0.8. Reused for the leading/trailing-span
- * check: a genuinely echoed span is (near-)verbatim, not merely topically related, so the same bar
- * applies. */
+ * reply produces, and comfortably below the incident's ~0.8. */
 const CONTENT_OVERLAP_THRESHOLD = 0.65;
 /** Trip threshold for `fullScore` — deliberately high: two ordinary sentences share plenty of
  * stopwords by chance, so only a near-total token overlap should trip this channel. */
@@ -292,31 +303,79 @@ function tripsEchoThreshold(contentScore: number, fullScore: number): boolean {
   return contentScore >= CONTENT_OVERLAP_THRESHOLD || fullScore >= FULL_TOKEN_OVERLAP_THRESHOLD;
 }
 
+/** Trip condition for a leading/trailing-span match (`findEdgeSpan`). The whole-bubble check
+ * above trips on EITHER score alone, which is fine at whole-bubble scale where both sets are
+ * large enough that a lone score crossing threshold is meaningful. A span window is much
+ * smaller — often just a handful of tokens — where Dice coefficients are noisy: a couple of
+ * coincidentally shared words against a short `input` can swing `contentScore` past 0.65 on its
+ * own with no genuine echo behind it (2026-08-18 incident: a 4-token trailing window scored
+ * content=0.67/full=0.67 off nothing but a quoted word plus two unrelated trailing words). The
+ * repair path must be AT LEAST as conservative as the whole-bubble check, never looser, so it
+ * requires BOTH scores to cross threshold together — strictly stricter than the OR above. A
+ * genuine echo (PR #303's `"yeah merge it"` prefix) still saturates both scores near 1.0, so this
+ * costs nothing against the real case it exists to catch. */
+function tripsEdgeEchoThreshold(contentScore: number, fullScore: number): boolean {
+  return contentScore >= CONTENT_OVERLAP_THRESHOLD && fullScore >= FULL_TOKEN_OVERLAP_THRESHOLD;
+}
+
+/** Straight and curly quote pairs a deliberately quoted span may sit inside. */
+const QUOTE_PAIRS: ReadonlyArray<readonly [string, string]> = [
+  ['"', '"'],
+  ["'", "'"],
+  ["“", "”"],
+  ["‘", "’"],
+];
+
+/** True when `text[start, end)` is immediately wrapped by a matching quote pair — i.e. the span is
+ * a deliberate quotation (`answered "for jesus"`), not a prepended/appended echo. A quotation is
+ * normal writing a reply is expected to contain; it is not the failure mode this guard exists to
+ * catch, so a span sitting inside quotes must never count as an echo. */
+function isQuotedSpan(text: string, start: number, end: number): boolean {
+  const before = text[start - 1];
+  const after = text[end];
+  if (before === undefined || after === undefined) return false;
+  return QUOTE_PAIRS.some(([open, close]) => before === open && after === close);
+}
+
 /**
  * Find the leading (`edge: "start"`) or trailing (`edge: "end"`) run of `bubbleTokens` whose
- * overlap with `inputTokens` crosses the whole-bubble echo bar on its own. Search window
+ * overlap with `inputTokens` crosses `tripsEdgeEchoThreshold` on its own. Search window
  * sizes are centered on `inputTokens.length` (±`EDGE_WINDOW_SLACK`) — the "obvious" sizing for a
- * span that is supposed to BE the input, near-verbatim. Returns the token count of the best
- * matching window, or `null` when nothing in range trips.
+ * span that is supposed to BE the input, near-verbatim. The winning window is rejected outright
+ * when it sits inside quote characters — see `isQuotedSpan`. Returns the token count of the best
+ * matching window, or `null` when nothing in range trips (or the only match found is a quotation).
  *
  * Ranked by `fullScore`, not `contentScore`: `fullScore` counts every token including stopwords,
  * so it strictly peaks once the window's word set first covers the input's — a window one token
  * short (e.g. missing a trailing stopword the input actually ends on) scores lower on `fullScore`
  * even when `contentScore` is already saturated and can't tell the two apart.
  */
-function findEdgeSpan(bubbleTokens: OffsetToken[], inputTokens: string[], edge: "start" | "end"): number | null {
+function findEdgeSpan(
+  bubble: string,
+  bubbleTokens: OffsetToken[],
+  inputTokens: string[],
+  edge: "start" | "end",
+): number | null {
   const lower = Math.max(1, inputTokens.length - EDGE_WINDOW_SLACK);
   const upper = Math.min(bubbleTokens.length, inputTokens.length + EDGE_WINDOW_SLACK);
-  let best: { w: number; fullScore: number } | null = null;
+  let best: { w: number; fullScore: number; window: OffsetToken[] } | null = null;
   for (let w = lower; w <= upper; w++) {
     const window = edge === "start" ? bubbleTokens.slice(0, w) : bubbleTokens.slice(bubbleTokens.length - w);
     const words = window.map((t) => t.word);
     const { contentScore, fullScore } = scoreTokens(words, inputTokens);
-    if (tripsEchoThreshold(contentScore, fullScore) && (!best || fullScore > best.fullScore)) {
-      best = { w, fullScore };
+    if (tripsEdgeEchoThreshold(contentScore, fullScore) && (!best || fullScore > best.fullScore)) {
+      best = { w, fullScore, window };
     }
   }
-  return best ? best.w : null;
+  if (!best) return null;
+  // Quote-check the WINNING window only, not every candidate: a window widened by
+  // `EDGE_WINDOW_SLACK` beyond the true quoted span (padded with a token or two of real,
+  // unquoted reply text at the boundary) would otherwise dodge a per-candidate quote check while
+  // still being fundamentally the same quotation, just measured one token off. If the best match
+  // found is a deliberate quotation, the whole edge is not an echo — there is no genuine
+  // second-best match hiding behind it worth falling back to.
+  if (isQuotedSpan(bubble, best.window[0]!.start, best.window[best.window.length - 1]!.end)) return null;
+  return best.w;
 }
 
 /** Trailing/leading punctuation and whitespace left dangling once the echoed span next to it is
@@ -355,7 +414,7 @@ function findPartialEcho(bubble: string, inputTokens: string[], originalText: st
   if (bubbleTokens.length === 0) return undefined;
 
   for (const edge of ["start", "end"] as const) {
-    const w = findEdgeSpan(bubbleTokens, inputTokens, edge);
+    const w = findEdgeSpan(bubble, bubbleTokens, inputTokens, edge);
     if (w === null) continue;
     const remainder = stripEdgeSpan(bubble, bubbleTokens, w, edge);
     return isPlausibleRepair(remainder, originalText) ? remainder : null;
@@ -370,9 +429,11 @@ function findPartialEcho(bubble: string, inputTokens: string[], originalText: st
  * test the threshold directly.
  *
  * `originalText`, when supplied, is the un-chilled reply the bubble was rewritten from. It is used
- * ONLY to validate a leading/trailing-span repair (does what's left over plausibly correspond to
- * it?) — it plays no part in the whole-bubble check, which is unchanged from before this parameter
- * existed.
+ * to validate a leading/trailing-span repair (does what's left over plausibly correspond to it?),
+ * and — before any scoring happens at all — as an invariant: when `bubble` is byte-identical to
+ * `originalText`, the rewrite service returned the reply untouched, so there is nothing it could
+ * have corrupted. No overlap with `input`, however high, is grounds to touch a bubble the rewrite
+ * didn't change; a legitimate reply is free to quote the user's own words at length.
  */
 export function detectEchoedInput(bubble: string, input: string, originalText?: string): EchoCheckResult {
   const bubbleTokens = tokenize(bubble);
@@ -382,6 +443,11 @@ export function detectEchoedInput(bubble: string, input: string, originalText?: 
   }
 
   const { contentScore, fullScore } = scoreTokens(bubbleTokens, inputTokens);
+
+  if (originalText !== undefined && bubble === originalText) {
+    return { echoed: false, contentScore, fullScore, repaired: null };
+  }
+
   if (tripsEchoThreshold(contentScore, fullScore)) {
     return { echoed: true, contentScore, fullScore, repaired: null };
   }

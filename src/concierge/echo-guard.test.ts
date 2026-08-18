@@ -129,6 +129,40 @@ describe("detectEchoedInput — a trailing (appended) echo, mirrored", () => {
   });
 });
 
+describe("detectEchoedInput — the 2026-08-18 quote-truncation incident", () => {
+  // Channel 1520986792373911622. ro said "for jesus"; the reply legitimately quoted it back as
+  // part of the joke. chilltext returned the bubble byte-identical to `before` (nothing was
+  // corrupted), but the repair path stripped the quoted span and everything after it anyway,
+  // posting a message that dead-ends at an open quote.
+  const INPUT = "for jesus";
+  const BUBBLE = 'asked if it likes cake, answered "for jesus". no notes';
+
+  test("a legitimate quote of the user's own words is passed through unchanged, no repair", () => {
+    const result = detectEchoedInput(BUBBLE, INPUT);
+    expect(result.echoed).toBe(false);
+    expect(result.repaired).toBeNull();
+  });
+
+  test("the rewritten === before invariant is an explicit early-out, independent of overlap with input", () => {
+    // A bubble that is byte-identical to `originalText` must pass through untouched even when it
+    // scores well past the whole-bubble echo thresholds against `input` — the rewrite service did
+    // not corrupt anything, so there is nothing for the guard to repair.
+    const text = "yeah for sure, for jesus is right, jesus take the wheel";
+    const result = detectEchoedInput(text, INPUT, text);
+    expect(result.echoed).toBe(false);
+    expect(result.repaired).toBeNull();
+  });
+
+  test("a quoted span sitting at the true edge of the bubble does not trip, even at saturated overlap", () => {
+    // Without the quote guard this trailing window ("shut it down") would score 1.0 on both
+    // Dice coefficients — a textbook trip — but it's a deliberate quotation, not an echo.
+    const input = "shut it down";
+    const bubble = 'honestly rude but he did say "shut it down"';
+    const result = detectEchoedInput(bubble, input);
+    expect(result.echoed).toBe(false);
+  });
+});
+
 describe("detectEchoedInput — edge inputs", () => {
   test("an empty input never trips", () => {
     expect(detectEchoedInput("anything at all", "").echoed).toBe(false);
