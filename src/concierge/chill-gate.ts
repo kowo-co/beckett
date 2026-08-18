@@ -20,9 +20,12 @@
  *     into inert text.
  *   - `detectEchoedInput` (`./echo-guard.ts`) catches the OTHER way the rewrite has drifted: on
  *     2026-08-18 it handed the user's own triggering message back as Beckett's reply, pronouns
- *     inverted ("you're the CTO" — backwards). Run PER BUBBLE, because only one bubble in a
- *     multi-bubble delivery drifted that time; a tripped bubble falls back to the un-chilled
- *     `text` this call was asked to restyle, same fail-open shape as everything else here.
+ *     inverted ("you're the CTO" — backwards), and on a later delivery it PREPENDED the user's own
+ *     message verbatim onto the front of the real reply. Run PER BUBBLE, because only one bubble
+ *     in a multi-bubble delivery drifted either time. A whole-bubble echo falls back to the
+ *     un-chilled `text` this call was asked to restyle; a leading/trailing-span echo prefers
+ *     shipping the guard's repaired remainder and only falls back to `text` wholesale when no
+ *     repair is available — same fail-open shape as everything else here either way.
  *
  * That same 2026-08-18 incident was hard to diagnose because nothing durable recorded the
  * transform's before/after — only the posted (already-rewritten) bubble survived in the channel
@@ -146,17 +149,31 @@ export async function deliverChilled(
   // user's own triggering message back as Beckett's reply (pronouns inverted). Score each bubble
   // against `input` and fall back to the un-chilled `text` for just the bubble that drifted — the
   // other bubbles in the same delivery are very likely fine and should post exactly as rewritten.
-  type EchoScore = { echoed: boolean; contentScore: number | null; fullScore: number | null };
-  const NOT_CHECKED: EchoScore = { echoed: false, contentScore: null, fullScore: null };
+  type EchoScore = { echoed: boolean; contentScore: number | null; fullScore: number | null; repaired: boolean };
+  const NOT_CHECKED: EchoScore = { echoed: false, contentScore: null, fullScore: null, repaired: false };
   let echoScores: EchoScore[];
   let echoChecked: string[];
   if (input) {
     echoScores = [];
     echoChecked = result.messages.map((bubble) => {
       try {
-        const check = echoGuard(bubble, input);
-        echoScores.push({ echoed: check.echoed, contentScore: check.contentScore, fullScore: check.fullScore });
+        const check = echoGuard(bubble, input, text);
+        echoScores.push({
+          echoed: check.echoed,
+          contentScore: check.contentScore,
+          fullScore: check.fullScore,
+          repaired: check.repaired !== null,
+        });
         if (!check.echoed) return bubble;
+        if (check.repaired !== null) {
+          logger?.warn("chilltext bubble echoed the user's own input at one edge — shipping the repaired remainder", {
+            contentScore: check.contentScore,
+            fullScore: check.fullScore,
+            bubble: truncateForLog(bubble),
+            input: truncateForLog(input),
+          });
+          return check.repaired;
+        }
         logger?.warn("chilltext bubble echoed the user's own input back — falling back to the original text", {
           contentScore: check.contentScore,
           fullScore: check.fullScore,
@@ -194,6 +211,7 @@ export async function deliverChilled(
       echoFallback: echoScores[i]!.echoed,
       echoContentScore: echoScores[i]!.contentScore,
       echoFullScore: echoScores[i]!.fullScore,
+      ...(echoScores[i]!.repaired ? { echoRepaired: true } : {}),
     })),
   });
 

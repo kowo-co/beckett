@@ -44,11 +44,16 @@ interface ChillTransformBubbleRecord {
   rewritten: string;
   /** What was actually posted, after the per-bubble echo guard and mention repair. */
   posted: string;
-  /** True when the echo guard replaced this bubble with the original `agentOutput`. */
+  /** True when the echo guard flagged this bubble as echoing `input` — whether it was repaired
+   * (see `echoRepaired`) or replaced wholesale with the original `agentOutput`. */
   echoFallback: boolean;
   /** `detectEchoedInput`'s scores for this bubble. `null` when the guard didn't run (no `input`) or threw. */
   echoContentScore: number | null;
   echoFullScore: number | null;
+  /** True when `echoFallback` was resolved by stripping an echoed leading/trailing span and
+   * shipping the remainder, rather than discarding the bubble for `agentOutput` wholesale. Omitted
+   * (not `false`) when no repair applied, so an older record shape still round-trips unchanged. */
+  echoRepaired?: boolean;
 }
 
 export interface ChillTransformLogRecord {
@@ -130,8 +135,9 @@ function formatChillTransformRecord(record: ChillTransformLogRecord): string {
   ];
   if (record.error) lines.push(`  error:  ${record.error}`);
   for (const [i, bubble] of (record.bubbles ?? []).entries()) {
+    const echoLabel = bubble.echoRepaired ? "ECHO REPAIR" : "ECHO FALLBACK";
     const echoNote = bubble.echoFallback
-      ? ` [ECHO FALLBACK content=${bubble.echoContentScore?.toFixed(2)} full=${bubble.echoFullScore?.toFixed(2)}]`
+      ? ` [${echoLabel} content=${bubble.echoContentScore?.toFixed(2)} full=${bubble.echoFullScore?.toFixed(2)}]`
       : "";
     lines.push(`  bubble ${i + 1} rewritten: ${oneLine(bubble.rewritten)}`);
     lines.push(`  bubble ${i + 1} posted:    ${oneLine(bubble.posted)}${echoNote}`);

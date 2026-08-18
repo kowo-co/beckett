@@ -328,6 +328,48 @@ describe("deliverChilled — a --ping mention survives a mangling chilltext rewr
   });
 });
 
+describe("deliverChilled — a bubble with the user's input prepended is repaired, not discarded", () => {
+  // ro's message to Beckett: "yeah merge it". chilltext's rewrite handed back that message
+  // prepended verbatim onto the front of the real reply — the whole-bubble check alone can't see
+  // this (the echoed span is a small fraction of the bubble), but the leading-span check can.
+  const INPUT = "yeah merge it";
+  const ORIGINAL_TEXT =
+    "all three are on main already, the deploy was just stuck. it's armed now and fires the second " +
+    "those two workers finish, no babysitting needed.";
+  const PREPENDED_BUBBLE = `${INPUT}. ${ORIGINAL_TEXT}`;
+
+  test("posts the repaired remainder, not the full fallback to the original text", async () => {
+    const { gateway, posts } = fakeGateway();
+    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+      gateway,
+      cfg: cfg(),
+      input: INPUT,
+      sleep: async () => {},
+      transform: async () => ({ messages: [PREPENDED_BUBBLE] }),
+    });
+    expect(posts.map((p) => p.text)).toEqual([ORIGINAL_TEXT]);
+  });
+
+  test("logs the repair, distinct from a full fallback, with the before/after pair", async () => {
+    const { gateway } = fakeGateway();
+    const logPath = tmpLogPath();
+    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+      gateway,
+      cfg: cfg(),
+      input: INPUT,
+      sleep: async () => {},
+      transform: async () => ({ messages: [PREPENDED_BUBBLE] }),
+      logPath,
+    });
+    const rows = readChillTransformLog(logPath);
+    const bubble = rows[0]!.bubbles![0]!;
+    expect(bubble.rewritten).toBe(PREPENDED_BUBBLE);
+    expect(bubble.posted).toBe(ORIGINAL_TEXT);
+    expect(bubble.echoFallback).toBe(true);
+    expect(bubble.echoRepaired).toBe(true);
+  });
+});
+
 describe("deliverChilled — a bubble that echoes the user's own input falls back per-bubble", () => {
   // Channel 1520986792373911622, message 1539063244914950257 (2026-08-18): chilltext handed the
   // user's own triggering message back as Beckett's reply, pronouns inverted, as ONE of three
