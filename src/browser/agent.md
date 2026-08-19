@@ -12,19 +12,13 @@ which go stale on re-render. Batch related actions, use `Promise.all` across pag
 work is faster, and return screenshots (images) only when vision helps, plain data otherwise.
 
 Rich-text fields — contenteditable backed by React, Draft.js, ProseMirror, or Lexical (x.com's
-composer is Draft.js) — can silently swallow synthetic input: `page.keyboard.type`, `human.type`,
-and clipboard paste all may leave the field empty or the submit button disabled, and nothing
-throws. Never trust that a type call worked — after entering text into any field, read back its
-value/textContent and confirm it landed before you click submit. If normal typing didn't take,
-focus the editor and fall back to `execCommand` plus manually dispatched events so the
-framework's state syncs:
-
-```js
-const el = document.activeElement; // the focused editor
-document.execCommand('insertText', false, text);
-el.dispatchEvent(new InputEvent('beforeinput', {bubbles: true, composed: true, inputType: 'insertText', data: text}));
-el.dispatchEvent(new InputEvent('input', {bubbles: true, composed: true, inputType: 'insertText', data: text}));
-```
+composer is Draft.js) — can silently swallow synthetic input from `page.keyboard.type` and
+clipboard paste: the field can stay empty or the submit button disabled, and nothing throws.
+Prefer `human.type` for these fields: it verifies the requested text actually landed and retries
+with `insertText` before giving up, throwing instead of lying if the field still didn't accept it
+(the upstream fix for the Draft.js composer swallowing keystrokes, issue #129 — no manual
+execCommand workaround needed). If you do use `page.keyboard.type` or paste directly, don't trust
+it: read back the field's value/textContent before you click submit.
 
 On x.com, prefer the inline home-timeline composer over the standalone `/compose/post` modal,
 which has hung with a stuck spinner and an uneditable draft. If a duplicate compose modal
