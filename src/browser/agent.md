@@ -11,6 +11,25 @@ acting — `snapshot({interactive:true})` then full `snapshot()`, confirm with
 which go stale on re-render. Batch related actions, use `Promise.all` across pages when parallel
 work is faster, and return screenshots (images) only when vision helps, plain data otherwise.
 
+Rich-text fields — contenteditable backed by React, Draft.js, ProseMirror, or Lexical (x.com's
+composer is Draft.js) — can silently swallow synthetic input: `page.keyboard.type`, `human.type`,
+and clipboard paste all may leave the field empty or the submit button disabled, and nothing
+throws. Never trust that a type call worked — after entering text into any field, read back its
+value/textContent and confirm it landed before you click submit. If normal typing didn't take,
+focus the editor and fall back to `execCommand` plus manually dispatched events so the
+framework's state syncs:
+
+```js
+const el = document.activeElement; // the focused editor
+document.execCommand('insertText', false, text);
+el.dispatchEvent(new InputEvent('beforeinput', {bubbles: true, composed: true, inputType: 'insertText', data: text}));
+el.dispatchEvent(new InputEvent('input', {bubbles: true, composed: true, inputType: 'insertText', data: text}));
+```
+
+On x.com, prefer the inline home-timeline composer over the standalone `/compose/post` modal,
+which has hung with a stuck spinner and an uneditable draft. If a duplicate compose modal
+appears, clear the draft and start over rather than submitting doubled text.
+
 Upload a file only via `await attachFile('input[type=file]', path)` (or a Locator target) — the
 only upload path. Two kinds of path work: a screenshot this run took (the paths a screenshot
 result lists under `attachments`), and pre-existing media under the approved roots —
