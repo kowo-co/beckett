@@ -7,6 +7,10 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # Healthy full run (browser lane included) is ~4-6 minutes wall clock. 30min gives generous
+    # headroom for a slow runner while still failing fast instead of riding out to GitHub's 6h
+    # hard cap on a hung step (see #311/#312: two apt-get hangs that each burned a full 6h runner).
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,9 +41,34 @@ jobs:
             echo "browser=false" >> "$GITHUB_OUTPUT"
             echo "browser lane: off"
           fi
-      - run: sudo apt-get update && sudo apt-get install -y shellcheck
-      - if: steps.lanes.outputs.browser == 'true'
-        run: sudo apt-get install -y bubblewrap util-linux
+      # Installed from the project's pinned release tarball instead of apt: it's a single static
+      # binary, so this sidesteps apt-mirror flakiness entirely (see #311/#312) rather than just
+      # bounding it. --retry covers a flaky GitHub download; timeout-minutes is the last resort.
+      - name: Install shellcheck
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          version=0.10.0
+          curl -fsSL --retry 3 --retry-delay 2 \
+            "https://github.com/koalaman/shellcheck/releases/download/v${version}/shellcheck-v${version}.linux.x86_64.tar.xz" \
+            | tar -xJ
+          sudo mv "shellcheck-v${version}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+      # apt has no pinned-binary equivalent for bubblewrap/util-linux, so keep apt but make it
+      # resilient: non-interactive frontend, apt's own retry setting, and one full retry of
+      # update+install if the first attempt fails. Bounded so a stuck mirror fails in minutes.
+      - name: Install bubblewrap and util-linux
+        if: steps.lanes.outputs.browser == 'true'
+        timeout-minutes: 5
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          install_deps() {
+            sudo apt-get update -o Acquire::Retries=3
+            sudo apt-get install -y -o Acquire::Retries=3 bubblewrap util-linux
+          }
+          install_deps || { echo "apt attempt 1 failed, retrying..." >&2; sleep 5; install_deps; }
       - name: Enable and verify browser user namespaces
         if: steps.lanes.outputs.browser == 'true'
         run: |
