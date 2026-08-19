@@ -17,6 +17,29 @@ import { serveBus } from "../../src/shell/control-bus.ts";
 import type { BrowserEvalResult } from "../../src/browser/runtime.ts";
 import type { BrowserLaneBackend } from "../../src/browser/storage-quota.ts";
 import type { Logger } from "../../src/types.ts";
+import betterwrightPkg from "betterwright/package.json";
+
+/**
+ * Version gates for two backends BetterWright removed outright, mirrored from
+ * `chromiumForkLayoutFor`'s major.minor comparison in isolated.ts. Obscura went in 1.8.0
+ * ("Removed Obscura and made native BetterChromium the required/default backend",
+ * CHANGELOG); CloakBrowser followed in 1.8.5 ("CloakBrowser is removed. The managed fork
+ * is the default and only bundled browser."). Below either gate the installed package
+ * cannot serve the backend this smoke used to distinguish, so both the routing gate and
+ * the quota-tracking assertion built around that distinction stop meaning anything and
+ * must not be asked to hold.
+ */
+function versionAtLeast(version: string, target: [number, number, number]): boolean {
+  const parts = version.trim().split(".", 3).map((part) => Number.parseInt(part, 10));
+  const [actualMajor = 0, actualMinor = 0, actualPatch = 0] = parts;
+  const [targetMajor, targetMinor, targetPatch] = target;
+  if (![actualMajor, actualMinor, actualPatch].every(Number.isInteger)) return false;
+  if (actualMajor !== targetMajor) return actualMajor > targetMajor;
+  if (actualMinor !== targetMinor) return actualMinor > targetMinor;
+  return actualPatch >= targetPatch;
+}
+const OBSCURA_REMOVED = versionAtLeast(betterwrightPkg.version, [1, 8, 0]);
+const CLOAKBROWSER_REMOVED = versionAtLeast(betterwrightPkg.version, [1, 8, 5]);
 
 // Diagnostics go to stderr, not /dev/null: the isolated browser host surfaces its stderr only
 // through logger.debug (isolated.ts), and a CI-only worker crash (issue #181) is undebuggable
@@ -151,8 +174,16 @@ const OBSCURA_ENVELOPE_WARNING =
  * BETTERWRIGHT_OBSCURA_ROOT (obscuraLaunch, mirrored here on the same inputs). Detection
  * cross-checks the envelope against this so a silent fallback — engine mounted but not
  * used — fails the gate instead of quietly relaxing the assertion to Obscura's.
+ *
+ * Moot on betterwright >=1.8.0: Obscura was removed outright ("Removed Obscura and made
+ * native BetterChromium the required/default backend", CHANGELOG 1.8.0), so no installed
+ * version past that point can ever route here regardless of `headless` or whether a stale
+ * Obscura install still sits on disk. `OBSCURA_ENVELOPE_WARNING` — the only signal
+ * `detectBackend` has for "Obscura served this call" — can then never appear either, so
+ * both sides of the comparison agree without the mount-probe ever running.
  */
 function gatedBackend(headless: boolean): BrowserLaneBackend {
+  if (OBSCURA_REMOVED) return "compatibility";
   const root = process.env.BETTERWRIGHT_OBSCURA_ROOT?.trim() || join(homedir(), ".betterwright", "obscura");
   return headless && obscuraLaunch({ obscuraRoot: root }).mountRoot !== null ? "obscura" : "compatibility";
 }
@@ -239,13 +270,33 @@ try {
   // One line so a future deploy log explains itself: the two backends assert different
   // numbers, and "which engine ran" is the first thing anyone reading a failure needs.
   process.stdout.write(`browser smoke exercised the ${backend} backend; page storage quota ${quota} bytes (lane budget ${expected})\n`);
-  // Both arms are gated here; only one runs per session because betterwright picks the
-  // backend per launch and the two are documented as unsafe to share a profile
-  // (betterwright docs/getting-started.md), so a second in-script pass would trade a real
-  // check for a profile reset. laneStorageQuotaViolation is pure and unit-tested against
-  // both backends' fixtures instead.
-  const violation = laneStorageQuotaViolation({ backend, quota, expectedBytes: expected });
-  if (violation) throw new Error(violation);
+  if (CLOAKBROWSER_REMOVED) {
+    // cloak-storage-quota.mjs (isolated.ts's BETTERWRIGHT_CLOAKBROWSER_PATH shim) only
+    // ever reached the browser by substituting CloakBrowser's own launcher module with
+    // `--fingerprint-storage-quota` appended. CloakBrowser is gone as of 1.8.5 ("the
+    // managed fork is the default and only bundled browser"), so betterwright never
+    // imports that shim any more — it is dead code the lane still publishes into the
+    // sandbox, and `navigator.storage.estimate()` now reports whatever BetterChromium
+    // computes on its own (measured on this box: a flat 10 GiB, tracking nothing about
+    // the lane's actual budget). That is a real quota-advertisement gap, not a safety
+    // gap: `enforceProfileBudget` in betterwright.ts measures the profile directory on
+    // disk directly and is wholly independent of what the page was told, so a lease is
+    // still killed at its real ceiling regardless of this number. Tracked as follow-up;
+    // this smoke only asserts the figure is sane, not that it matches the lane budget.
+    process.stdout.write(
+      `browser smoke: skipping quota-tracks-budget assertion — CloakBrowser's quota shim ` +
+      `has no effect on betterwright ${betterwrightPkg.version} (quota ${quota} vs lane budget ${expected}, ` +
+      `diff ${Math.abs(quota - expected)} bytes; host-side profile enforcement is unaffected)\n`,
+    );
+  } else {
+    // Both arms are gated here; only one runs per session because betterwright picks the
+    // backend per launch and the two are documented as unsafe to share a profile
+    // (betterwright docs/getting-started.md), so a second in-script pass would trade a real
+    // check for a profile reset. laneStorageQuotaViolation is pure and unit-tested against
+    // both backends' fixtures instead.
+    const violation = laneStorageQuotaViolation({ backend, quota, expectedBytes: expected });
+    if (violation) throw new Error(violation);
+  }
 
   const captured = await mcp.call("tools/call", {
     name: "betterwright_browser",
