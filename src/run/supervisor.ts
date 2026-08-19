@@ -153,6 +153,12 @@ export interface RunSupervisorDeps {
   resolveRepoRoot: (run: Run) => string;
   /** Control-bus subscription for `run.deploy` / `run.steer`. Omitted in tests. */
   bus?: RunBusPort;
+  /**
+   * How long {@link RunSupervisor.steer} waits for a live worker to ack a nudge before answering
+   * anyway (default {@link DEFAULT_STEER_ACK_BUDGET_MS}). Tests shrink this to keep a "worker never
+   * acks" case fast without faking timers.
+   */
+  steerAckBudgetMs?: number;
   /** Override any git op (tests inject fakes); unset ops use the real worktree.ts impl. */
   gitOps?: Partial<RunGitOps>;
   /** Stage lookup; defaults to the shared built-in view (implement/review live there). */
@@ -322,6 +328,16 @@ export function runSpecReader(
   };
 }
 
+/**
+ * `steer()`'s budget for a LIVE worker to ack a nudge before the call answers anyway (issue: the
+ * control bus gives callers 30s total, and the claude driver's own ack timeout is ALSO 30s — so a
+ * worker that is mid-tool-call and not reading stdin made every steer of a busy run race its own
+ * ack against the bus deadline and lose. The note is durably buffered before this wait starts, so
+ * there is nothing to lose by answering early: a live ack that lands after this window just
+ * un-buffers the note it already covered (see `steer()`).
+ */
+const DEFAULT_STEER_ACK_BUDGET_MS = 2_000;
+
 /** Watchdog grace: reuse the dispatcher's `[supervise] staffing_watchdog_s` (default 120s). */
 const DEFAULT_WATCHDOG_GRACE_S = 120;
 /** The watchdog tick, mirroring the dispatcher: never slower than half the grace, floor 15s. */
@@ -368,6 +384,7 @@ export class RunSupervisor {
   private readonly events: DispatchEventBus;
   private readonly publishOutbox?: PublishOutbox;
   private readonly runtimeStatePath?: string;
+  private readonly steerAckBudgetMs: number;
   private readonly spendLedgerPath: string;
   private readonly pauseFile: string;
 
@@ -499,6 +516,7 @@ export class RunSupervisor {
       ? new PublishOutbox(deps.publishOutboxPath, this.logger.child("run-publish-outbox"))
       : undefined;
     this.runtimeStatePath = deps.runtimeStatePath;
+    this.steerAckBudgetMs = deps.steerAckBudgetMs ?? DEFAULT_STEER_ACK_BUDGET_MS;
     // Mirrors spendLedgerPath's fallback below: `this.config.paths` is present on every real,
     // strictly-validated boot config, but tests routinely hand in a partial fake, so this must
     // degrade the same way rather than throw at construction.
@@ -2153,21 +2171,51 @@ export class RunSupervisor {
   // ── steering ──────────────────────────────────────────────────────────────────────────
 
   /**
-   * Deliver a note to a run. A live worker gets it as a nudge; otherwise it is buffered in the
-   * runtime state so the NEXT stage's brief carries it (the words provably reach a model turn).
+   * Deliver a note to a run. ACCEPTANCE and DELIVERY are deliberately split: the note is persisted
+   * to the runtime state (survives a restart, and stands in for the NEXT stage's brief if nothing
+   * live ever takes it) before this method waits on anything, so the receipt below is honest no
+   * matter how long a live worker takes to actually read it.
+   *
+   * A worker that is live gets a bounded-length shot at acking the nudge live ({@link
+   * steerAckBudgetMs}, well inside the control-bus deadline) — if it acks in time, `"delivered"`.
+   * Otherwise (busy mid-tool-call, paused, or no live worker at all) this returns `"buffered"`
+   * immediately: the persisted copy is the truth, and it either rides the next stage's brief or, if
+   * the live ack arrives late, is removed then so the words are not delivered twice (see the
+   * backgrounded `.then` below). `"failed"` means the note could not even be persisted — an
+   * honest, retry-safe failure, never the INDETERMINATE a bus timeout would otherwise imply.
    */
-  async steer(runId: string, note: string): Promise<"delivered" | "buffered"> {
+  async steer(runId: string, note: string): Promise<"delivered" | "buffered" | "failed"> {
+    if (!this.bufferSteer(runId, note)) return "failed";
+
     const handle = this.workers.get(runId);
     if (handle) {
-      try {
-        const accepted = await handle.nudge(note);
-        if (accepted !== "dropped") return "delivered";
-      } catch (err) {
-        this.logger.warn("nudge failed — buffering steer", { run: runId, error: String(err) });
+      const attempt = handle.nudge(note).catch((err) => {
+        this.logger.warn("nudge failed — note stays buffered", { run: runId, error: String(err) });
+        return "dropped" as const;
+      });
+      const PENDING = Symbol("steer-ack-pending");
+      const raced = await Promise.race([attempt, this.sleep(this.steerAckBudgetMs).then(() => PENDING)]);
+      if (raced === "delivered") {
+        // Acked live inside the budget — the buffered copy would only repeat it at the run's next
+        // stage, so take it back out.
+        this.unbufferSteer(runId, note);
+        return "delivered";
       }
+      // Still in flight past the budget (or the driver already gave up) — let it resolve on its own
+      // schedule. A LATE live ack still un-buffers the note so it is not delivered twice.
+      void attempt.then((accepted) => {
+        if (accepted === "delivered") this.unbufferSteer(runId, note);
+      });
     }
-    this.bufferSteer(runId, note);
     return "buffered";
+  }
+
+  /** One-shot delay, unref'd so it never keeps the daemon alive on its own. */
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      timer.unref?.();
+    });
   }
 
   // ── cancellation ──────────────────────────────────────────────────────────────────────
@@ -2451,10 +2499,28 @@ export class RunSupervisor {
     }
   }
 
-  private bufferSteer(runId: string, note: string): void {
+  /** Returns whether the note is durably persisted — false only on a genuine disk-write failure. */
+  private bufferSteer(runId: string, note: string): boolean {
     const list = this.pendingSteers.get(runId) ?? [];
     list.push(note);
     this.pendingSteers.set(runId, list);
+    return this.persistRuntimeState();
+  }
+
+  /**
+   * Undo one `bufferSteer` call for a note that turned out to be delivered live after all — the
+   * counterpart `steer()` uses so a late-arriving ack does not leave the same words to repeat in
+   * the run's next stage brief. Removes a single matching occurrence (FIFO-agnostic: the notes are
+   * identical text either way).
+   */
+  private unbufferSteer(runId: string, note: string): void {
+    const list = this.pendingSteers.get(runId);
+    if (!list) return;
+    const idx = list.indexOf(note);
+    if (idx < 0) return;
+    list.splice(idx, 1);
+    if (list.length) this.pendingSteers.set(runId, list);
+    else this.pendingSteers.delete(runId);
     this.persistRuntimeState();
   }
 
@@ -3366,8 +3432,14 @@ export class RunSupervisor {
     }
   }
 
-  private persistRuntimeState(): void {
-    if (!this.runtimeStatePath) return;
+  /**
+   * Returns whether the write actually landed on disk. `false` only for a genuine I/O failure — no
+   * `runtimeStatePath` configured (every test, and any deploy that never set `[paths] beckett_dir`)
+   * is not a failure, since the in-memory maps this call mirrors stay authoritative for the
+   * process's own lifetime.
+   */
+  private persistRuntimeState(): boolean {
+    if (!this.runtimeStatePath) return true;
     const state: RunRuntimeState = {
       version: 1,
       liveLedger: Object.fromEntries(this.liveLedger),
@@ -3379,8 +3451,10 @@ export class RunSupervisor {
       const tmp = `${this.runtimeStatePath}.tmp`;
       writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
       renameSync(tmp, this.runtimeStatePath);
+      return true;
     } catch (err) {
       this.logger.warn("run runtime state persist failed", { error: String(err) });
+      return false;
     }
   }
 }
