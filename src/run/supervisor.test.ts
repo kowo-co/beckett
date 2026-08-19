@@ -283,6 +283,7 @@ function newSupervisor(
     verifyPr?: (prUrl: string) => Promise<{ resolves: boolean; ci: import("./types.ts").CiVerdict }>;
     frontendProof?: (args: { run: Run; workspace: string; baseRef: string }) => Promise<string | null>;
     onStateChange?: (event: import("./types.ts").RunStateChange) => void;
+    steerAckBudgetMs?: number;
   } = {},
 ): Harness {
   const dir = scratch();
@@ -329,6 +330,7 @@ function newSupervisor(
     ...(opts.verifyPr ? { verifyPr: opts.verifyPr } : {}),
     ...(opts.frontendProof ? { frontendProof: opts.frontendProof } : {}),
     ...(opts.onStateChange ? { onStateChange: opts.onStateChange } : {}),
+    ...(opts.steerAckBudgetMs !== undefined ? { steerAckBudgetMs: opts.steerAckBudgetMs } : {}),
   });
   return { supervisor, store, repos, publishCalls, events };
 }
@@ -3373,6 +3375,72 @@ describe("steering", () => {
     await supervisor.admit(idle.id);
     await tick();
     expect(spawnCalls.find((c) => c.itemId === idle.id)!.steering).toEqual(["later note"]);
+  });
+
+  // 2026-08-19: a live `implementing` run steered with a several-hundred-word note timed out the
+  // control bus twice — `steer()` awaited the driver's own 30s stdin-echo ack (a worker mid-tool-
+  // call never turns to read it), and that wait shared the 30s deadline the CLI's bus call was
+  // also racing. The note DID land eventually (the driver writes to stdin before it ever waits on
+  // the ack), but the caller had no way to know that — it just saw INDETERMINATE. The fix: persist
+  // the note before waiting on anything, and bound the live-ack wait well inside the bus deadline.
+  test("a busy worker mid-tool-call still answers \"buffered\" fast, with a long note", async () => {
+    const { supervisor, store } = newSupervisor({ steerAckBudgetMs: 20 });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+
+    // A worker mid-tool-call: the driver writes the nudge to stdin right away (this mock records
+    // that synchronously, mirroring the real one) but the ack echo never arrives — the returned
+    // promise just never settles, the same shape as a genuinely busy worker.
+    created[0]!.nudge = async (t: string) => {
+      created[0]!.nudges.push(t);
+      return new Promise<string>(() => {});
+    };
+
+    const longNote = "Please withdraw the earlier recommendation and switch the default routing order. ".repeat(20);
+    expect(longNote.trim().split(/\s+/).length).toBeGreaterThan(200);
+
+    const startedAt = Date.now();
+    const delivery = await supervisor.steer(run.id, longNote);
+    // Nowhere near the 30s control-bus deadline that timed the real caller out.
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(delivery).toBe("buffered");
+    // The bytes are already on the worker's stdin — the receipt just does not promise an ack yet.
+    expect(created[0]!.nudges).toEqual([longNote]);
+
+    // Provably delivered afterwards: even though the live ack never comes, the note the daemon
+    // durably buffered up front still rides the run's next stage brief.
+    created[0]!.finish("success", "implemented", doneSignal(true));
+    await settle();
+    expect(spawnCalls[1]!.steering).toEqual([longNote]);
+  });
+
+  test("a live ack that lands after the budget un-buffers the note (no double delivery next stage)", async () => {
+    const { supervisor, store } = newSupervisor({ steerAckBudgetMs: 20 });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+
+    let ackLate!: (accepted: string) => void;
+    created[0]!.nudge = async (t: string) => {
+      created[0]!.nudges.push(t);
+      return new Promise<string>((resolve) => {
+        ackLate = resolve;
+      });
+    };
+
+    const note = "adopt the amended config default";
+    expect(await supervisor.steer(run.id, note)).toBe("buffered");
+
+    // The worker finishes its tool call and the harness echoes the ack late — after `steer()`
+    // already answered "buffered".
+    ackLate("delivered");
+    await tick();
+
+    created[0]!.finish("success", "implemented", doneSignal(true));
+    await settle();
+    // Already delivered live — the next stage's brief must not repeat it.
+    expect(spawnCalls[1]!.steering ?? []).not.toContain(note);
   });
 });
 

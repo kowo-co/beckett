@@ -490,6 +490,11 @@ async function boot(): Promise<BootedSystem> {
           const note = typeof req.args.note === "string" ? req.args.note : "";
           if (!runId || !note.trim()) return { ok: false, error: "run.steer needs a runId and a note" };
           const delivery = await runSupervisor.steer(runId, note);
+          // An honest, retry-safe failure — never let a persist error surface as a bus timeout
+          // (which would tell the caller INDETERMINATE and forbid the very retry that would help).
+          if (delivery === "failed") {
+            return { ok: false, error: `run.steer could not persist a note for ${runId} — nothing landed, retry is safe` };
+          }
           return { ok: true, data: { runId, delivery } };
         },
       },

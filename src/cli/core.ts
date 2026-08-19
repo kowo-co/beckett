@@ -1047,7 +1047,9 @@ export async function runTask(argv: string[]): Promise<void> {
   // the ref and hands the bus a runId. It goes through `bus()`, not `notifyBus()`, ON PURPOSE: a
   // steer that never reached the daemon must EXIT NON-ZERO, because the concierge reports "told it"
   // to a channel off the back of this call, and a silently-swallowed note is the one failure that
-  // turns into a lie. The receipt (`delivery: "delivered" | "buffered"`) says which happened.
+  // turns into a lie. The receipt (`delivery: "delivered" | "buffered"`) says which happened; the
+  // daemon answers well inside the bus deadline either way — it persists the note before it ever
+  // waits on a live worker's ack, so a busy worker never turns this into a 30s timeout.
   if (sub === "steer") {
     const ref = _[0];
     // The note is positional so the command reads the way it is spoken. `--note` is the escape
