@@ -1201,13 +1201,23 @@ function addBrowserRuntimeMounts(args: string[], repoRoot: string, hostPath: str
     hostPath,
     join(SANDBOX_HOST_DIR, "host.mjs"),
   );
-  // betterwright 1.x drives the managed CloakBrowser as this host's backend, so
-  // the sandbox must now expose that whole runtime dependency closure: tldts
-  // (+ tldts-core) for the credential-vault URL scoping betterwright pulls in,
-  // and cloakbrowser's tar extractor (+ its minipass/chownr subtree), which
-  // cloakbrowser's entrypoint statically imports. The optional patchright-core
-  // stealth driver is deliberately omitted — it is only loaded when
-  // stealthRuntimeFix is enabled, which this host never sets.
+  // betterwright drives its browser backend from inside the sandbox, so the sandbox must
+  // expose that runtime's whole dependency closure: tldts (+ tldts-core) for the
+  // credential-vault URL scoping betterwright pulls in always, and — on betterwright
+  // versions before 1.8.5 that still ship the managed CloakBrowser compatibility engine —
+  // cloakbrowser's tar extractor (+ its minipass/chownr subtree), which cloakbrowser's
+  // entrypoint statically imports. The optional patchright-core stealth driver is
+  // deliberately omitted — it is only loaded when stealthRuntimeFix is enabled, which this
+  // host never sets.
+  //
+  // Every package here is gated on existsSync rather than bound unconditionally: 1.8.5
+  // removed CloakBrowser as a bundled browser, and with it the `cloakbrowser` npm
+  // dependency and its tar/minipass/chownr/minizlib/yallist/@isaacs/fs-minipass subtree —
+  // so on betterwright >=1.8.5 those directories never exist in node_modules, and an
+  // unconditional `--ro-bind` against a missing source is a hard bwrap launch failure
+  // ("Can't find source path ...: No such file or directory"), not a silent no-op like the
+  // rest of this file's optional binds. A version that still depends on a package keeps
+  // binding it; a version that has moved on does not need to be listed here again.
   for (const packageName of [
     "betterwright",
     "cloakbrowser",
@@ -1222,11 +1232,9 @@ function addBrowserRuntimeMounts(args: string[], repoRoot: string, hostPath: str
     "minizlib",
     "yallist",
   ]) {
-    args.push(
-      "--ro-bind",
-      join(repoRoot, "node_modules", packageName),
-      join("/repo/node_modules", packageName),
-    );
+    const source = join(repoRoot, "node_modules", packageName);
+    if (!existsSync(source)) continue;
+    args.push("--ro-bind", source, join("/repo/node_modules", packageName));
   }
 }
 

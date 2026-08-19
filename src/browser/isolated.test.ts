@@ -467,6 +467,45 @@ describe("browser host sandbox policy", () => {
     }
   });
 
+  linuxForkTest("a runtime dependency the installed betterwright no longer ships is not bound, and one it still ships is", () => {
+    // Regression coverage for betterwright 1.9.5: >=1.8.5 removed CloakBrowser and its
+    // `cloakbrowser`/tar/minipass/chownr/minizlib/yallist/@isaacs-fs-minipass subtree, so
+    // those directories never exist in node_modules on a clean install of a current
+    // version. Before this fix, addBrowserRuntimeMounts bound that whole list
+    // unconditionally, and bwrap hard-fails a launch with "Can't find source path ...: No
+    // such file or directory" for any --ro-bind whose source is missing — a real,
+    // untested sandboxed-launch failure a clean `bun install` would have hit silently.
+    const fixture = fixturePaths();
+    const repoRoot = join(fixture.dir, "repo");
+    mkdirSync(join(repoRoot, "node_modules", "betterwright"), { recursive: true });
+    // cloakbrowser and its subtree are deliberately never created here, standing in for a
+    // clean install of a betterwright version that no longer depends on them.
+    try {
+      const launch = buildBrowserHostLaunch({
+        settings: fixture.settings,
+        platform: "linux",
+        sandbox: "auto",
+        execPath: process.execPath,
+        nodePath: fixture.node,
+        hostPath: fixture.host,
+        chromiumExecutable: fixture.browser,
+        betterwrightVersion: "1.9.5",
+        repoRoot,
+        bwrapPath: "/usr/bin/bwrap",
+        prlimitPath: fixture.prlimit,
+        backend: "betterwright",
+        parentEnv: { PATH: "/usr/bin:/bin" },
+      });
+      const betterwrightSource = join(repoRoot, "node_modules", "betterwright");
+      expect(hasTriple(launch.command, ["--ro-bind", betterwrightSource, "/repo/node_modules/betterwright"])).toBe(true);
+      for (const missing of ["cloakbrowser", "tar", "@isaacs/fs-minipass", "chownr", "minipass", "minizlib", "yallist"]) {
+        expect(launch.command).not.toContain(join(repoRoot, "node_modules", missing));
+      }
+    } finally {
+      rmSync(fixture.dir, { recursive: true, force: true });
+    }
+  });
+
   linuxForkTest("the playwright backend never binds or names the BetterChromium fork", () => {
     const fixture = fixturePaths();
     const chromiumForkRoot = join(fixture.dir, "chromium-root");
