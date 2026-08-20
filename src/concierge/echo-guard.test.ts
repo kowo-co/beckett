@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { detectEchoedInput } from "./echo-guard.ts";
+import { detectEchoedInput, detectPromptScaffolding } from "./echo-guard.ts";
 
 describe("detectEchoedInput — the 2026-08-18 incident", () => {
   // Channel 1520986792373911622, message 1539063244914950257. The user's triggering message
@@ -174,5 +174,52 @@ describe("detectEchoedInput — edge inputs", () => {
 
   test("punctuation-only strings never trip", () => {
     expect(detectEchoedInput("...", "!!!").echoed).toBe(false);
+  });
+});
+
+describe("detectPromptScaffolding — the 2026-08-20 incident", () => {
+  // Channel 1520986792373911622, 2026-08-20 01:16: chilltext posted a fragment of its OWN
+  // delivery-format instructions as one of Beckett's bubbles. This exact sentence appears nowhere
+  // in this repo (it's the remote chilltext service's own wrapper prompt) — the guard has to
+  // recognize the SHAPE of delivery-contract language, not this one sentence.
+  const LEAKED_INSTRUCTIONS =
+    "return only the rewritten chat message or messages, separated by a blank line. use 1 to 4 " +
+    "messages total and never more than 4.";
+
+  test("trips on the real leaked instruction text, with multiple signals converging", () => {
+    const result = detectPromptScaffolding(LEAKED_INSTRUCTIONS);
+    expect(result.leaked).toBe(true);
+    expect(result.signals.length).toBeGreaterThanOrEqual(2);
+  });
+
+  test("trips when the same instruction fragment is embedded inside otherwise-normal prose", () => {
+    // The other real-world shape of this incident: not a standalone bubble, but scaffolding mixed
+    // into what would otherwise be a legitimate reply.
+    const bubble = `hey so about that — anyway, ${LEAKED_INSTRUCTIONS} let me know if you need more`;
+    expect(detectPromptScaffolding(bubble).leaked).toBe(true);
+  });
+
+  test("a paraphrase of the same delivery contract, worded differently, still trips", () => {
+    // Not the incident's literal wording — proves this isn't a blocklist of one sentence.
+    const paraphrase = "reply only with the rewritten text. send 2 to 3 messages total, never more than 3.";
+    const result = detectPromptScaffolding(paraphrase);
+    expect(result.leaked).toBe(true);
+    expect(result.signals.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("detectPromptScaffolding — legitimate replies that brush a single signal", () => {
+  test("an offhand number range about something other than messages does not trip", () => {
+    expect(detectPromptScaffolding("i'll send 2 to 3 logs your way in a bit").leaked).toBe(false);
+  });
+
+  test("a casual 'never more than' about an unrelated thing needs a second signal to trip", () => {
+    expect(detectPromptScaffolding("never more than 5 minutes, promise").leaked).toBe(false);
+  });
+
+  test("ordinary chat never trips", () => {
+    for (const bubble of ["yeah, agreed", "on it", "sounds good, talk soon", "pushed the fix, tests are green"]) {
+      expect(detectPromptScaffolding(bubble).leaked).toBe(false);
+    }
   });
 });

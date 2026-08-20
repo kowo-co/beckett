@@ -54,6 +54,17 @@ interface ChillTransformBubbleRecord {
    * shipping the remainder, rather than discarding the bubble for `agentOutput` wholesale. Omitted
    * (not `false`) when no repair applied, so an older record shape still round-trips unchanged. */
   echoRepaired?: boolean;
+  /** True when this bubble was replaced with `agentOutput` because it echoed the rewrite's OWN
+   * delivery instructions (the 2026-08-20 incident) rather than the user's input — see
+   * `detectPromptScaffolding`/`resolveSystemPrompt` in `chill-gate.ts`. Omitted (not `false`) when
+   * this class of check didn't trip, same convention as `echoRepaired`. */
+  promptLeak?: boolean;
+  /** Which structural signal families fired on the trip (see `detectPromptScaffolding` in
+   * `./echo-guard.ts`). Present only alongside `promptLeak: true`. */
+  promptLeakSignals?: string[];
+  /** True when the trip was (also) a near-copy of the `system` prompt this call sent, as opposed
+   * to only the structural shape check. Present only alongside `promptLeak: true`. */
+  promptTextEcho?: boolean;
 }
 
 export interface ChillTransformLogRecord {
@@ -139,8 +150,11 @@ function formatChillTransformRecord(record: ChillTransformLogRecord): string {
     const echoNote = bubble.echoFallback
       ? ` [${echoLabel} content=${bubble.echoContentScore?.toFixed(2)} full=${bubble.echoFullScore?.toFixed(2)}]`
       : "";
+    const promptLeakNote = bubble.promptLeak
+      ? ` [PROMPT LEAK signals=${(bubble.promptLeakSignals ?? []).join(",") || "(none)"}${bubble.promptTextEcho ? " textEcho" : ""}]`
+      : "";
     lines.push(`  bubble ${i + 1} rewritten: ${oneLine(bubble.rewritten)}`);
-    lines.push(`  bubble ${i + 1} posted:    ${oneLine(bubble.posted)}${echoNote}`);
+    lines.push(`  bubble ${i + 1} posted:    ${oneLine(bubble.posted)}${echoNote}${promptLeakNote}`);
   }
   return lines.join("\n");
 }

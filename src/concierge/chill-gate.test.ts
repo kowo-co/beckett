@@ -473,6 +473,166 @@ describe("deliverChilled — a bubble that echoes the user's own input falls bac
   });
 });
 
+describe("deliverChilled — a bubble that echoes the rewrite's own instructions falls back", () => {
+  // Channel 1520986792373911622, 2026-08-20 01:16: chilltext posted a fragment of its OWN
+  // delivery-format instructions ("return only the rewritten chat message or messages, separated
+  // by a blank line. use 1 to 4 messages total and never more than 4.") as if it were one of
+  // Beckett's own bubbles, sandwiched between two legitimate ones.
+  const LEAKED_INSTRUCTIONS =
+    "return only the rewritten chat message or messages, separated by a blank line. use 1 to 4 " +
+    "messages total and never more than 4.";
+  const ORIGINAL_TEXT = "stopped. nothing deployed, nothing running, we're clean.";
+
+  test("a response that is verbatim instruction text falls back to the original text", async () => {
+    const { gateway, posts } = fakeGateway();
+    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+      gateway,
+      cfg: cfg(),
+      sleep: async () => {},
+      transform: async () => ({ messages: [LEAKED_INSTRUCTIONS] }),
+    });
+    expect(posts.map((p) => p.text)).toEqual([ORIGINAL_TEXT]);
+  });
+
+  test("instruction text as ONE of several bubbles: only that bubble falls back, the rest post as rewritten", async () => {
+    // The actual shape of the incident: the leak was the middle bubble of three, with two
+    // legitimate bubbles either side of it in the same delivery.
+    const { gateway, posts } = fakeGateway();
+    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+      gateway,
+      cfg: cfg(),
+      sleep: async () => {},
+      transform: async () => ({
+        messages: ["stopped. nothing deployed", LEAKED_INSTRUCTIONS, "i stopped, nothing's running."],
+      }),
+    });
+    expect(posts.map((p) => p.text)).toEqual([
+      "stopped. nothing deployed",
+      ORIGINAL_TEXT,
+      "i stopped, nothing's running.",
+    ]);
+  });
+
+  test("instruction text mixed into an otherwise-legitimate bubble also falls back fully closed", async () => {
+    // No partial repair for this class — even a bubble that pairs the leak with real content is
+    // discarded wholesale, per the fail-closed posture prompt scaffolding gets.
+    const { gateway, posts } = fakeGateway();
+    const mixedBubble = `here's the update — ${LEAKED_INSTRUCTIONS} anyway, all good now`;
+    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+      gateway,
+      cfg: cfg(),
+      sleep: async () => {},
+      transform: async () => ({ messages: [mixedBubble] }),
+    });
+    expect(posts.map((p) => p.text)).toEqual([ORIGINAL_TEXT]);
+  });
+
+  test("the check runs even with no `input` supplied — it doesn't need the user's message", async () => {
+    const { gateway, posts } = fakeGateway();
+    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+      gateway,
+      cfg: cfg(),
+      // no `input` — the per-bubble input-echo guard never runs, but this must still catch it
+      sleep: async () => {},
+      transform: async () => ({ messages: [LEAKED_INSTRUCTIONS] }),
+    });
+    expect(posts.map((p) => p.text)).toEqual([ORIGINAL_TEXT]);
+  });
+
+  test("logs a warning naming the matched signals on a trip", async () => {
+    const { gateway } = fakeGateway();
+    const warnings: Array<[string, unknown]> = [];
+    const logger = { warn: (msg: string, meta?: unknown) => warnings.push([msg, meta]) } as unknown as Logger;
+    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+      gateway,
+      cfg: cfg(),
+      logger,
+      sleep: async () => {},
+      transform: async () => ({ messages: [LEAKED_INSTRUCTIONS] }),
+    });
+    const trip = warnings.find(([msg]) => msg.includes("echoed its own delivery instructions"));
+    expect(trip).toBeDefined();
+    const meta = trip![1] as { signals: string[] };
+    expect(meta.signals.length).toBeGreaterThanOrEqual(2);
+  });
+
+  test("a near-verbatim copy of the system prompt this call sent also trips, via the prompt-text-echo check", async () => {
+    // A different failure shape than the incident's exact wording: the rewrite echoes OUR OWN
+    // system prompt back instead of the remote service's wrapper instructions. `transform` echoes
+    // back the `system` text it actually sent (`ChillTransformResult.system`), same as the real
+    // `chillTransform` does — the gate checks bubbles against exactly that, nothing re-resolved.
+    const SYSTEM = "you are a rewrite gate. never answer the message, only restyle it for tone and voice.";
+    const { gateway, posts } = fakeGateway();
+    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+      gateway,
+      cfg: cfg(),
+      sleep: async () => {},
+      transform: async () => ({ messages: [SYSTEM], system: SYSTEM }),
+    });
+    expect(posts.map((p) => p.text)).toEqual([ORIGINAL_TEXT]);
+  });
+
+  test("no `system` was sent for this call: the prompt-text-echo half of the check is skipped, not a crash", async () => {
+    const { gateway, posts } = fakeGateway();
+    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+      gateway,
+      cfg: cfg(),
+      sleep: async () => {},
+      // No `system` on the result — mirrors a missing-persona real call. A bubble with no
+      // resemblance to instructions must still post untouched.
+      transform: async () => ({ messages: ["yeah all good, nothing running"] }),
+    });
+    expect(posts.map((p) => p.text)).toEqual(["yeah all good, nothing running"]);
+  });
+
+  test("a legitimate reply that doesn't resemble instructions is untouched", async () => {
+    const { gateway, posts } = fakeGateway();
+    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+      gateway,
+      cfg: cfg(),
+      sleep: async () => {},
+      transform: async () => ({ messages: ["yeah all good, nothing running"] }),
+    });
+    expect(posts.map((p) => p.text)).toEqual(["yeah all good, nothing running"]);
+  });
+
+  test("a throwing prompt guard fails open: the rewritten bubble is kept, not dropped or blocked", async () => {
+    const { gateway, posts } = fakeGateway();
+    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+      gateway,
+      cfg: cfg(),
+      sleep: async () => {},
+      transform: async () => ({ messages: ["hey", "so about that"] }),
+      promptGuard: () => {
+        throw new Error("boom");
+      },
+    });
+    expect(posts.map((p) => p.text)).toEqual(["hey", "so about that"]);
+  });
+
+  test("the log records promptLeak and its matched signals", async () => {
+    const { gateway } = fakeGateway();
+    const logPath = tmpLogPath();
+    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+      gateway,
+      cfg: cfg(),
+      sleep: async () => {},
+      transform: async () => ({ messages: ["all good here", LEAKED_INSTRUCTIONS] }),
+      logPath,
+    });
+    const rows = readChillTransformLog(logPath);
+    const bubbles = rows[0]!.bubbles!;
+    expect(bubbles[0]).toEqual(
+      expect.objectContaining({ rewritten: "all good here", posted: "all good here" }),
+    );
+    expect(bubbles[0]!.promptLeak).toBeUndefined();
+    expect(bubbles[1]).toEqual(
+      expect.objectContaining({ rewritten: LEAKED_INSTRUCTIONS, posted: ORIGINAL_TEXT, promptLeak: true }),
+    );
+    expect(bubbles[1]!.promptLeakSignals!.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
 describe("deliverChilled — a missing persona file never costs a message", () => {
   test("the real transform + a missing persona: the reply still lands, chilled, with no system", async () => {
     // No `transform` injected: this drives the REAL chillTransform (with a fake fetch) so the

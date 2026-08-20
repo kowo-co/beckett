@@ -239,7 +239,11 @@ describe("chillTransform — fail-open matrix (every case returns null, never th
 
   test("a message exactly at the 2000-char cap is accepted", async () => {
     const exact = "x".repeat(2_000);
-    const result = await chillTransform(cfg(), { agentOutput: "hi" }, okFetch({ messages: [exact] }));
+    const result = await chillTransform(
+      cfg(),
+      { agentOutput: "hi", personaPath: noPersona() },
+      okFetch({ messages: [exact] }),
+    );
     expect(result).toEqual({ messages: [exact] });
   });
 });
