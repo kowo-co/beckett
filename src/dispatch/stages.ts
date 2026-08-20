@@ -162,6 +162,8 @@ export interface StageAppendArgs {
   baseRef?: string;
   /** Env source for the publishing guidance (tests inject; defaults to process.env). */
   env?: Record<string, string | undefined>;
+  /** Absolute path of the worker's worktree — the `codemap` prompt block reads the cut-time map from here. */
+  workspace?: string;
 }
 
 /**
@@ -362,7 +364,7 @@ const PEER_STATUS_BLOCK =
  * not concatenated here. The composed output is byte-identical to the pre-V5 append.
  */
 function workerSystemAppend(
-  { item, config, env = process.env }: StageAppendArgs,
+  { item, config, env = process.env, workspace }: StageAppendArgs,
 ): string {
   const slug = projectSlug(item.project || item.identifier);
   // Kick off (once per process) resolving the Cloudflare zone's apex so the deploy-durability
@@ -370,7 +372,13 @@ function workerSystemAppend(
   // lookup lands `apexDomain()` returns this install's zone — so behavior here is unchanged.
   const quiet = { info() {}, warn() {}, debug() {}, error() {}, child() { return quiet; } } as unknown as Logger;
   void warmApexDomain({ token: env.CLOUDFLARE_API_TOKEN, zoneId: env.CLOUDFLARE_ZONE_ID, logger: quiet });
-  const contributions = workerPromptCapabilities(config).composePrompt({ config, ticket: item, slug, env });
+  const contributions = workerPromptCapabilities(config).composePrompt({
+    config,
+    ticket: item,
+    slug,
+    env,
+    workspace,
+  });
   return (
     `<persona>\n` +
     `You are an autonomous worker implementing a ticket. Your cwd is THIS PROJECT'S OWN git repo ` +

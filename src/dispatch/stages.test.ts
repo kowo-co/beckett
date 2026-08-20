@@ -6,6 +6,9 @@
  * single-source default-effort switch.
  */
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Config } from "../types.ts";
 import type { WorkItem } from "../run/work-item.ts";
 import { validateConfig } from "../config.ts";
@@ -239,6 +242,33 @@ describe("worker persona composition (Phase 4)", () => {
     const owned = validateConfig({ identity: { github_user: "someone-else" } });
     const append = stageRegistry.systemAppend("implement", { item: makeItem(), config: owned, env: {} });
     expect(append).toContain("someone-else/run-20260810-thing");
+  });
+
+  test("the composed implement persona includes the cut-time codemap when a workspace is passed", () => {
+    const dir = mkdtempSync(join(tmpdir(), "codemap-prompt-"));
+    try {
+      mkdirSync(join(dir, ".beckett"), { recursive: true });
+      writeFileSync(
+        join(dir, ".beckett", "codemap.txt"),
+        "CODEMAP — file-level hint of this tree, not ground truth.\nGenerated from deadbeef.\nsrc/capability/index.ts — Beckett v5 — the capability spine\n",
+        "utf8",
+      );
+      const append = stageRegistry.systemAppend("implement", {
+        item: makeItem(),
+        config,
+        env: {},
+        workspace: dir,
+      });
+      expect(append).toContain("<codemap>");
+      expect(append).toContain("src/capability/index.ts — Beckett v5 — the capability spine");
+      expect(append).toContain("not ground truth");
+      expect(append).toContain("GITHUB: don't push anything yourself.");
+      // Without a workspace the historical persona is unchanged (snapshot above).
+      const plain = stageRegistry.systemAppend("implement", { item: makeItem(), config, env: {} });
+      expect(plain).not.toContain("<codemap>");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

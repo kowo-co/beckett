@@ -14,6 +14,7 @@
  */
 
 import type { Capability, CapabilityDeps, CapabilityFactory } from "../index.ts";
+import { createCodemapCapability } from "./codemap.ts";
 import { createDeployCapability, createDnsCapability } from "./cloudflare.ts";
 import { createGithubCapability } from "./github.ts";
 import { createImageCapability } from "./image.ts";
@@ -70,6 +71,9 @@ const FACTORIES: Record<string, CapabilityFactory> = {
   mail: createMailCapability,
   memory: createMemoryCapability,
   secret: createSecretCapability,
+  // File-level repo map injected into every worker persona. Pull this one line (and the
+  // worktree-cut write) if the §7 after-measurement gate says the ~5k-token tax doesn't pay.
+  codemap: createCodemapCapability,
 };
 
 /** Whether a normalized module is registered for `id`. */

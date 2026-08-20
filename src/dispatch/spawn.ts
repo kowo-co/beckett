@@ -624,7 +624,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerHandle> 
       prompt: resumeSessionId
         ? buildResumeBrief(item, stage, baseRef, steering)
         : stages.prompt(stage, { item, baseRef, steering, reviewDiff, envBootstrap }),
-      systemAppend: stages.systemAppend(stage, { item, config, baseRef }),
+      systemAppend: stages.systemAppend(stage, { item, config, baseRef, workspace }),
       workspace,
       scope,
       envelope,
