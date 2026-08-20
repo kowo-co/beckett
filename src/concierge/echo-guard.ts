@@ -56,6 +56,70 @@
  * `echoed: false` unconditionally before scoring against `input` even begins.
  */
 
+/**
+ * Incident (2026-08-20, channel 1520986792373911622): a chilltext rewrite posted a fragment of
+ * its OWN delivery-format instructions — "return only the rewritten chat message or messages,
+ * separated by a blank line. use 1 to 4 messages total and never more than 4." — as if it were
+ * one of Beckett's own bubbles, sandwiched between two legitimate ones from the same delivery.
+ * That exact sentence appears nowhere in this repo: `chillTransform` (`../chilltext.ts`) only
+ * ever sends `system`, `input`, `agentOutput`, and `max_bubbles` as separate JSON fields to the
+ * remote chilltext service (`chilltext.ssh.codes`, a friend's homelab box this repo does not
+ * own) — the concrete wording that leaked is that service's OWN wrapper prompt, assembled
+ * server-side around what we send, not anything this codebase constructs or controls. A check
+ * for near-copies of OUR prompt text (`detectEchoedInput` reused in `chill-gate.ts` against the
+ * resolved `system` string instead of the user's `input`) is complementary but cannot catch THIS
+ * incident, since the leaked text isn't a copy of anything we sent.
+ *
+ * `detectPromptScaffolding` instead scores a bubble against the general SHAPE of rewrite-gate
+ * delivery instructions: language that specifies how many messages to return, how they're
+ * delimited, an upper bound on the count, a "return only" directive, or a noun phrase naming "the
+ * rewritten message(s)" as a thing being discussed rather than sent. It is deliberately NOT a
+ * check for the one incident sentence — each signal targets a distinct, generic piece of
+ * delivery-contract phrasing, and the check only trips when at least two independent signal
+ * families converge in the same bubble. A real reply can incidentally brush one signal (an
+ * offhand "never more than 5 minutes"); two landing together in one bubble is what actually
+ * distinguishes instruction scaffolding from chat content.
+ */
+const COUNT_RANGE_MESSAGES_RE = /\b\d+\s*(?:to|-|–)\s*\d+\s+(?:messages?|bubbles?)\b/i;
+const TOTAL_MESSAGES_RE = /\b\d+\s+(?:messages?|bubbles?)\s+total\b/i;
+const NEVER_MORE_THAN_RE = /\bnever\s+more\s+than\s+\d+\b/i;
+const RETURN_ONLY_RE = /\b(?:return|reply|respond|output)\s+only\s+(?:the|with)\b/i;
+const SEPARATED_BY_DELIMITER_RE = /\bseparated\s+by\s+(?:a\s+)?(?:blank\s+lines?|newlines?|commas?)\b/i;
+const REWRITTEN_MESSAGE_NOUN_RE = /\b(?:rewritten|chilled)\s+(?:chat\s+)?messages?\b/i;
+
+const PROMPT_SCAFFOLD_SIGNALS: ReadonlyArray<readonly [string, RegExp]> = [
+  ["countRangeMessages", COUNT_RANGE_MESSAGES_RE],
+  ["totalMessages", TOTAL_MESSAGES_RE],
+  ["neverMoreThan", NEVER_MORE_THAN_RE],
+  ["returnOnly", RETURN_ONLY_RE],
+  ["separatedByDelimiter", SEPARATED_BY_DELIMITER_RE],
+  ["rewrittenMessageNoun", REWRITTEN_MESSAGE_NOUN_RE],
+];
+
+/** At least this many independent signal families must match before a bubble is treated as
+ * instruction scaffolding rather than chat content — see the doc above for why one alone isn't
+ * enough to trip this. */
+const PROMPT_SCAFFOLD_SIGNAL_THRESHOLD = 2;
+
+export interface PromptScaffoldResult {
+  /** True when `bubble` reads as delivery-format instructions rather than chat content. */
+  leaked: boolean;
+  /** Names of every signal family that matched — carried through to the trip's warn log so a
+   * recurrence is diagnosable from which signals fired, not just that something tripped. */
+  signals: string[];
+}
+
+/**
+ * Score `bubble` for the general SHAPE of rewrite-gate delivery instructions (see the doc above
+ * for the incident this exists to catch and why it isn't a blocklist of that incident's
+ * sentence). Pure and deterministic — no network, no randomness — so a caller can unit test the
+ * threshold directly, same as `detectEchoedInput`.
+ */
+export function detectPromptScaffolding(bubble: string): PromptScaffoldResult {
+  const signals = PROMPT_SCAFFOLD_SIGNALS.filter(([, re]) => re.test(bubble)).map(([name]) => name);
+  return { leaked: signals.length >= PROMPT_SCAFFOLD_SIGNAL_THRESHOLD, signals };
+}
+
 const STOPWORDS = new Set([
   "a",
   "an",

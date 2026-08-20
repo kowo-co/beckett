@@ -54,6 +54,15 @@ export interface ChillTransformInput {
 export interface ChillTransformResult {
   /** 1–4 pre-sized bubbles, meant to be posted one after another — never rejoined. */
   messages: string[];
+  /**
+   * The `system` text this call actually sent, when it sent one. Echoed back (not just used to
+   * build the POST) so a caller — `chill-gate.ts`'s prompt-scaffolding guard — can check a
+   * returned bubble for a near-copy of the exact prompt THIS call sent, without re-resolving it
+   * (a second resolution would re-read the persona file off disk and could, in principle, catch
+   * that file mid-edit and disagree with what was actually sent). Omitted, not `undefined`, when
+   * no `system` was sent, so a plain `{ messages }` result still round-trips through `toEqual`.
+   */
+  system?: string;
 }
 
 /**
@@ -115,7 +124,7 @@ export async function chillTransform(
       if (!trimmed || trimmed.length > MAX_MESSAGE_CHARS) return null;
       messages.push(trimmed);
     }
-    return { messages };
+    return system ? { messages, system } : { messages };
   } catch {
     // Timeout (AbortSignal), network error, JSON parse failure — all the same fail-open outcome.
     return null;

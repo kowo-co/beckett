@@ -13,19 +13,28 @@
  * would. Every bubble is `singleMessage: true`: chilltext already sized them, so Beckett's own
  * chunker/humanizer must not re-split or re-delay past `bubble_delay_ms`.
  *
- * Two structural guards run on the rewritten bubbles before they post, neither trusting the
+ * Three structural guards run on the rewritten bubbles before they post, neither trusting the
  * rewrite model to have honored its contract:
  *
  *   - `enforceMentions` (`src/discord/mentions.ts`) repairs a `<@id>` ping the rewrite mangled
  *     into inert text.
- *   - `detectEchoedInput` (`./echo-guard.ts`) catches the OTHER way the rewrite has drifted: on
- *     2026-08-18 it handed the user's own triggering message back as Beckett's reply, pronouns
- *     inverted ("you're the CTO" — backwards), and on a later delivery it PREPENDED the user's own
- *     message verbatim onto the front of the real reply. Run PER BUBBLE, because only one bubble
- *     in a multi-bubble delivery drifted either time. A whole-bubble echo falls back to the
- *     un-chilled `text` this call was asked to restyle; a leading/trailing-span echo prefers
+ *   - `detectEchoedInput` (`./echo-guard.ts`) catches the way the rewrite has drifted twice
+ *     before: on 2026-08-18 it handed the user's own triggering message back as Beckett's reply,
+ *     pronouns inverted ("you're the CTO" — backwards), and on a later delivery it PREPENDED the
+ *     user's own message verbatim onto the front of the real reply. Run PER BUBBLE, because only
+ *     one bubble in a multi-bubble delivery drifted either time. A whole-bubble echo falls back to
+ *     the un-chilled `text` this call was asked to restyle; a leading/trailing-span echo prefers
  *     shipping the guard's repaired remainder and only falls back to `text` wholesale when no
  *     repair is available — same fail-open shape as everything else here either way.
+ *   - A third, distinct drift (2026-08-20): a bubble came back carrying a fragment of the
+ *     rewrite's OWN delivery-format instructions, not anything from the conversation at all. Two
+ *     checks run per bubble for this, both fully closed to `text` on a trip (no partial repair —
+ *     prompt scaffolding is never worth salvaging part of): `detectPromptScaffolding` scores the
+ *     bubble for the general SHAPE of delivery-contract language (message-count ranges, "return
+ *     only" directives, …), and `detectEchoedInput` is reused a SECOND time per bubble — not
+ *     against `input`, but against the `system` string this exact call resolved and sent — to
+ *     catch a near-copy of our own prompt text. Neither check needs `input`, so both run even when
+ *     no `input` was supplied to this call.
  *
  * That same 2026-08-18 incident was hard to diagnose because nothing durable recorded the
  * transform's before/after — only the posted (already-rewritten) bubble survived in the channel
@@ -39,7 +48,7 @@
 import type { Config, DiscordGateway, Logger, ReplyOptions } from "../types.ts";
 import { chillTransform, shouldBypassChill, type ChillTransformResult } from "../chilltext.ts";
 import { enforceMentions } from "../discord/mentions.ts";
-import { detectEchoedInput } from "./echo-guard.ts";
+import { detectEchoedInput, detectPromptScaffolding, type PromptScaffoldResult } from "./echo-guard.ts";
 import { appendChillTransformLog, type ChillTransformLogRecord } from "./chilltext-log.ts";
 
 /** How much of a bubble/input to keep in a trip's warning log — enough to diagnose, not a full dump. */
@@ -79,8 +88,11 @@ export interface DeliverChilledOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Test seam: inject a fake transform instead of `chillTransform` (and its real fetch/network). */
   transform?: typeof chillTransform;
-  /** Test seam: inject a fake echo guard instead of `detectEchoedInput`. */
+  /** Test seam: inject a fake echo guard instead of `detectEchoedInput`. Also used for the
+   * prompt-text-echo check (against the resolved `system` string) — same function, same contract. */
   echoGuard?: typeof detectEchoedInput;
+  /** Test seam: inject a fake prompt-scaffolding guard instead of `detectPromptScaffolding`. */
+  promptGuard?: typeof detectPromptScaffolding;
   /**
    * Path to the chilltext transform transcript (`./chilltext-log.ts`). Opt-in, same shape as
    * `recordPost`: when omitted, nothing is logged and nothing on disk is touched — real call sites
@@ -106,6 +118,7 @@ export async function deliverChilled(
   const sleep = opts.sleep ?? defaultSleep;
   const transform = opts.transform ?? chillTransform;
   const echoGuard = opts.echoGuard ?? detectEchoedInput;
+  const promptGuard = opts.promptGuard ?? detectPromptScaffolding;
   const logPath = opts.logPath;
   const startedAt = Date.now();
   // Every return point below appends exactly one transcript record; only the shared fields differ.
@@ -145,54 +158,92 @@ export async function deliverChilled(
     return messageId;
   }
 
-  // The chilltext rewrite is a lossy LLM pass that has, on at least one real delivery, handed the
-  // user's own triggering message back as Beckett's reply (pronouns inverted). Score each bubble
-  // against `input` and fall back to the un-chilled `text` for just the bubble that drifted — the
-  // other bubbles in the same delivery are very likely fine and should post exactly as rewritten.
+  // The chilltext rewrite is a lossy LLM pass that has, on real deliveries, drifted in two
+  // different ways: handing the user's own triggering message back as Beckett's reply (pronouns
+  // inverted, or prepended onto the front of the real reply — the `input`-echo checks below), and
+  // separately, handing back a fragment of its OWN delivery-format instructions (the
+  // prompt-scaffolding checks below). Every check runs PER BUBBLE and falls back to the un-chilled
+  // `text` only for the bubble that drifted — the other bubbles in the same delivery are very
+  // likely fine and should post exactly as rewritten.
   type EchoScore = { echoed: boolean; contentScore: number | null; fullScore: number | null; repaired: boolean };
   const NOT_CHECKED: EchoScore = { echoed: false, contentScore: null, fullScore: null, repaired: false };
-  let echoScores: EchoScore[];
-  let echoChecked: string[];
-  if (input) {
-    echoScores = [];
-    echoChecked = result.messages.map((bubble) => {
-      try {
-        const check = echoGuard(bubble, input, text);
-        echoScores.push({
-          echoed: check.echoed,
-          contentScore: check.contentScore,
-          fullScore: check.fullScore,
-          repaired: check.repaired !== null,
-        });
-        if (!check.echoed) return bubble;
-        if (check.repaired !== null) {
-          logger?.warn("chilltext bubble echoed the user's own input at one edge — shipping the repaired remainder", {
-            contentScore: check.contentScore,
-            fullScore: check.fullScore,
-            bubble: truncateForLog(bubble),
-            input: truncateForLog(input),
-          });
-          return check.repaired;
-        }
-        logger?.warn("chilltext bubble echoed the user's own input back — falling back to the original text", {
+  type PromptLeakScore = PromptScaffoldResult & { textEcho: boolean };
+  const NO_PROMPT_LEAK: PromptLeakScore = { leaked: false, signals: [], textEcho: false };
+
+  // The `system` text THIS call actually sent, echoed back by `transform` itself (`ChillTransformResult.system`)
+  // rather than re-resolved here — a second resolution would re-read the persona file off disk a
+  // second time and could, in principle, land on a different answer than what was actually sent.
+  // `undefined` when this call sent no `system` at all (missing persona file, empty override):
+  // nothing to compare a bubble against for the prompt-text-echo check below.
+  const systemPrompt = result.system;
+
+  const echoScores: EchoScore[] = [];
+  const promptLeakScores: PromptLeakScore[] = [];
+  const echoChecked: string[] = result.messages.map((bubble) => {
+    // Prompt-scaffolding check first, on every bubble regardless of `input` — neither signal
+    // needs the user's message, only the bubble's own shape and the prompt this call sent.
+    let leak: PromptLeakScore = NO_PROMPT_LEAK;
+    try {
+      const shape = promptGuard(bubble);
+      const textEcho = systemPrompt !== undefined && echoGuard(bubble, systemPrompt, text).echoed;
+      leak = { leaked: shape.leaked || textEcho, signals: shape.signals, textEcho };
+    } catch (err) {
+      // Same fail-open contract as every guard here: a broken check must never block or drop a
+      // bubble that chilltext already successfully produced.
+      logger?.warn("prompt-scaffolding guard threw — keeping the rewritten bubble", { error: String(err) });
+    }
+    promptLeakScores.push(leak);
+    if (leak.leaked) {
+      // Fails fully closed — no partial repair for this class, unlike the input-echo edge case
+      // below: prompt scaffolding is never worth salvaging part of a bubble around.
+      logger?.warn("chilltext bubble echoed its own delivery instructions — falling back to the original text", {
+        signals: leak.signals,
+        promptTextEcho: leak.textEcho,
+        bubble: truncateForLog(bubble),
+      });
+      // No echo-vs-input check on a bubble already discarded — keep echoScores index-aligned
+      // with `result.messages` for the logTransform mapping below.
+      echoScores.push(NOT_CHECKED);
+      return text;
+    }
+
+    if (!input) {
+      echoScores.push(NOT_CHECKED);
+      return bubble;
+    }
+    try {
+      const check = echoGuard(bubble, input, text);
+      echoScores.push({
+        echoed: check.echoed,
+        contentScore: check.contentScore,
+        fullScore: check.fullScore,
+        repaired: check.repaired !== null,
+      });
+      if (!check.echoed) return bubble;
+      if (check.repaired !== null) {
+        logger?.warn("chilltext bubble echoed the user's own input at one edge — shipping the repaired remainder", {
           contentScore: check.contentScore,
           fullScore: check.fullScore,
           bubble: truncateForLog(bubble),
           input: truncateForLog(input),
         });
-        return text;
-      } catch (err) {
-        // Mirrors the transform's own fail-open contract: a broken guard must never block or
-        // drop a bubble that chilltext already successfully produced.
-        logger?.warn("echo guard threw — keeping the rewritten bubble", { error: String(err) });
-        echoScores.push(NOT_CHECKED);
-        return bubble;
+        return check.repaired;
       }
-    });
-  } else {
-    echoScores = result.messages.map(() => NOT_CHECKED);
-    echoChecked = result.messages;
-  }
+      logger?.warn("chilltext bubble echoed the user's own input back — falling back to the original text", {
+        contentScore: check.contentScore,
+        fullScore: check.fullScore,
+        bubble: truncateForLog(bubble),
+        input: truncateForLog(input),
+      });
+      return text;
+    } catch (err) {
+      // Mirrors the transform's own fail-open contract: a broken guard must never block or
+      // drop a bubble that chilltext already successfully produced.
+      logger?.warn("echo guard threw — keeping the rewritten bubble", { error: String(err) });
+      echoScores.push(NOT_CHECKED);
+      return bubble;
+    }
+  });
 
   // The chilltext rewrite has also, intermittently, mangled a `<@id>` ping into inert text (bare
   // `@id`, angle brackets stripped) — which renders as a raw number and notifies nobody, defeating
@@ -212,6 +263,9 @@ export async function deliverChilled(
       echoContentScore: echoScores[i]!.contentScore,
       echoFullScore: echoScores[i]!.fullScore,
       ...(echoScores[i]!.repaired ? { echoRepaired: true } : {}),
+      ...(promptLeakScores[i]!.leaked
+        ? { promptLeak: true, promptLeakSignals: promptLeakScores[i]!.signals, promptTextEcho: promptLeakScores[i]!.textEcho }
+        : {}),
     })),
   });
 
