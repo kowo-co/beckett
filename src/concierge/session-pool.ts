@@ -278,6 +278,21 @@ export class SessionPool {
   }
 
   /**
+   * True iff `token` matches a LIVE pooled session's issuer secret, independent of whether that
+   * session's current turn carries a mention meta. {@link metaForToken} collapses "forged/unknown
+   * token" and "known token, turn has no channel meta (a system/update turn)" to the same `null` —
+   * callers that need to tell those apart (a forged token must fail closed; a real session's own
+   * system turn has no channel to protect) check this first.
+   */
+  tokenKnown(token: string): boolean {
+    if (!token) return false;
+    for (const { session } of this.entries.values()) {
+      if (session.busToken?.() === token) return true;
+    }
+    return false;
+  }
+
+  /**
    * Mark an INLINE ERRAND against the session that issued it — a bus op its child is blocked on
    * while it runs (a `browser.exec` holding the browser lease, a `quick.run` specialist). Resolved
    * by issuer token exactly like {@link metaForToken}, because that token is the only thing that
