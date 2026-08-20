@@ -2889,12 +2889,12 @@ describe("budget ceiling", () => {
 });
 
 describe("ultracode", () => {
-  test("casts the implement stage onto opus at ultracode effort and asks for a large workflow", async () => {
+  test("casts the implement stage onto opus at medium effort and asks for a large workflow", async () => {
     const { supervisor, store } = newSupervisor();
     const run = seedRun(store, makeRun({ ultracode: true }));
     await supervisor.admit(run.id);
     await tick();
-    expect(spawnCalls[0]!.harness).toEqual({ harness: "claude", model: "claude-opus-5", effort: "ultracode" });
+    expect(spawnCalls[0]!.harness).toEqual({ harness: "claude", model: "claude-opus-5", effort: "medium" });
     expect(spawnCalls[0]!.settingsExtra).toMatchObject({
       crossSessionInbound: "accept",
       workflowSizeGuideline: "large",
@@ -3044,6 +3044,7 @@ describe("sonnet-first implement casting", () => {
     expect(spawnCalls[0]!.harness).toMatchObject({
       harness: "claude",
       model: "claude-opus-5",
+      effort: "medium",
       reason: 'human cast directive: "jason said opus for the gateway/auth cross-cut"',
     });
     // The reason on `run.cast.implement` (persisted to runs.json) is the record of why opus was
@@ -3063,7 +3064,7 @@ describe("sonnet-first implement casting", () => {
     const run = seedRun(store, makeRun({ ultracode: true }));
     await supervisor.admit(run.id);
     await tick();
-    expect(spawnCalls[0]!.harness).toEqual({ harness: "claude", model: "claude-opus-5", effort: "ultracode" });
+    expect(spawnCalls[0]!.harness).toEqual({ harness: "claude", model: "claude-opus-5", effort: "medium" });
   });
 
   test("review stays on the strongest tier and is unaffected by sonnet-first", async () => {

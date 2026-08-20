@@ -39,7 +39,7 @@ export type PresetMap = Record<string, Casting>;
 export const SEED_PRESETS: PresetMap = {
   // INT's full three-stage chain: independent design, cheap implementation, fresh review.
   intensive: {
-    design: { harness: "claude", model: "claude-opus-5", effort: "high" },
+    design: { harness: "claude", model: "claude-opus-5", effort: "medium" },
     implement: { harness: "pi", effort: "medium" },
     review: { harness: "claude", model: "claude-sonnet-5", effort: "high" },
   },
@@ -54,7 +54,7 @@ export const SEED_PRESETS: PresetMap = {
     implement: {
       harness: "claude",
       model: "claude-opus-5",
-      effort: "high",
+      effort: "medium",
       reviewTier: "self",
       reason: "frontend/visual/taste work — design doc §4.4, opus implements one-pass",
     },

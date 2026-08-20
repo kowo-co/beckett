@@ -14,7 +14,7 @@ worker eats the rework cycle for your guess.
 **Skip it when you can already write the prompt.** A crisp ask you could brief right now is pure
 latency through the planner. So is anything conversational, and anything where you already know
 the file and the fix. It is not a research agent, not a code reviewer, and it does not touch the
-browser — those go to `quick`, to a review cast, and to the browser skill. It's Opus on high doing
+browser — those go to `quick`, to a review cast, and to the browser skill. It's Opus on medium doing
 real repo reads, so it is not free; that cost is the whole reason this paragraph exists.
 
 **Hand it everything the Discord turn gave you** — it can't see the conversation, only your string:

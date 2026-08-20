@@ -1822,7 +1822,7 @@ exports[`cli: preset: ls seeds and lists the presets file 1`] = `
       "design": {
         "harness": "claude",
         "model": "claude-opus-5",
-        "effort": "high"
+        "effort": "medium"
       },
       "implement": {
         "harness": "pi",
@@ -1845,7 +1845,7 @@ exports[`cli: preset: ls seeds and lists the presets file 1`] = `
       "implement": {
         "harness": "claude",
         "model": "claude-opus-5",
-        "effort": "high",
+        "effort": "medium",
         "reviewTier": "self",
         "reason": "frontend/visual/taste work — design doc §4.4, opus implements one-pass"
       }

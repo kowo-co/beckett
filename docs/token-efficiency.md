@@ -201,9 +201,9 @@ right cast up front instead of the mind guessing and the scheduler bouncing.
 | Class | Plan | Implement | Review |
 |---|---|---|---|
 | mechanical (rename, config, docs, dep bump) | — | **haiku** low (short-context only, per MRCR guard) | self |
-| normal feature/bugfix | **opus** high, once — produces the job tree + criteria | **terra** (default cheap lane) or sonnet medium | sonnet medium, fresh |
-| long-context / large repo (>512K est. tokens) | opus high | **terra** or sonnet (haiku/luna refused by guard) | sonnet medium |
-| correctness-critical (auth, money, migrations — declared, confirm-before-cast) | opus high | **fable** high | opus high |
+| normal feature/bugfix | **opus** medium, once — produces the job tree + criteria | **terra** (default cheap lane) or sonnet medium | sonnet medium, fresh |
+| long-context / large repo (>512K est. tokens) | opus medium | **terra** or sonnet (haiku/luna refused by guard) | sonnet medium |
+| correctness-critical (auth, money, migrations — declared, confirm-before-cast) | opus medium | **fable** high | opus medium |
 
 **Why the MRCR guard exists, in numbers:** luna's long-context recall falls from 72.5% (terra) to
 **41.3%** past 512K tokens on MRCR 512K–1M, against a measured **median terra implement run of

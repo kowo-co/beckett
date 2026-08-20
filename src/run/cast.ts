@@ -245,6 +245,32 @@ export function isOpusModel(model: string | undefined): boolean {
   return typeof model === "string" && /opus/i.test(model);
 }
 
+/**
+ * True for Opus 4.8 specifically (`claude-opus-4-8`, `claude-opus-4.8`, …). That SKU stays pinned
+ * at `high` effort — a separate documented finding, not a casualty of the Opus 5 → medium default.
+ */
+function isOpus48Model(model: string | undefined): boolean {
+  return typeof model === "string" && /opus-4[-.]?8\b/i.test(model);
+}
+
+/**
+ * Fill in the effort default when a cast names a model but not an effort.
+ *
+ *   - Opus 5 (and future opus SKUs) → `medium` (FrontierCode: medium #2 at 53.4% / $4.31 vs
+ *     xhigh #16 at 43.6% / $9.14 — half the cost, better quality).
+ *   - Opus 4.8 → `high` (pinned; medium makes it kinda stupid, xhigh overthinks).
+ *   - Everything else → left unset so the harness-config default (`defaultEffortFor`) still wins.
+ *
+ * An explicitly named effort always wins — this only fills a hole. Call sites that previously
+ * fell through to `harness.claude.default_effort` (`high` on most installs) for an Opus cast
+ * without an effort now land on medium instead.
+ */
+export function withDefaultEffort(spec: HarnessSpec): HarnessSpec {
+  if (spec.effort) return spec;
+  if (!isOpusModel(spec.model)) return spec;
+  return { ...spec, effort: isOpus48Model(spec.model) ? "high" : "medium" };
+}
+
 /** What {@link applySonnetFirst} did, for the caller to log on the run record. */
 export interface SonnetFirstResult {
   /** The resolved implement cast — always harness-complete, never `undefined`. */

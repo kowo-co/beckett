@@ -288,9 +288,9 @@ Front-load judgment, execute cheap — the fix for the 31%-bounce / 2.2×-escala
 | Class | Plan | Implement | Review |
 |---|---|---|---|
 | mechanical (rename, config, docs, dep bump) | — | **haiku** low (short-context only, per MRCR guard) | self |
-| normal feature/bugfix | **opus** high, once, produces the job tree + criteria | **terra** (default cheap substantive lane) or sonnet medium | sonnet medium, fresh |
-| long-context / large repo (>512K est.) | opus high | **terra** or sonnet (haiku/luna refused by the guard) | sonnet medium |
-| correctness-critical (auth, money, migrations — declared, confirm-before-cast) | opus high | **fable** high | opus high |
+| normal feature/bugfix | **opus** medium, once, produces the job tree + criteria | **terra** (default cheap substantive lane) or sonnet medium | sonnet medium, fresh |
+| long-context / large repo (>512K est.) | opus medium | **terra** or sonnet (haiku/luna refused by the guard) | sonnet medium |
+| correctness-critical (auth, money, migrations — declared, confirm-before-cast) | opus medium | **fable** high | opus medium |
 
 - **Terra stays**: $1.12 median substantive cost at 14% failure vs opus-4.8's 18% at ~4× the
   price; $5.03 expected all-in vs $9.38. It runs as a second ~200-line driver behind the same

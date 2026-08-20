@@ -28,7 +28,7 @@ import type { HarnessSpec } from "../run/cast.ts";
 import type { RunState } from "../run/types.ts";
 import type { WorkItem } from "../run/work-item.ts";
 import { ExtensionRegistry, type Extension, type ExtensionFactory } from "../ext/index.ts";
-import { projectSlug } from "../run/cast.ts";
+import { projectSlug, withDefaultEffort, isOpusModel } from "../run/cast.ts";
 import { isReviewCapable } from "../drivers/index.ts";
 import { classifyDiffSurface, reviewDepthInstructions } from "../run/review-depth.ts";
 import { steeringBlock } from "./resume-brief.ts";
@@ -250,7 +250,10 @@ export class StageRegistry {
   /** A stage's resolved cast; unregistered stages default to plain claude (old fallback). */
   resolveCast(stage: string, explicit: HarnessSpec | undefined, item: WorkItem, config: Config): HarnessSpec {
     const def = this.get(stage);
-    return def ? def.resolveCast(explicit, item, config) : explicit ?? { harness: "claude" };
+    const resolved = def ? def.resolveCast(explicit, item, config) : explicit ?? { harness: "claude" };
+    // Opus-without-effort → medium (Opus 4.8 → high). Applied here so every stage — including
+    // unknown ones and the review path that fills a scaled effort — lands on the same doctrine.
+    return withDefaultEffort(resolved);
   }
 }
 
@@ -429,18 +432,28 @@ const reviewStage: StageDefinition = {
   entryState: "reviewing",
   preloadsDiff: true,
   resolveCast: (explicit, item, config) => {
-    const fallback = { harness: "claude", model: config.models.reviewer, effort: reviewEffortFor(item) };
+    const scaled = reviewEffortFor(item);
+    const fallback = { harness: "claude" as const, model: config.models.reviewer };
     // The implementer-only guard's second net. `../run/cast.ts#validateCasting` already refuses a
     // non-review-capable review cast at DEPLOY time, loudly — that is the guard with teeth. This
     // covers the one path that bypasses it: a cast already sitting in `runs.json` (hand-edited, or
     // written by an older build), which `parseCastJson` reads tolerantly by design. Silently
     // staffing an implementer-only seat as the reviewer would be worse than any error, so the
     // review falls back to the configured claude reviewer instead of honouring it.
-    if (explicit && !isReviewCapable(explicit.harness)) return fallback;
-    // An explicit review cast that names no effort still gets the SCALED default (issue #27) —
-    // otherwise it silently falls through to the harness default (xhigh), the priciest tier.
-    if (explicit) return explicit.effort ? explicit : { ...explicit, effort: reviewEffortFor(item) };
-    return fallback;
+    //
+    // Effort fill: an explicit effort wins. An Opus model with no effort is left unset so the
+    // registry's withDefaultEffort can apply medium (Opus 5) / high (Opus 4.8). Everything else
+    // gets the scaled default from the implement cast (issue #27) — never the harness default
+    // (xhigh), the priciest silent fallthrough.
+    if (explicit && !isReviewCapable(explicit.harness)) {
+      return isOpusModel(fallback.model) ? fallback : { ...fallback, effort: scaled };
+    }
+    if (explicit) {
+      if (explicit.effort) return explicit;
+      if (isOpusModel(explicit.model)) return explicit;
+      return { ...explicit, effort: scaled };
+    }
+    return isOpusModel(fallback.model) ? fallback : { ...fallback, effort: scaled };
   },
   buildPrompt({ item, baseRef, steering, reviewDiff }): string {
     const body = item.body.trim() ? `\n\n${item.body.trim()}` : "";
@@ -531,7 +544,8 @@ export function stageViewOf(registry: ExtensionRegistry): StageView {
     },
     resolveCast: (stage, explicit, item, config) => {
       const def = get(stage);
-      return def ? def.resolveCast(explicit, item, config) : explicit ?? { harness: "claude" };
+      const resolved = def ? def.resolveCast(explicit, item, config) : explicit ?? { harness: "claude" };
+      return withDefaultEffort(resolved);
     },
   };
 }
