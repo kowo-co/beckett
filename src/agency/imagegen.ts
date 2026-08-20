@@ -11,6 +11,14 @@
  * VERIFY the file landed at the exact path we asked for, relocating it from Codex's default
  * `generated_images/` dir if it saved there instead. The caller always gets back the one
  * absolute path it asked for, or a hard error. No half-success, no stray projects.
+ *
+ * Codex is the default renderer, but it isn't guaranteed to be installed on every box. If the
+ * `codex` binary can't be found, `CodexImageGen` falls back to whichever other provider is
+ * actually credentialed (fal, then OpenRouter) rather than hard-failing — see
+ * `CodexImageGen.codexAvailable`/`resolveFallbackProvider`. The fal backend maps `--size` to
+ * each model's own size dialect (`image_size` pixels, or `aspect_ratio` for models like
+ * `fal-ai/flux-pro/v1.1-ultra` that don't take raw pixels) and fails loudly, never silently,
+ * when a requested size can't be expressed for the chosen model.
  */
 
 import {
@@ -24,7 +32,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
-import { join, resolve, isAbsolute, dirname } from "node:path";
+import { join, resolve, isAbsolute, dirname, extname, basename } from "node:path";
 import { homedir } from "node:os";
 import { loadEnvFile } from "../config.ts";
 import type { Logger } from "../types.ts";
@@ -110,6 +118,53 @@ function isFalModel(model: string | undefined): boolean {
 
 function isOpenRouterModel(model: string | undefined): boolean {
   return !!model?.trim().toLowerCase().startsWith("openrouter/");
+}
+
+/** Fal models whose schema takes an `aspect_ratio` enum instead of raw `image_size` pixels. */
+const FAL_ASPECT_RATIO_MODELS = new Set(["fal-ai/flux-pro/v1.1-ultra", "fal-ai/flux-pro/kontext"]);
+const ALLOWED_FAL_ASPECT_RATIOS = ["21:9", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16", "9:21"];
+
+/** Fal models that accept a reference/edit image, and the input field name each one uses. */
+const FAL_IMAGE_REF_PARAM: Record<string, string> = {
+  "fal-ai/flux-pro/kontext": "image_url",
+  "fal-ai/flux-pro/v1.1-ultra": "image_url",
+};
+/** Where `--ref` routes when the requested fal model has no reference-image input of its own. */
+const DEFAULT_FAL_EDIT_MODEL = "fal-ai/flux-pro/kontext";
+/** Where the default (codex) image lane routes when codex itself isn't available. */
+const DEFAULT_FALLBACK_FAL_MODEL = "fal-ai/flux-pro/v1.1-ultra";
+
+function gcd(a: number, b: number): number {
+  return b === 0 ? a : gcd(b, a % b);
+}
+
+/** Reduce a pixel WxH to one of fal's allowed `aspect_ratio` strings, or undefined if it doesn't match any. */
+function widthHeightToFalAspectRatio(width: number, height: number): string | undefined {
+  const g = gcd(width, height) || 1;
+  const ratio = `${width / g}:${height / g}`;
+  return ALLOWED_FAL_ASPECT_RATIOS.includes(ratio) ? ratio : undefined;
+}
+
+const REF_MIME: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+};
+
+/** Find an executable named `cmd` on `PATH`, the way a shell would. */
+function which(cmd: string, pathEnv = process.env.PATH ?? ""): string | undefined {
+  for (const dir of pathEnv.split(":")) {
+    if (!dir) continue;
+    const candidate = join(dir, cmd);
+    try {
+      const st = statSync(candidate);
+      if (st.isFile() && (st.mode & 0o111) !== 0) return candidate;
+    } catch {
+      /* not here */
+    }
+  }
+  return undefined;
 }
 
 function inferFalMedia(model: string, requested?: "image" | "video"): "image" | "video" {
@@ -216,16 +271,36 @@ export class FalMediaGen {
   async generate(opts: ImageGenOptions & { model: string }): Promise<ImageGenResult> {
     const prompt = opts.prompt?.trim();
     if (!prompt) throw new ImageGenError("empty prompt");
-    const model = opts.model.trim();
+    let model = opts.model.trim();
     if (!model) throw new ImageGenError("fal model slug is required");
-    if (opts.refs?.length) throw new ImageGenError("fal image/video generation does not support --ref yet");
     if (opts.transparent) throw new ImageGenError("fal image/video generation does not support --transparent yet");
 
-    const size = opts.size ?? (inferFalMedia(model, opts.media) === "image" ? DEFAULT_SIZE : "auto");
-    if (size !== "auto" && !ALLOWED_SIZES.has(size)) {
-      throw new ImageGenError(`bad --size "${size}"; allowed: ${[...ALLOWED_SIZES].join(", ")}`);
-    }
     const media = inferFalMedia(model, opts.media);
+
+    // Reference images: route to a model that actually accepts one (either the requested model,
+    // if it takes one itself, or the default fal edit model) rather than silently dropping --ref.
+    let refUrl: string | undefined;
+    if (opts.refs?.length) {
+      if (media === "video") throw new ImageGenError("fal video generation does not support --ref yet");
+      if (opts.refs.length > 1) {
+        throw new ImageGenError(`fal --ref supports exactly one reference image; got ${opts.refs.length}`);
+      }
+      const refPath = resolve(opts.refs[0]!);
+      if (!existsSync(refPath)) throw new ImageGenError(`reference image not found: ${refPath}`);
+      if (!FAL_IMAGE_REF_PARAM[model]) {
+        this.logger.warn(
+          `fal model "${model}" has no reference-image input; routing --ref through ${DEFAULT_FAL_EDIT_MODEL} instead`,
+          { requestedModel: model, editModel: DEFAULT_FAL_EDIT_MODEL },
+        );
+        model = DEFAULT_FAL_EDIT_MODEL;
+      }
+      refUrl = await this.uploadRef(refPath);
+    }
+
+    const size = opts.size ?? (media === "image" ? DEFAULT_SIZE : "auto");
+    if (size !== "auto" && !/^\d+x\d+$/.test(size)) {
+      throw new ImageGenError(`bad --size "${size}"; expected WIDTHxHEIGHT (e.g. 1024x1536) or "auto"`);
+    }
     const ext = media === "video" ? "mp4" : "png";
     const outPath = opts.out
       ? isAbsolute(opts.out)
@@ -236,9 +311,25 @@ export class FalMediaGen {
 
     const payload: Record<string, unknown> = { prompt };
     const parsedSize = media === "image" ? parseSize(size) : undefined;
-    if (parsedSize) payload.image_size = parsedSize;
+    if (parsedSize) {
+      if (FAL_ASPECT_RATIO_MODELS.has(model)) {
+        const ratio = widthHeightToFalAspectRatio(parsedSize.width, parsedSize.height);
+        if (!ratio) {
+          throw new ImageGenError(
+            `fal ${model} takes an aspect_ratio, not raw pixels (allowed: ${ALLOWED_FAL_ASPECT_RATIOS.join(", ")}); ` +
+              `--size ${size} (${parsedSize.width}x${parsedSize.height}) doesn't reduce to any of them — pick a ` +
+              `--size with a matching ratio (e.g. 1024x1536 for 2:3), pass --size auto, or use a model that takes ` +
+              `raw image_size like fal-ai/flux/dev`,
+          );
+        }
+        payload.aspect_ratio = ratio;
+      } else {
+        payload.image_size = parsedSize;
+      }
+    }
+    if (refUrl) payload[FAL_IMAGE_REF_PARAM[model]!] = refUrl;
 
-    this.logger.info("fal gen submit", { model, media, outPath, size });
+    this.logger.info("fal gen submit", { model, media, outPath, size, ref: !!refUrl });
     const submit = await this.requestJson(`${this.baseUrl}/${model.replace(/^\/+/, "")}`, {
       method: "POST",
       body: JSON.stringify(payload),
@@ -310,6 +401,42 @@ export class FalMediaGen {
       requestId: requestId || undefined,
       raw: result,
     };
+  }
+
+  /** Upload a local file to fal's CDN storage and return its public URL, for use as an image_url input. */
+  private async uploadRef(path: string): Promise<string> {
+    const bytes = readFileSync(path);
+    const contentType = REF_MIME[extname(path).toLowerCase()] ?? "application/octet-stream";
+    const initiate = await this.requestJson("https://rest.alpha.fal.ai/storage/upload/initiate?storage_type=fal-cdn-v3", {
+      method: "POST",
+      body: JSON.stringify({ content_type: contentType, file_name: basename(path) }),
+    });
+    const uploadUrl = typeof initiate?.upload_url === "string" ? initiate.upload_url : "";
+    const fileUrl = typeof initiate?.file_url === "string" ? initiate.file_url : "";
+    if (!uploadUrl || !fileUrl) {
+      throw new ImageGenError("fal storage upload did not return an upload_url/file_url");
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 60_000);
+    try {
+      const res = await this.fetchImpl(uploadUrl, {
+        method: "PUT",
+        headers: { "Content-Type": contentType },
+        body: new Uint8Array(bytes),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new ImageGenError(`fal reference upload ${res.status} ${res.statusText}: ${text.slice(0, 500)}`.trim());
+      }
+    } catch (err) {
+      if ((err as Error).name === "AbortError") throw new ImageGenError("fal reference upload timed out after 60s");
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+    return fileUrl;
   }
 
   private async requestJson(url: string, init: RequestInit): Promise<any> {
@@ -592,6 +719,24 @@ export class CodexImageGen {
       });
     }
 
+    // Default lane: codex. If the codex binary isn't actually reachable (missing install,
+    // stale PATH override, …), don't hard-fail — fall back to whichever other provider is
+    // actually credentialed on this box, and say so on stderr.
+    if (!this.codexAvailable()) {
+      const fallback = this.resolveFallbackProvider();
+      if (!fallback) {
+        throw new ImageGenError(
+          `codex not found (looked for "${this.codexBin}") and no fallback image provider is credentialed — ` +
+            `set FAL_KEY (or OPENROUTER_API_KEY) in ~/.beckett/.env, or install codex.`,
+        );
+      }
+      this.logger.warn(
+        `codex not found (looked for "${this.codexBin}"); falling back to ${fallback.provider} (${fallback.model})`,
+        { codexBin: this.codexBin, provider: fallback.provider, model: fallback.model },
+      );
+      return fallback.gen.generate({ ...opts, prompt, model: fallback.model });
+    }
+
     const size = opts.size ?? DEFAULT_SIZE;
     if (!ALLOWED_SIZES.has(size)) {
       throw new ImageGenError(`bad --size "${size}"; allowed: ${[...ALLOWED_SIZES].join(", ")}`);
@@ -673,6 +818,39 @@ export class CodexImageGen {
       throw new ImageGenError(`codex wrote an empty file at ${outPath} (exit ${code})`);
     }
     return { path: outPath, bytes, size, prompt, edited, relocated };
+  }
+
+  /** Is the resolved codex binary actually present and executable? */
+  private codexAvailable(): boolean {
+    if (isAbsolute(this.codexBin)) {
+      try {
+        const st = statSync(this.codexBin);
+        return st.isFile() && (st.mode & 0o111) !== 0;
+      } catch {
+        return false;
+      }
+    }
+    return !!which(this.codexBin);
+  }
+
+  /** The next provider to try when codex itself isn't available, in credential-availability order. */
+  private resolveFallbackProvider():
+    | { provider: "fal"; model: string; gen: FalMediaGen }
+    | { provider: "openrouter"; model: string; gen: OpenRouterImageGen }
+    | undefined {
+    try {
+      const gen = new FalMediaGen({ imagesDir: this.imagesDir, logger: this.logger });
+      return { provider: "fal", model: DEFAULT_FALLBACK_FAL_MODEL, gen };
+    } catch {
+      /* no FAL key on this box */
+    }
+    try {
+      const gen = new OpenRouterImageGen({ imagesDir: this.imagesDir, logger: this.logger });
+      return { provider: "openrouter", model: "openrouter/google/gemini-2.5-flash-image", gen };
+    } catch {
+      /* no OpenRouter key on this box */
+    }
+    return undefined;
   }
 
   private buildInstruction(p: {
