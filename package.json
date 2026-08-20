@@ -32,6 +32,7 @@
     "typecheck": "bun x tsc --noEmit"
   },
   "dependencies": {
+    "@cursor/sdk": "1.0.28",
     "@discordjs/voice": "^0.19.2",
     "@modelcontextprotocol/sdk": "^1.13.0",
     "@moss-dev/moss-core": "0.8.7",

@@ -158,6 +158,32 @@ const HarnessConfigSchema = z
         thinking: z.enum(["low", "medium", "high", "xhigh", "ultracode"]).default("high"),
       })
       .default({}),
+    // cursor — the IMPLEMENTER-ONLY seat (`../drivers/cursor.ts`). Enabled by default: it is the
+    // zero-cast implement seat, with Sonnet 5 as the automatic in-run fallback when its Pro quota
+    // runs out. An install with no CURSOR_API_KEY needs no config change — `cursorPreflight` fails
+    // and staffing substitutes claude, so the seat is self-disabling in practice.
+    //
+    // `enabled = false` restores the pre-cursor sonnet-first default exactly
+    // (`../run/cast.ts#implementDefaultFor`), which is also what an install whose config.toml
+    // predates this block gets.
+    cursor: z
+      .object({
+        enabled: z.boolean().default(true),
+        // The shim is a bun script, not a CLI — this is the interpreter, and it is what
+        // `RunSupervisor#harnessBin` verifies against when sweeping an orphaned worker.
+        bin: z.string().min(1).default("bun"),
+        // `cursor-auto` = "Auto Balance if this account offers the Router variant, plain Auto
+        // otherwise, and NEVER Auto Cost" (`../drivers/cursor-model.ts`). Any other value is
+        // passed through as a raw Cursor model id and must have a `config/model-rates.json` row
+        // to be castable at all.
+        default_model: z.string().min(1).default("cursor-auto"),
+        // Cursor's Auto exposes no reasoning-effort parameter, so this only sizes the SOFT
+        // supervision envelope (turn cap / wall clock), never the model call.
+        default_effort: z.enum(["low", "medium", "high", "xhigh", "ultracode"]).default("high"),
+        // Absolute path override for the shim; empty = the in-tree `src/drivers/cursor-runner.ts`.
+        runner: z.string().default(""),
+      })
+      .default({}),
   })
   .default({});
 

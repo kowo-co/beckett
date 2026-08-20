@@ -4,7 +4,17 @@
  * fenced-block codec died with the tracker, the roster rules did not.
  */
 import { describe, expect, test } from "bun:test";
-import { applySonnetFirst, isOpusModel, parseCastJson, projectSlug, validateCasting } from "./cast.ts";
+import {
+  applySonnetFirst,
+  CURSOR_IMPLEMENT_SPEC,
+  DEFAULT_IMPLEMENT_MODEL,
+  implementDefaultFor,
+  isOpusModel,
+  parseCastJson,
+  projectSlug,
+  reviewOnlyErrors,
+  validateCasting,
+} from "./cast.ts";
 
 describe("parseCastJson (tolerant reader — never throws)", () => {
   test("valid cast parses through", () => {
@@ -141,5 +151,95 @@ describe("project slug safety", () => {
 
   test("ordinary dots in project names remain intact", () => {
     expect(projectSlug("Beckett.Web v2")).toBe("beckett.web-v2");
+  });
+});
+
+// =======================================================================================
+// The implementer-only guard (the cursor seat)
+// =======================================================================================
+
+describe("implementer-only seats can never be cast on review", () => {
+  test("a cursor review cast is REFUSED, with a message that says what to do instead", () => {
+    const errors = validateCasting({ review: { harness: "cursor" } });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("implementer-only seat");
+    expect(errors[0]).toContain("cast it under implement, not review");
+    // The roster is quoted so the reader does not have to go looking for the legal answers.
+    expect(errors[0]).toContain("claude, codex, pi");
+  });
+
+  test("cursor on IMPLEMENT is perfectly fine — that is the whole point of the seat", () => {
+    expect(validateCasting({ implement: { harness: "cursor" } })).toEqual([]);
+    expect(validateCasting({ implement: { harness: "cursor", model: "cursor-auto" } })).toEqual([]);
+  });
+
+  test("the guard is registry-driven, so review-capable harnesses pass untouched", () => {
+    for (const harness of ["claude", "codex", "pi"]) {
+      expect(reviewOnlyErrors("review", { harness })).toEqual([]);
+    }
+    expect(reviewOnlyErrors("implement", { harness: "cursor" })).toEqual([]);
+    expect(reviewOnlyErrors("review", { harness: "cursor" })).toHaveLength(1);
+  });
+
+  test("a mixed cast reports the review problem and keeps the implement half legal", () => {
+    const errors = validateCasting({
+      implement: { harness: "cursor", model: "cursor-auto" },
+      review: { harness: "cursor" },
+    });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toStartWith("review:");
+  });
+
+  test("cursor-auto is a priced, castable model (an unpriced one would be refused)", () => {
+    expect(validateCasting({ implement: { harness: "cursor", model: "cursor-auto" } })).toEqual([]);
+    expect(validateCasting({ implement: { harness: "cursor", model: "cursor-magic" } })[0]).toContain(
+      "not priced in config/model-rates.json",
+    );
+  });
+});
+
+// =======================================================================================
+// Cursor-first routing (config-gated)
+// =======================================================================================
+
+describe("implementDefaultFor — cursor first, sonnet as the fallback seat", () => {
+  test("with the cursor block enabled, the zero-cast implement seat is cursor", () => {
+    expect(implementDefaultFor({ harness: { cursor: { enabled: true } } })).toEqual(CURSOR_IMPLEMENT_SPEC);
+  });
+
+  test("with it off — or absent entirely — the sonnet-first default is unchanged", () => {
+    // The second case is the one that matters for blast radius: an install whose config.toml
+    // predates this seat must behave exactly as it did before, not crash and not opt itself in.
+    const sonnet = { harness: "claude", model: DEFAULT_IMPLEMENT_MODEL };
+    expect(implementDefaultFor({ harness: { cursor: { enabled: false } } })).toEqual(sonnet);
+    expect(implementDefaultFor({ harness: {} })).toEqual(sonnet);
+    expect(implementDefaultFor({})).toEqual(sonnet);
+  });
+
+  test("applySonnetFirst with no default argument is byte-identical to before", () => {
+    expect(applySonnetFirst(undefined)).toEqual({
+      spec: { harness: "claude", model: DEFAULT_IMPLEMENT_MODEL },
+    });
+  });
+
+  test("the cursor default ONLY replaces the no-explicit-cast branch", () => {
+    const cursorFirst = implementDefaultFor({ harness: { cursor: { enabled: true } } });
+    // No cast → cursor.
+    expect(applySonnetFirst(undefined, cursorFirst).spec).toEqual(CURSOR_IMPLEMENT_SPEC);
+    // An explicit non-opus cast is still honoured verbatim.
+    expect(applySonnetFirst({ harness: "claude", model: "claude-sonnet-5" }, cursorFirst).spec).toEqual({
+      harness: "claude",
+      model: "claude-sonnet-5",
+    });
+    // A model-less claude cast still gets the enforced sonnet model, NOT cursor.
+    expect(applySonnetFirst({ harness: "claude" }, cursorFirst).spec).toEqual({
+      harness: "claude",
+      model: DEFAULT_IMPLEMENT_MODEL,
+    });
+    // An un-reasoned opus cast still downgrades to SONNET — the case for a heavier seat is a
+    // claude-tier judgement, and answering it with cursor would be a different decision entirely.
+    const downgraded = applySonnetFirst({ harness: "claude", model: "claude-opus-5" }, cursorFirst);
+    expect(downgraded.spec).toEqual({ harness: "claude", model: DEFAULT_IMPLEMENT_MODEL });
+    expect(downgraded.downgradeNote).toContain("sonnet-first doctrine");
   });
 });

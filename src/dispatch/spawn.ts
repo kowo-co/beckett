@@ -489,6 +489,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerHandle> 
   // claude and modern pi both own their resume identity from t=0 via a pre-minted UUID. PiDriver's
   // preflight requires pi >=0.78 and `--session-id` support so stale 0.72.x installs fail loudly
   // before dispatch instead of dying after spawn.
+  //
+  // cursor mints its own id in the driver instead of taking one here: the Cursor SDK's local agent
+  // ids carry an `agent-` prefix, and a bare UUID is not a valid `agentId` for `Agent.resume`, so
+  // minting the wrong shape at this seam would break its crash recovery silently.
   const preMintSession =
     harness.harness === "claude" || harness.harness === "pi" ? randomUUID() : undefined;
 

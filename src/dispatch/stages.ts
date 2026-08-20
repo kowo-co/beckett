@@ -29,6 +29,7 @@ import type { RunState } from "../run/types.ts";
 import type { WorkItem } from "../run/work-item.ts";
 import { ExtensionRegistry, type Extension, type ExtensionFactory } from "../ext/index.ts";
 import { projectSlug } from "../run/cast.ts";
+import { isReviewCapable } from "../drivers/index.ts";
 import { classifyDiffSurface, reviewDepthInstructions } from "../run/review-depth.ts";
 import { steeringBlock } from "./resume-brief.ts";
 import { CapabilityRegistry, type CapabilityDeps } from "../capability/index.ts";
@@ -53,6 +54,11 @@ export function defaultEffortFor(harness: HarnessSpec["harness"], config: Config
       return config.harness.codex.default_effort;
     case "pi":
       return config.harness.pi.thinking;
+    // Cursor's Auto exposes no reasoning-effort parameter, so this sizes only the SOFT supervision
+    // envelope (turn cap / wall clock) in `./spawn.ts#buildEnvelope`. Read defensively: an install
+    // whose config.toml predates the cursor block still resolves an effort instead of `undefined`.
+    case "cursor":
+      return config.harness.cursor?.default_effort ?? config.harness.claude.default_effort;
     // An out-of-tree registered harness carries no bespoke `[harness.<name>]` config block; fall
     // back to claude's default effort (the backbone harness) rather than failing the cast.
     default:
@@ -415,10 +421,18 @@ const reviewStage: StageDefinition = {
   entryState: "reviewing",
   preloadsDiff: true,
   resolveCast: (explicit, item, config) => {
+    const fallback = { harness: "claude", model: config.models.reviewer, effort: reviewEffortFor(item) };
+    // The implementer-only guard's second net. `../run/cast.ts#validateCasting` already refuses a
+    // non-review-capable review cast at DEPLOY time, loudly — that is the guard with teeth. This
+    // covers the one path that bypasses it: a cast already sitting in `runs.json` (hand-edited, or
+    // written by an older build), which `parseCastJson` reads tolerantly by design. Silently
+    // staffing an implementer-only seat as the reviewer would be worse than any error, so the
+    // review falls back to the configured claude reviewer instead of honouring it.
+    if (explicit && !isReviewCapable(explicit.harness)) return fallback;
     // An explicit review cast that names no effort still gets the SCALED default (issue #27) —
     // otherwise it silently falls through to the harness default (xhigh), the priciest tier.
     if (explicit) return explicit.effort ? explicit : { ...explicit, effort: reviewEffortFor(item) };
-    return { harness: "claude", model: config.models.reviewer, effort: reviewEffortFor(item) };
+    return fallback;
   },
   buildPrompt({ item, baseRef, steering, reviewDiff }): string {
     const body = item.body.trim() ? `\n\n${item.body.trim()}` : "";

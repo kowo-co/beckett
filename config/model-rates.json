@@ -68,6 +68,14 @@
       "estimate": true,
       "source": "Estimate: Fable/Mythos tier at $10/$50 per docs/token-efficiency.md audit (previous Haiku-tier $1/$5 entry was a 10x underestimate). Anthropic cache read is 0.1× input; cache creation is 2× input — Claude Code writes 1-hour caches, and a least-squares fit of ccusage's own per-day costs recovers exactly 2× (see docs/token-efficiency.md)."
     },
+    "cursor-auto": {
+      "input": 1.25,
+      "output": 6,
+      "cache_read": 0.25,
+      "cache_write": 1.25,
+      "estimate": true,
+      "source": "Estimate, and an API-EQUIVALENT COMPARISON RATE rather than money billed. The cursor seat runs on a flat $20/month Cursor Pro subscription, so marginal per-token cost is plan-included until the allowance is spent. Cursor publishes no per-token rate for plain Auto on an individual Pro plan; these figures mirror the published Auto Cost flat rate ($1.25 / $6 / $0.25 per Mtok) as the nearest documented number. Probed 2026-08-19 on the live account: GET /v1/agents/{id}/usage answers `feature_unavailable`, so there is no server-reported cost to reconcile against, and the Auto Balance router variant is not offered at all (no `optimize_for` parameter on any model) — see docs/cursor-seat-findings.md."
+    },
     "claude-haiku-4-5": {
       "input": 1,
       "output": 5,

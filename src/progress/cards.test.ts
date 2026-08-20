@@ -134,6 +134,33 @@ describe("reduceProgressCard", () => {
     expect(state.alert).toBe(true);
   });
 
+  // A quota seat change (`../run/supervisor.ts#handleQuotaFallback`). Routine on a flat $20/month
+  // plan, but never silent — an `info` outcome would otherwise fall straight through the switch
+  // and render nothing at all, which is the failure mode this branch exists to prevent.
+  test("a quota fallback puts an honest one-liner on the card instead of nothing", () => {
+    const state = reduceProgressCard(
+      null,
+      ev("implement:quota-fallback", "info", "cursor quota hit — resumed on claude-sonnet-5", "usage limit reached"),
+      0,
+    )!;
+    expect(state.phase).toBe("cursor quota hit — resumed on claude-sonnet-5");
+    // Not an alert: running out on a $20/month plan is a normal Tuesday, and the work continued.
+    expect(state.alert).toBe(false);
+    expect(state.terminal).toBe(false);
+  });
+
+  test("a fallback that could NOT happen — both seats constrained — alerts and is terminal", () => {
+    const state = reduceProgressCard(
+      null,
+      ev("implement:quota-fallback", "held", "cursor quota hit and claude is also constrained", "claude is rate limited"),
+      0,
+    )!;
+    expect(state.phase).toBe("parked — both seats constrained");
+    expect(state.detail).toContain("claude is rate limited");
+    expect(state.alert).toBe(true);
+    expect(state.terminal).toBe(true);
+  });
+
   test("the staffing watchdog reads as retrying", () => {
     const state = reduceProgressCard(null, ev("watchdog", "started", "no live worker for 130s — re-staffing"), 0)!;
     expect(state.phase).toBe("retrying");
