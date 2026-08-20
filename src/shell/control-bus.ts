@@ -27,6 +27,17 @@ export interface BusRequest {
    * in the op's target channel. Absent for human/operator CLI use.
    */
   token?: string;
+  /**
+   * Set by `callBus` on every request that carries no {@link token}: a bare `beckett` CLI
+   * invocation — a human at a shell, a deploy script, cron — that dialed the daemon's own
+   * control socket directly rather than riding a live concierge session's turn. The socket
+   * itself is the trust boundary (only local processes with filesystem access can reach it),
+   * so a handler that opts into `operator` is choosing to trust that boundary in place of a
+   * Discord `(userId, channelId)` pair. Only capabilities that explicitly branch on it (see
+   * `browser.steer`/`browser.stop` in `concierge/index.ts`) treat it as authorization; every
+   * other tokenless caller keeps the existing `currentMention` fallback.
+   */
+  operator?: boolean;
 }
 export interface BusResponse {
   ok: boolean;
@@ -159,7 +170,7 @@ export function callBus(
       unix: socketPath,
       socket: {
         open(sock) {
-          sock.write(frame(token ? { cmd, args, token } : { cmd, args }));
+          sock.write(frame(token ? { cmd, args, token } : { cmd, args, operator: true }));
         },
         data(sock, data) {
           const msg = fd.push(data);

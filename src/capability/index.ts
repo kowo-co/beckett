@@ -95,6 +95,8 @@ export interface BusRequestLike {
   cmd: string;
   args: Record<string, unknown>;
   token?: string;
+  /** Set on every tokenless request — see `BusRequest.operator` in `shell/control-bus.ts`. */
+  operator?: boolean;
 }
 export interface BusResponseLike {
   ok: boolean;

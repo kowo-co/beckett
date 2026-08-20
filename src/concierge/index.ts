@@ -4640,6 +4640,19 @@ export class Concierge {
   }
 
   /**
+   * True iff `token` belongs to a LIVE pooled session whose current turn has no channel mention to
+   * protect — a system/update turn (e.g. `askUpdate`'s `pool.ask(SYSTEM_SCOPE, framed)`, which runs
+   * meta-less), or a concierge shell spawned mid such a turn. That's distinct from a forged/unknown
+   * token, which must still fail closed: {@link issuerMention} alone can't tell the two apart (both
+   * resolve to `null`), so callers that need to grant system-turn trust check `pool.tokenKnown`
+   * first, same as this helper does.
+   */
+  private isSystemTurnToken(token: string | undefined): boolean {
+    if (!token || !this.pool.tracksMeta() || !this.pool.tokenKnown(token)) return false;
+    return !isMentionClaim(this.pool.metaForToken(token));
+  }
+
+  /**
    * The mention whose session turn is EXECUTING RIGHT NOW (issue #24), under concurrency (OPS-80
    * §9.3): several channels' turns can be live at once, so correlation is channel-first. With a
    * `channelId`, only the live turn IN that channel matches — a miss never falls back to a live
@@ -5163,14 +5176,24 @@ export class Concierge {
               const runId = typeof req.args.runId === "string" ? req.args.runId.trim() : "";
               const note = typeof req.args.note === "string" ? req.args.note.trim() : "";
               if (!runId || !note) return { ok: false, error: 'usage: beckett browser steer <run-id> "<guidance>"' };
-              const mention = this.issuerMention(req.token);
-              if (!mention || !mention.userId) {
-                return { ok: false, error: "steering needs an authenticated authorized request" };
+              // An operator call (no session token — a bare `beckett` CLI invocation, see
+              // BusRequest.operator) is trusted by the control socket itself and skips both the
+              // Discord issuer check and the run's-own-channel lock below. So does a call whose
+              // token belongs to a live session's system/update turn (see isSystemTurnToken) — a
+              // concierge shell spawned there inherits a real token, but that turn has no channel
+              // to protect. A Discord-originated call (a session child echoing a mentioned turn's
+              // token) still needs both.
+              let mention: MentionClaim | null = null;
+              if (!req.operator) {
+                mention = this.issuerMention(req.token);
+                if ((!mention || !mention.userId) && !this.isSystemTurnToken(req.token)) {
+                  return { ok: false, error: "steering needs an authenticated authorized request" };
+                }
               }
               const inspection = await this.browserAgent.inspect(runId, { tail: 1, screenshot: false });
               if (!inspection) return { ok: false, error: `browser run ${runId} is unknown` };
               // Same rule as dispatch: a run belongs to the channel that started it.
-              if (inspection.run.channelId !== mention.channelId) {
+              if (mention && inspection.run.channelId !== mention.channelId) {
                 return { ok: false, error: "browser runs can only be steered from the channel that dispatched them" };
               }
               try {
@@ -5190,13 +5213,20 @@ export class Concierge {
               }
               const runId = typeof req.args.runId === "string" ? req.args.runId.trim() : "";
               if (!runId) return { ok: false, error: 'usage: beckett browser stop <run-id> [--reason "<why>"]' };
-              const mention = this.issuerMention(req.token);
-              if (!mention || !mention.userId) {
-                return { ok: false, error: "stopping a run needs an authenticated authorized request" };
+              // Same operator bypass as browser.steer above (including the system-turn-token case)
+              // — a tokenless control-socket call, or one whose token belongs to a live session's
+              // channel-less system/update turn, is trusted and skips the Discord issuer +
+              // same-channel checks.
+              let mention: MentionClaim | null = null;
+              if (!req.operator) {
+                mention = this.issuerMention(req.token);
+                if ((!mention || !mention.userId) && !this.isSystemTurnToken(req.token)) {
+                  return { ok: false, error: "stopping a run needs an authenticated authorized request" };
+                }
               }
               const inspection = await this.browserAgent.inspect(runId, { tail: 1, screenshot: false });
               if (!inspection) return { ok: false, error: `browser run ${runId} is unknown` };
-              if (inspection.run.channelId !== mention.channelId) {
+              if (mention && inspection.run.channelId !== mention.channelId) {
                 return { ok: false, error: "browser runs can only be stopped from the channel that dispatched them" };
               }
               const reason = typeof req.args.reason === "string" && req.args.reason.trim() ? req.args.reason.trim() : undefined;
