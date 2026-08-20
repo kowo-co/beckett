@@ -41,6 +41,7 @@ import type {
   HarnessDriver,
 } from "../types.ts";
 import type { HarnessSpec } from "../run/cast.ts";
+import { withDefaultEffort } from "../run/cast.ts";
 import type { WorkItem } from "../run/work-item.ts";
 import { createDriver } from "../drivers/index.ts";
 import { workerId as mintWorkerId } from "../ids.ts";
@@ -291,7 +292,9 @@ function buildScope(item: WorkItem): FileScope {
 
 /** Build the resource envelope from the casting effort (defaults to the configured harness effort). */
 function buildEnvelope(harness: HarnessSpec, config: Config): ResourceEnvelope {
-  const effort: Effort = harness.effort ?? defaultEffortFor(harness.harness, config);
+  // Opus-without-effort → medium (4.8 → high) before the harness-config default kicks in.
+  const filled = withDefaultEffort(harness);
+  const effort: Effort = filled.effort ?? defaultEffortFor(filled.harness, config);
   const { turnCap, wallClockS } = ENVELOPE_BY_EFFORT[effort];
   // Ticket workers self-provision tools / run checks → allow network. codex honors its own
   // sandbox/network config; the envelope flag is informational for claude.

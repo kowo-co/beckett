@@ -14,6 +14,7 @@ import {
   projectSlug,
   reviewOnlyErrors,
   validateCasting,
+  withDefaultEffort,
 } from "./cast.ts";
 
 describe("parseCastJson (tolerant reader — never throws)", () => {
@@ -78,6 +79,57 @@ describe("isOpusModel", () => {
     expect(isOpusModel("CLAUDE-OPUS-5")).toBe(true);
     expect(isOpusModel("claude-sonnet-5")).toBe(false);
     expect(isOpusModel(undefined)).toBe(false);
+  });
+});
+
+describe("withDefaultEffort — Opus defaults to medium (4.8 stays high)", () => {
+  test("an Opus 5 cast with no effort resolves to medium", () => {
+    expect(withDefaultEffort({ harness: "claude", model: "claude-opus-5" })).toEqual({
+      harness: "claude",
+      model: "claude-opus-5",
+      effort: "medium",
+    });
+  });
+
+  test("an explicit effort still wins", () => {
+    expect(
+      withDefaultEffort({ harness: "claude", model: "claude-opus-5", effort: "xhigh" }),
+    ).toEqual({ harness: "claude", model: "claude-opus-5", effort: "xhigh" });
+    expect(
+      withDefaultEffort({ harness: "claude", model: "claude-opus-5", effort: "high" }),
+    ).toEqual({ harness: "claude", model: "claude-opus-5", effort: "high" });
+    expect(
+      withDefaultEffort({ harness: "claude", model: "claude-opus-5", effort: "ultracode" }),
+    ).toEqual({ harness: "claude", model: "claude-opus-5", effort: "ultracode" });
+  });
+
+  test("Opus 4.8 still lands on high", () => {
+    expect(withDefaultEffort({ harness: "claude", model: "claude-opus-4-8" })).toEqual({
+      harness: "claude",
+      model: "claude-opus-4-8",
+      effort: "high",
+    });
+    // Explicit medium on 4.8 is still honoured (the pin is the DEFAULT, not a hard clamp).
+    expect(
+      withDefaultEffort({ harness: "claude", model: "claude-opus-4-8", effort: "medium" }),
+    ).toEqual({ harness: "claude", model: "claude-opus-4-8", effort: "medium" });
+  });
+
+  test("sonnet's defaults are untouched (effort left unset for the harness default)", () => {
+    expect(withDefaultEffort({ harness: "claude", model: "claude-sonnet-5" })).toEqual({
+      harness: "claude",
+      model: "claude-sonnet-5",
+    });
+    expect(withDefaultEffort({ harness: "claude", model: "claude-sonnet-5", effort: "high" })).toEqual({
+      harness: "claude",
+      model: "claude-sonnet-5",
+      effort: "high",
+    });
+    expect(withDefaultEffort({ harness: "claude" })).toEqual({ harness: "claude" });
+    expect(withDefaultEffort({ harness: "pi", effort: "medium" })).toEqual({
+      harness: "pi",
+      effort: "medium",
+    });
   });
 });
 

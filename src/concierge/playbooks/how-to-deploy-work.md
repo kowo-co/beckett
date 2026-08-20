@@ -140,11 +140,14 @@ migrations, concurrency, shared interfaces, anything in Beckett's own source —
 genuinely-hard design problem. It is **0-for-26 on substantive failures** in our ledger.
 **Not the reviewer, even here.** Fable sends work back 12.1% of the time at **$21.24 per catch**;
 Opus 5 sends back 44% at **$5.48**. Pay Fable to implement, Opus to review:
-`{"implement":{"harness":"claude","model":"claude-fable-5","effort":"high"},"review":{"harness":"claude","model":"claude-opus-5","effort":"high"}}`.
+`{"implement":{"harness":"claude","model":"claude-fable-5","effort":"high"},"review":{"harness":"claude","model":"claude-opus-5","effort":"medium"}}`.
 **Never** unconfirmed — no silent Fable casts.
 
 **`claude-opus-5` (Opus 5) — the deep-work seat**, and what `--ultracode` selects for you.
-`$5/$25` per Mtok.
+`$5/$25` per Mtok. **Default effort is `medium`** — FrontierCode ranked Opus 5 medium #2 at
+53.4% for $4.31/task, while xhigh ranked #16 at 43.6% for $9.14/task (half the cost, ~10%
+better). Reach for `high` only when the work demonstrably needs it; `xhigh` is usually a worse
+deal.
 **Use for:** `implement` on problems needing intuition — hard debugging, design calls, wide
 refactors — and all frontend/UI/taste work (visual design, interaction, component architecture,
 copy, layout, UX flow); `review` when work deserves a stronger-than-default reviewer, including
@@ -196,8 +199,8 @@ an OpenAI model, and is unaffected by this.)
 | **1 · Trivial / mechanical** — copy tweak, version bump, config edit, rename, one obvious diff | nothing (cursor; Sonnet 5 on quota) | ~$0–3 |
 | **2 · Standard spec'd work** *(the common case)* — APIs, parsers, data layers, business logic, tests, migrations | nothing (cursor; Sonnet 5 on quota) | ~$0–7 |
 | **3 · Judgment-heavy** — design calls, wide refactor, taste, hard debugging, **anything visual** | `sonnet-5` @ `high` (cast it — this class does not belong on the cursor seat) — a person naming a heavier seat gets it quoted via `--cast-quote` | ~$8–16 |
-| **4 · Correctness-critical** — auth, money, migrations, concurrency, Beckett's own source | `fable-5` @ `high` — **confirm with the human first** — plus `opus-5` on `review` | ~$18–21 |
-| **Multifaceted, any weight** — several subsystems, a migration plus its tests plus its docs | `--ultracode` (no `--cast`) | varies, high |
+| **4 · Correctness-critical** — auth, money, migrations, concurrency, Beckett's own source | `fable-5` @ `high` — **confirm with the human first** — plus `opus-5` @ `medium` on `review` | ~$18–21 |
+| **Multifaceted, any weight** — several subsystems, a migration plus its tests plus its docs | `--ultracode` (Opus 5 @ `medium`, large workflow; no `--cast`) | varies, high |
 
 Where kind-of-work overrides weight:
 
@@ -210,8 +213,9 @@ Where kind-of-work overrides weight:
   seat, or, if a person named a heavier seat, cast it with `--cast-quote "<their words>"` and
   judge the *result* instead of the diff. Never hand Sonnet a vibe.
 - **Long run where the risk is silently-missing work** — keep the implement seat its weight class
-  calls for and cast `review` explicitly at Opus 5 `high` to grind every checklist item against
-  reality instead of trusting the scaled default.
+  calls for and cast `review` explicitly at Opus 5 (default `medium`; name `high` only when the
+  review demonstrably needs it) to grind every checklist item against reality instead of trusting
+  the scaled default.
 
 **On any frontend/UI work, invoke the [[ui-designer]] skill *before* you write the prompt** —
 house aesthetic plus source-before-hand-roll (21st.dev, then shadcn/ui, then build). Bake it into
@@ -221,17 +225,21 @@ at its rubric.
 #### Effort — per model, not one ladder
 
 `effort` (`low`/`medium`/`high`/`xhigh`) tunes reasoning depth; name one explicitly whenever you
-cast at all.
+want something other than the model's default. An unnamed effort on an Opus cast resolves to the
+defaults below — you do not have to write `"effort":"medium"` on every Opus cast.
 
 - **`claude-sonnet-5`** — `medium` (trivial) or `high` (standard). Never `low`, never `xhigh`.
 - **`claude-opus-4-8`** — **`high`, always.**
-- **`claude-opus-5`** — `high` for most work, `xhigh` for the genuinely harder ones.
+- **`claude-opus-5`** — **`medium` by default.** Name `high` only for work that demonstrably needs
+  it. `xhigh` is usually a worse deal (FrontierCode: medium #2 at 53.4% / $4.31/task vs xhigh #16
+  at 43.6% / $9.14/task — half the cost and ~10% better quality).
 - **`claude-fable-5`** — `high` standard; `xhigh` only for the most crucial work, always confirmed.
 - **`cursor`** — Cursor's Auto exposes no reasoning knob, so `effort` there only sizes Beckett's
   own supervision envelope (turn cap, wall clock). Leave it unset.
 
-`--ultracode` sets its own tier on implement, but it never overrides an explicit cast: name a
-model for `implement` yourself and yours wins.
+`--ultracode` puts implement on Opus 5 at `medium` (same default) with a large workflow guideline,
+but it never overrides an explicit cast: name a model or effort for `implement` yourself and yours
+wins.
 
 ### Beckett's own source
 

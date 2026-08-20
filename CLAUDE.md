@@ -14,7 +14,8 @@ subtask's difficulty, then pick the cheapest model that clears it.
 - `claude-sonnet-5` — THE DEFAULT builder: well-specified features, tests, refactors, docs. When
   a task is nailed down enough that wandering is impossible, sonnet does it.
 - `claude-opus-5` — architecture, gnarly debugging, cross-cutting integration, writing specs for
-  other agents. Opus wanders on vague prompts — give it ONE task, nailed down.
+  other agents. Default effort `medium` (not high/xhigh). Opus wanders on vague prompts — give it
+  ONE task, nailed down.
 - Fable / strongest tier — review and adjudication, never bulk building.
 
 One agent = one task. Never hand an agent a concept; hand it a deliverable with a gate.

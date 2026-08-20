@@ -32,7 +32,8 @@
  *
  * WHAT IS NEW IN V7: the spec.md scaffold + spec-gate Stop hook are written BEFORE the
  * implement worker spawns; workers carry `--name <run.sessionName>` and accept cross-session
- * messages; and an `--ultracode` run's implement stage is cast onto opus at the deepest tier.
+ * messages; and an `--ultracode` run's implement stage is cast onto opus at medium effort
+ * (the Opus-without-effort default) with a large workflow guideline.
  */
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -41,7 +42,7 @@ import { dirname, join } from "node:path";
 import type { Config, DoneBlocker, Harness, Logger, WorkerEvent } from "../types.ts";
 import { pauseFilePath, readPause } from "../pause.ts";
 import type { HarnessSpec } from "./cast.ts";
-import { applySonnetFirst, DEFAULT_IMPLEMENT_MODEL, implementDefaultFor, isOpusModel } from "./cast.ts";
+import { applySonnetFirst, DEFAULT_IMPLEMENT_MODEL, implementDefaultFor, isOpusModel, withDefaultEffort } from "./cast.ts";
 import { CURSOR_HANDOFF_REL, handoffResumeNote } from "../drivers/cursor-handoff.ts";
 import { activeCooldown, recordCooldown } from "../drivers/cooldown.ts";
 import type { WorkItem } from "./work-item.ts";
@@ -860,7 +861,10 @@ export class RunSupervisor {
     // Ultracode is an IMPLEMENT-stage override and never overrides an explicit cast — a human
     // who named a harness for this stage meant it.
     if (stage === "implement" && run.ultracode && !explicit) {
-      return { harness: "claude", model: "claude-opus-5", effort: "ultracode" };
+      // Deep tier = Opus implement + large workflow guideline. Effort defaults to medium (same
+      // Opus-without-effort doctrine); an explicit cast still wins above. `--effort ultracode`
+      // remains available when a caller names it on the cast.
+      return { harness: "claude", model: "claude-opus-5", effort: "medium" };
     }
     // Sonnet-first (issue #249): the IMPLEMENT stage's default is the enforced `claude-sonnet-5`,
     // not whichever `harness.claude.default_model` an install names — and an opus cast with no
@@ -1213,7 +1217,7 @@ export class RunSupervisor {
     const spendMeta: SpendStageMeta = {
       harness: spec.harness,
       model: spec.model || this.defaultModelFor(spec),
-      effort: spec.effort ?? defaultEffortFor(spec.harness, this.config),
+      effort: withDefaultEffort(spec).effort ?? defaultEffortFor(spec.harness, this.config),
       startedAt: stageStartedAt,
     };
     this.spendMetaByWorker.set(handle.id, spendMeta);

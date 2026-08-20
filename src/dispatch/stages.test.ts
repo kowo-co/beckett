@@ -100,6 +100,25 @@ describe("per-stage default casts", () => {
     expect(
       stageRegistry.resolveCast("review", { harness: "claude", effort: "xhigh" }, item, config),
     ).toEqual({ harness: "claude", effort: "xhigh" });
+    // An Opus review cast with no implement effort (scaled default would be high) still lands
+    // on medium — the Opus-without-effort doctrine, not review scaling.
+    expect(
+      stageRegistry.resolveCast(
+        "review",
+        { harness: "claude", model: "claude-opus-5" },
+        makeItem(),
+        config,
+      ),
+    ).toEqual({ harness: "claude", model: "claude-opus-5", effort: "medium" });
+    // Opus 4.8 review without effort stays pinned at high.
+    expect(
+      stageRegistry.resolveCast(
+        "review",
+        { harness: "claude", model: "claude-opus-4-8" },
+        makeItem(),
+        config,
+      ),
+    ).toEqual({ harness: "claude", model: "claude-opus-4-8", effort: "high" });
   });
 
   test("unknown stages fall back to plain claude", () => {

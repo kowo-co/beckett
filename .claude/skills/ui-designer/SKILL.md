@@ -188,7 +188,7 @@ same taste you did. A frontend prompt should read like:
 > retheme to our tokens.** House aesthetic: confident minimalism, one accent, generous whitespace,
 > dark-mode-from-tokens. Tailwind + shadcn only. **Self-check against the ui-designer rubric before
 > done** (sourced/breathes/hierarchy/token-pure/alive/accessible/responsive). Cast:
-> `{"implement":{"harness":"claude","model":"claude-opus-5","effort":"high"}}`.
+> `{"implement":{"harness":"claude","model":"claude-opus-5","effort":"medium"}}`.
 
 That one paragraph turns "make a pricing page" into a brief with a design POV baked in — which is
 the whole point of having a house style. See the frontend seat and cast table in [[concierge]].

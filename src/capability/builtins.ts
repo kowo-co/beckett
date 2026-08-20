@@ -358,7 +358,8 @@ export const configFragments = {
     .object({
       // Default reviewer model (issue #27): Sonnet reads a diff against criteria extremely well
       // at a fraction of Opus cost/latency. Opus reviews remain one explicit cast away
-      // (`review: {model: "claude-opus-5", effort: "xhigh"}`) for correctness-critical work.
+      // (`review: {model: "claude-opus-5", effort: "medium"}`) for correctness-critical work —
+      // medium is the Opus default; name high/xhigh only when the review demonstrably needs it.
       reviewer: z.string().min(1).default("claude-sonnet-5"),
     })
     .default({}),
