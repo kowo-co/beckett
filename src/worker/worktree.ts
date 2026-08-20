@@ -20,6 +20,7 @@
 import { mkdirSync, existsSync, appendFileSync, readFileSync, writeFileSync, chmodSync, realpathSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { log } from "../log.ts";
+import { codemapPath, writeCodemap } from "../codemap/generate.ts";
 
 const logger = log.child("worktree");
 
@@ -141,6 +142,7 @@ export async function createWorktree(opts: CreateWorktreeOpts): Promise<Worktree
 
   if (opts.reuseIfExists && existsSync(workspace)) {
     logger.info("reusing existing worktree", { workspace, branch });
+    ensureCodemap(workspace, false);
     return handle;
   }
 
@@ -159,6 +161,7 @@ export async function createWorktree(opts: CreateWorktreeOpts): Promise<Worktree
     const moved = await runGit(["worktree", "move", opts.legacyWorkspace, workspace], repoRoot);
     if (moved.code === 0) {
       logger.info("migrated legacy worktree to sanitized path", { from: opts.legacyWorkspace, to: workspace, branch });
+      ensureCodemap(workspace, false);
       return handle;
     }
     logger.warn("legacy worktree move failed; removing it and cutting fresh (committed work is on the branch)", {
@@ -210,7 +213,24 @@ export async function createWorktree(opts: CreateWorktreeOpts): Promise<Worktree
 
   await git(args, repoRoot);
   logger.info("worktree created", { workspace, branch, baseRef: effectiveBase });
+  ensureCodemap(workspace, true);
   return handle;
+}
+
+/**
+ * Cut-time file-level map for the `codemap` capability. Best-effort: a generator failure must
+ * never fail the worktree cut. `force` rewrites on a fresh cut; resume/migrate only fill a gap.
+ */
+function ensureCodemap(workspace: string, force: boolean): void {
+  try {
+    if (!force && existsSync(codemapPath(workspace))) return;
+    writeCodemap(workspace);
+  } catch (err) {
+    logger.warn("codemap generation failed (worker still starts)", {
+      workspace,
+      error: (err as Error).message,
+    });
+  }
 }
 
 /** Whether a local or fetched ref is available as a safe worktree base. */

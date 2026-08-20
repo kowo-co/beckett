@@ -7,7 +7,7 @@
  * real git behavior the live daemon depends on.
  */
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -86,6 +86,11 @@ describe("worktree lifecycle (real git)", () => {
     const wtBase = (await run(["rev-parse", "HEAD"], ws)).stdout.trim();
     const originMain = (await run(["rev-parse", "origin/main"], repo)).stdout.trim();
     expect(wtBase).toBe(originMain);
+    const mapPath = join(ws, ".beckett", "codemap.txt");
+    expect(existsSync(mapPath)).toBe(true);
+    const map = readFileSync(mapPath, "utf8");
+    expect(map).toContain("not ground truth");
+    expect(map).toContain(wtBase);
   }, 30_000); // real-git: fetch + worktree create shell-outs; needs headroom over the 5s default under full-suite parallel load
 
   test("the nested worktree is hidden from the parent repo's git add -A", async () => {

@@ -142,6 +142,11 @@ export interface PromptContext {
   slug?: string;
   /** Env source (tests inject; the append call site defaults it to process.env). */
   env?: Record<string, string | undefined>;
+  /**
+   * Absolute path of the worker's worktree, when composing a worker system append.
+   * The `codemap` module reads `.beckett/codemap.txt` from here (written at worktree-cut).
+   */
+  workspace?: string;
 }
 
 /**

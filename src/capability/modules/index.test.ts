@@ -26,7 +26,7 @@ function deps(): CapabilityDeps {
 
 test("every formerly-bespoke module is on the common factory shape", () => {
   expect(availableCapabilityModules().sort()).toEqual(
-    ["deploy", "dns", "github", "image", "mail", "memory", "secret"],
+    ["codemap", "deploy", "dns", "github", "image", "mail", "memory", "secret"],
   );
   expect(hasCapabilityModule("github")).toBeTrue();
   expect(hasCapabilityModule("nope")).toBeFalse();
@@ -57,7 +57,7 @@ test("the normalized modules keep the exact CLI verbs the cascade served", () =>
   const registry = new CapabilityRegistry();
   for (const id of availableCapabilityModules()) registry.register(createCapability(id, deps()));
   const verbs = registry.cliVerbs().map(({ verb }) => verb.name).sort();
-  expect(verbs).toEqual(["deploy", "dns", "gh", "image", "mail", "memory", "recall", "secret"]);
+  expect(verbs).toEqual(["codemap", "deploy", "dns", "gh", "image", "mail", "memory", "recall", "secret"]);
   // recall + memory both belong to the memory module (OPS-121 kept both spellings).
   expect(registry.resolveCliVerb(["recall", "x"])!.capability.id).toBe("memory");
   expect(registry.resolveCliVerb(["memory", "recall", "x"])!.capability.id).toBe("memory");
