@@ -6,20 +6,26 @@
  * executor never `new` a driver — they ask the registry for one and hold only the typed
  * interface.
  *
- * v3 registers the three supported harnesses: Claude for live steering, Codex for one-shot
- * `codex exec`, and Pi for one-shot `pi -p`. Asking for anything else fails loudly rather than
- * silently degrading.
+ * Registered today: Claude for live steering, Codex for one-shot `codex exec`, Pi for one-shot
+ * `pi -p`, and Cursor — an IMPLEMENTER-ONLY seat running Cursor's agent loop in local mode via
+ * a spawned shim. Asking for anything else fails loudly rather than silently degrading.
+ *
+ * A row carries two things beyond the factory: how to preflight the harness, and whether it may
+ * staff `review` ({@link DriverRegistration.reviewCapable}). The second is what makes
+ * implement-only a CAPABILITY rather than a convention someone has to remember.
  */
 
 import type { Config, Harness, HarnessDriver, Logger } from "../types.ts";
 import { ClaudeDriver, claudePreflight } from "./claude.ts";
 import { CodexDriver, codexPreflight } from "./codex.ts";
 import { PiDriver, piPreflight } from "./pi.ts";
+import { CursorDriver, cursorPreflight } from "./cursor.ts";
 import { activeCooldown, clearCooldown } from "./cooldown.ts";
 
 export { ClaudeDriver } from "./claude.ts";
 export { CodexDriver } from "./codex.ts";
 export { PiDriver } from "./pi.ts";
+export { CursorDriver } from "./cursor.ts";
 
 /** Builds a fresh driver instance (one driver == one harness process). */
 export type DriverFactory = (config: Config, logger?: Logger) => HarnessDriver;
@@ -50,20 +56,56 @@ export interface DriverRegistration {
   create: DriverFactory;
   /** Static health probe consulted before casting (and by `beckett doctor`). */
   preflight: DriverPreflight;
+  /**
+   * Whether this harness may be cast on the `review` stage.
+   *
+   * A capability, not a convention. `cursor` is an implementer-only seat: it builds, it never
+   * judges someone else's diff. Expressing that as a registry field rather than a hardcoded
+   * `harness === "cursor"` check means the SECOND implementer-only seat needs no second check —
+   * and `../run/cast.ts#validateCasting` refuses a bad cast at DEPLOY time, before a run exists,
+   * with the roster in hand.
+   *
+   * Optional, defaulting to review-capable ({@link isReviewCapable}), so an out-of-tree driver
+   * registered against the older shape keeps working unchanged.
+   */
+  reviewCapable?: boolean;
 }
 
 /**
  * The harness → registration table — the SINGLE SOURCE OF TRUTH for which harnesses exist.
- * `claude` (live-steerable stream), `codex` (one-shot `codex exec`, steer-via-resume), and `pi`
- * (one-shot `pi -p`, steer-via-resume — the malleable codex replacement) are all registered so the
- * dispatcher can cast any of them per stage (Spec 02 §5; specs/_legacy-v3/V3.md §7). Both the factory and the
- * preflight live in the same row: no separate hand-synced switch to keep aligned.
+ * `claude` (live-steerable stream), `codex` (one-shot `codex exec`, steer-via-resume), `pi`
+ * (one-shot `pi -p`, steer-via-resume) and `cursor` (one-shot local-mode shim, implement only)
+ * are all registered so the dispatcher can cast them per stage (Spec 02 §5;
+ * specs/_legacy-v3/V3.md §7). Factory, preflight and stage capability live in the same row: no
+ * separate hand-synced switch to keep aligned.
  */
 const REGISTRY: Record<string, DriverRegistration> = {
   claude: { create: (config, logger) => new ClaudeDriver(config, logger), preflight: claudePreflight },
   codex: { create: (config, logger) => new CodexDriver(config, logger), preflight: codexPreflight },
   pi: { create: (config, logger) => new PiDriver(config, logger), preflight: piPreflight },
+  // The cursor seat (`./cursor.ts`) — IMPLEMENT ONLY. `reviewCapable: false` is the whole guard:
+  // it is what makes `--cast '{"review":{"harness":"cursor"}}'` fail loudly at deploy time.
+  cursor: {
+    create: (config, logger) => new CursorDriver(config, logger),
+    preflight: cursorPreflight,
+    reviewCapable: false,
+  },
 };
+
+/**
+ * Whether `harness` may staff the `review` stage. Unregistered harnesses answer `true` so this
+ * never becomes a second, quieter registration check — an unknown harness is rejected by
+ * {@link isRegisteredHarness} first, and that is the error a caller should see.
+ */
+export function isReviewCapable(harness: string): boolean {
+  const registration = isRegisteredHarness(harness) ? REGISTRY[harness] : undefined;
+  return registration?.reviewCapable !== false;
+}
+
+/** The harnesses that may staff `review` — the roster a rejection message quotes. */
+export function reviewCapableHarnesses(): Harness[] {
+  return Object.keys(REGISTRY).filter(isReviewCapable);
+}
 
 /**
  * Whether `name` is a registered harness — the registry-driven replacement for a hardcoded

@@ -198,6 +198,19 @@ function verdictFor(event: DispatchEvent): Verdict | null {
     return { phase: "waiting on an answer", detail: clip(event.message), alert: true, terminal: false };
   }
 
+  // A seat change on a quota wall (`../run/supervisor.ts#handleQuotaFallback`). Routine on a flat
+  // $20/month plan, but never SILENT: the channel is told which seat ran out and where the work
+  // went, in the same one-line shape as every other status. `info` would otherwise fall through
+  // the switch below and render nothing at all. `held` means the fallback could not happen — the
+  // other seat is constrained too — so the run parked with its handoff intact instead of burning
+  // the remaining allowance, and that is an alert, not news.
+  if (qualifier === "quota-fallback") {
+    if (event.outcome === "held") {
+      return { phase: "parked — both seats constrained", detail, alert: true, terminal: true };
+    }
+    return { phase: clip(event.message) || "quota hit — seat changed", detail: "", alert: false, terminal: false };
+  }
+
   // A worker stage: implement/review/design/design_check/rework, or one a future extension adds.
   switch (event.outcome) {
     case "started":

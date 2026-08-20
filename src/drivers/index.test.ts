@@ -17,19 +17,36 @@ import {
   getDriverFactory,
   hasDriver,
   isRegisteredHarness,
+  isReviewCapable,
   preflightFor,
+  reviewCapableHarnesses,
 } from "./index.ts";
 import { activeCooldown, recordCooldown } from "./cooldown.ts";
 import { defaultConfig } from "../config.ts";
 
 describe("driver registry — single source of truth", () => {
-  test("the three in-tree drivers are registered", () => {
-    expect(availableHarnesses().sort()).toEqual(["claude", "codex", "pi"]);
-    for (const h of ["claude", "codex", "pi"]) {
+  test("the in-tree drivers are registered", () => {
+    expect(availableHarnesses().sort()).toEqual(["claude", "codex", "cursor", "pi"]);
+    for (const h of ["claude", "codex", "cursor", "pi"]) {
       expect(hasDriver(h)).toBe(true);
       expect(isRegisteredHarness(h)).toBe(true);
       expect(typeof getDriverFactory(h)).toBe("function");
     }
+  });
+
+  // The implementer-only axis (`./cursor.ts`). A capability on the registry row, not a hardcoded
+  // `harness === "cursor"` check somewhere downstream — so a SECOND implementer-only seat needs no
+  // second edit anywhere. `../run/cast.ts#reviewOnlyErrors` is the consumer with teeth.
+  test("reviewCapable is a registry capability: cursor implements, it never reviews", () => {
+    expect(isReviewCapable("cursor")).toBe(false);
+    for (const h of ["claude", "codex", "pi"]) expect(isReviewCapable(h)).toBe(true);
+    expect(reviewCapableHarnesses().sort()).toEqual(["claude", "codex", "pi"]);
+  });
+
+  test("an unregistered harness is not treated as review-incapable (it is rejected earlier)", () => {
+    // `isRegisteredHarness` refuses it first, and THAT is the error a caller should see — answering
+    // "cannot review" here would turn an unknown-harness typo into a confusing capability message.
+    expect(isReviewCapable("gpt")).toBe(true);
   });
 
   test("registry membership is an own-property check, not an enum or prototype key", () => {
@@ -41,7 +58,7 @@ describe("driver registry — single source of truth", () => {
 
   test("an unregistered harness fails loudly, listing the registered set", () => {
     expect(() => getDriverFactory("gpt")).toThrow(/no driver registered for harness "gpt"/);
-    expect(() => createDriver("gpt", defaultConfig())).toThrow(/available: claude, codex, pi/);
+    expect(() => createDriver("gpt", defaultConfig())).toThrow(/available: claude, codex, pi, cursor/);
   });
 
   test("preflight is served off the registry row (no separate switch)", async () => {

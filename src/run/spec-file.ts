@@ -126,3 +126,53 @@ export function parseSpecChecklist(text: string): ParsedSpecChecklist {
 export function specProgressLine(parsed: Pick<ParsedSpecChecklist, "done" | "total">): string {
   return `${parsed.done}/${parsed.total} checked`;
 }
+
+// =======================================================================================
+// Checklist mutation — the cursor seat's handoff needs it (`../drivers/cursor-runner.ts`)
+// =======================================================================================
+
+/** The texts of every CHECKED item under `## Checklist`. Order-preserving, duplicates kept. */
+export function tickedItemTexts(text: string): string[] {
+  return parseSpecChecklist(text)
+    .items.filter((item) => item.done)
+    .map((item) => item.text);
+}
+
+/**
+ * Reset the named checklist items to `- [ ]`, returning the rewritten file (and which items were
+ * actually changed). Only bullets under `## Checklist` are touched, matched by their trimmed text;
+ * everything else in the file — the header stamp, Goal, Notes, indentation, bullet marker,
+ * trailing newline — is preserved byte-for-byte.
+ *
+ * Why this exists: when the cursor seat runs out of quota mid-run it hands the work to a Claude
+ * worker, and a `[x]` the cursor seat ticked has no verification behind it that the incoming
+ * worker can see. The failure mode to avoid is a takeover that silently believes half-done work
+ * is finished, so an unverified tick is reset and named in the handoff file
+ * (`../drivers/cursor-handoff.ts`) for the incoming worker to re-verify against the diff. Nothing
+ * is deleted — the items themselves survive, only the unverified tick marks are cleared.
+ */
+export function untickItems(text: string, targets: readonly string[]): { text: string; changed: string[] } {
+  const wanted = new Set(targets.map((t) => t.trim()).filter(Boolean));
+  if (wanted.size === 0) return { text, changed: [] };
+
+  const lines = text.split(/\r?\n/);
+  let headingIndex = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (CHECKLIST_HEADING_RE.test((lines[i] ?? "").trim())) headingIndex = i;
+  }
+  if (headingIndex === -1) return { text, changed: [] };
+
+  const changed: string[] = [];
+  for (let i = headingIndex + 1; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    if (SECTION_HEADING_RE.test(line.trim())) break;
+    const match = CHECKLIST_ITEM_RE.exec(line);
+    if (!match) continue;
+    const itemText = match[2]!.trim();
+    if (match[1]!.toLowerCase() !== "x" || !wanted.has(itemText)) continue;
+    // Replace only the box character, so indentation and the bullet marker survive untouched.
+    lines[i] = line.replace(/\[[xX]\]/, "[ ]");
+    changed.push(itemText);
+  }
+  return { text: lines.join("\n"), changed };
+}

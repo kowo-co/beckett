@@ -28,17 +28,27 @@
 // =======================================================================================
 
 /**
- * A coding-agent CLI Beckett drives as a subprocess (Spec 00 glossary). Open-ended toward a
- * registry-validated string: `claude`/`codex`/`pi` are the in-tree core (kept as literals for
- * autocomplete), but the authoritative set of usable harnesses is the driver REGISTRY
+ * A coding agent Beckett drives as a subprocess (Spec 00 glossary). Open-ended toward a
+ * registry-validated string: `claude`/`codex`/`pi`/`cursor` are the in-tree set (kept as literals
+ * for autocomplete), but the authoritative set of usable harnesses is the driver REGISTRY
  * (`src/drivers/index.ts` — `isRegisteredHarness` / `availableHarnesses`), not this union. That
  * dependency inversion lets an out-of-tree driver register itself without editing this contract.
+ *
+ * "CLI" is no longer quite right: `cursor` ships as a library, so its driver spawns a shim
+ * (`src/drivers/cursor-runner.ts`) rather than a vendor binary. It is still one subprocess per
+ * worker, which is the part every other layer depends on.
  */
-export type Harness = "claude" | "codex" | "pi" | (string & {});
+export type Harness = "claude" | "codex" | "pi" | "cursor" | (string & {});
 
 
 /** Which concrete driver runs a harness process (Spec 02 §2). */
-export type DriverKind = "claude-cli-stream" | "codex-exec-oneshot" | "pi-cli-stream";
+export type DriverKind =
+  | "claude-cli-stream"
+  | "codex-exec-oneshot"
+  | "pi-cli-stream"
+  // The odd one out: Cursor's local mode is a library, not a CLI, so the driver spawns a shim that
+  // owns the SDK and re-emits its stream as NDJSON (`./drivers/cursor-runner.ts`).
+  | "cursor-sdk-local";
 
 /**
  * Reasoning depth; mapped per-harness at spawn (Spec 02 §9.1). `ultracode` (claude 2.1.203+,
@@ -122,8 +132,17 @@ export interface NudgeReceipt {
 // SECTION 3 — WorkerEvent: normalized telemetry stream (Spec 02 §7)
 // =======================================================================================
 
-/** Why a harness failed (issue #17) — drives the dispatcher's per-class recovery policy. */
-export type ErrorClass = "auth" | "rate_limit" | "crash" | "timeout" | "spawn";
+/**
+ * Why a harness failed (issue #17) — drives the dispatcher's per-class recovery policy.
+ *
+ * `quota` is deliberately DISTINCT from `rate_limit`. A rate limit means "you are going too fast,
+ * back off"; a quota means "this plan's allowance is spent for the period, and no amount of
+ * waiting inside this run will change that." The cursor seat runs on a flat $20/month Pro plan
+ * where hitting the second is routine, so `../run/supervisor.ts` routes it to a SEAT CHANGE with a
+ * handoff rather than to the back-off-and-park path every other external death takes. Only a
+ * driver that can actually tell the two apart should ever emit it.
+ */
+export type ErrorClass = "auth" | "rate_limit" | "quota" | "crash" | "timeout" | "spawn";
 
 /**
  * Both raw JSONL formats (claude stream-json / codex --json) normalize into this one
@@ -955,6 +974,24 @@ export interface Config {
       default_model: string;
       /** Reasoning depth (pi `--thinking`). */
       thinking: Effort;
+    };
+    /**
+     * cursor — the IMPLEMENTER-ONLY seat (`./drivers/cursor.ts`), and the zero-cast implement seat
+     * when enabled. Optional on the type so a config parsed by an older schema (and every test
+     * config literal in the tree) still satisfies `Config` — `./run/cast.ts#implementDefaultFor`
+     * reads it defensively and answers with the unchanged sonnet-first default when it is absent.
+     */
+    cursor?: {
+      /** Off ⇒ the pre-cursor sonnet-first implement default, byte for byte. Default on. */
+      enabled: boolean;
+      /** The interpreter for the shim (`./drivers/cursor-runner.ts`) — `bun`. */
+      bin: string;
+      /** `cursor-auto`, or a raw Cursor model id that has a `config/model-rates.json` row. */
+      default_model: string;
+      /** Sizes the SOFT supervision envelope only; Cursor's Auto exposes no effort parameter. */
+      default_effort: Effort;
+      /** Absolute path override for the shim; "" = the in-tree one. */
+      runner: string;
     };
   };
   paths: {

@@ -41,7 +41,9 @@ import { dirname, join } from "node:path";
 import type { Config, DoneBlocker, Harness, Logger, WorkerEvent } from "../types.ts";
 import { pauseFilePath, readPause } from "../pause.ts";
 import type { HarnessSpec } from "./cast.ts";
-import { applySonnetFirst, DEFAULT_IMPLEMENT_MODEL, isOpusModel } from "./cast.ts";
+import { applySonnetFirst, DEFAULT_IMPLEMENT_MODEL, implementDefaultFor, isOpusModel } from "./cast.ts";
+import { CURSOR_HANDOFF_REL, handoffResumeNote } from "../drivers/cursor-handoff.ts";
+import { activeCooldown, recordCooldown } from "../drivers/cooldown.ts";
 import type { WorkItem } from "./work-item.ts";
 import type { ProgressSink } from "../progress/journal.ts";
 import { formatEvent } from "../progress/journal.ts";
@@ -357,6 +359,16 @@ const MAX_SWEEP_PER_PASS = 10;
  */
 export const PUBLISH_STALL_MS = 20 * 60_000;
 
+/**
+ * Seat changes one run may make on a quota wall before the supervisor parks it instead.
+ *
+ * One. There are exactly two implement seats and the fallback is one-directional (cursor → claude,
+ * never back), so a second seat change can only mean something is looping — and a run bouncing
+ * between harnesses burns two allowances to make no progress, which is worse than parking with the
+ * handoff intact and letting a human look. See {@link RunSupervisor.handleQuotaFallback}.
+ */
+export const MAX_QUOTA_FALLBACKS = 1;
+
 // =======================================================================================
 // RunSupervisor
 // =======================================================================================
@@ -399,6 +411,15 @@ export class RunSupervisor {
   private readonly owedResumes = new Map<string, OwedResume>();
   private readonly resumables = new Map<string, { stage: RunStage; sessionId: string; harness: string }>();
   private readonly restartInterrupted = new Map<string, RunStage>();
+  /**
+   * Seat changes this run has already paid for on a quota wall — the ping-pong guard's fast half
+   * ({@link MAX_QUOTA_FALLBACKS}). The DURABLE half is the cast patch {@link handleQuotaFallback}
+   * writes: once `run.cast.implement` names claude, `castFor` honours it verbatim on every later
+   * spawn, including after a daemon restart this in-memory map would not survive. This map exists
+   * for the one window that patch cannot cover — a second quota death inside the same daemon life
+   * before the patch landed.
+   */
+  private readonly quotaFallbacks = new Map<string, number>();
   private readonly finishing = new Set<string>();
   private readonly spendMetaByWorker = new Map<string, SpendStageMeta>();
   private readonly unstaffedSince = new Map<string, number>();
@@ -846,7 +867,11 @@ export class RunSupervisor {
     // stated reason downgrades to sonnet rather than deploying silently. Review is untouched (it
     // keeps its own default-cast path below, unmodified) — the doctrine only gates the builder.
     if (stage === "implement") {
-      const { spec, downgradeNote } = applySonnetFirst(explicit);
+      // Cursor-first when `[harness.cursor] enabled` (the shipped default), sonnet-first otherwise
+      // and on any install whose config predates the block. This ONLY changes the no-explicit-cast
+      // branch: an explicit cast is still honoured verbatim, so judgement-heavy and
+      // correctness-critical work — which always arrives with one — never sees the cursor seat.
+      const { spec, downgradeNote } = applySonnetFirst(explicit, implementDefaultFor(this.config));
       if (downgradeNote) {
         this.trace(run, "implement:cast", "info", downgradeNote);
         // The run record is the audit surface (issue #249): a downgrade that leaves `run.cast`
@@ -2807,6 +2832,160 @@ export class RunSupervisor {
   // ── worker death + owed stages (#247 / #244) ──────────────────────────────────────────
 
   /**
+   * A seat ran out of quota mid-run: hand the work to Claude on the SAME branch and worktree,
+   * losing nothing. Returns true when this path owned the outcome (re-staffed or parked), false to
+   * let {@link handleWorkerDeath} continue down its ordinary road.
+   *
+   * The $20/month Pro tier makes this routine, not an incident, so it reads as ordinary control
+   * flow. What it guarantees, in order:
+   *
+   *  - **Nothing is lost.** The shim already committed whatever was on disk and wrote
+   *    `.beckett/cursor-handoff.md` before it reported; `handleWorkerDeath` committed WIP again on
+   *    this side as the backstop. The branch, the worktree, the commits and the checklist all stay
+   *    exactly where they were — the incoming worker resumes, it does not restart.
+   *  - **The exhausted seat is benched for everyone.** A cooldown row (`../drivers/cooldown.ts`)
+   *    makes `preflightFor` report it unusable, so the NEXT run routes past it instead of
+   *    rediscovering the same wall. It expires and self-heals when the allowance resets.
+   *  - **No ping-pong.** `run.cast.implement` is patched to the Claude seat, which `castFor`
+   *    honours verbatim forever after — a one-way door, durable across restarts, so the run cannot
+   *    bounce back. {@link MAX_QUOTA_FALLBACKS} guards the window before that patch lands.
+   *  - **Never a silent burn.** If Claude is ALSO constrained — a live cooldown, or a failing
+   *    preflight — the run PARKS with the handoff intact rather than spending the remaining
+   *    allowance on a seat that is nearly out too. A human (or a quota reset) unparks it and the
+   *    full context is still on disk.
+   *  - **The channel hears about it.** One honest line on the run card, never silence.
+   */
+  private async handleQuotaFallback(run: Run, stage: RunStage, handle: WorkerHandle): Promise<boolean> {
+    // Only the implement seat has a fallback. A reviewer is always a claude seat by construction
+    // (`../drivers/index.ts` `reviewCapable`), so a quota class arriving here would be a bug in a
+    // driver, not a routing decision — let the ordinary death path report it honestly.
+    if (stage !== "implement") return false;
+    // A drain or a human cancel already owns this worker's outcome; re-staffing into either would
+    // be the supervisor arguing with a decision that has already been made.
+    if (this.shuttingDown || this.cancelling.has(run.id) || run.state === "cancelled") return false;
+
+    const spent = handle.harness;
+    const target: HarnessSpec = { harness: "claude", model: DEFAULT_IMPLEMENT_MODEL };
+    const reason =
+      handle.result?.errorMessage?.trim() ||
+      handle.result?.summary?.trim() ||
+      `the ${spent} seat reported its quota was exhausted`;
+
+    // The ping-pong guard, checked BEFORE anything else this method would do. A run that has
+    // already spent its one seat change and hit a second wall is looping, and two exhausted
+    // allowances with no progress is strictly worse than parking with the handoff intact.
+    const priorFallbacks = this.quotaFallbacks.get(run.id) ?? 0;
+    if (priorFallbacks >= MAX_QUOTA_FALLBACKS) {
+      this.logger.warn("refusing a repeat quota fallback — parking instead", {
+        run: run.id,
+        priorFallbacks,
+        harness: spent,
+      });
+      this.trace(
+        run,
+        "implement:quota-fallback",
+        "held",
+        `${spent} quota hit again after a seat change — parked, not bounced`,
+        reason,
+      );
+      await this.hold(
+        run,
+        this.transientBlocker(
+          run,
+          `${reason}\n\nThis run has already changed seats once on a quota wall ` +
+            `(${MAX_QUOTA_FALLBACKS}/${MAX_QUOTA_FALLBACKS}); it is parked rather than bounced ` +
+            `between harnesses again. Its work is committed on this branch and the handoff is at ` +
+            `${CURSOR_HANDOFF_REL}.`,
+        ),
+      );
+      return true;
+    }
+
+    // Nothing healthier to hand to: claude IS the fallback. Not reachable today (only the cursor
+    // driver emits this class), and deliberately NOT counted as a seat change — re-staffing claude
+    // onto claude's own exhausted quota is exactly the burn this method exists to prevent, so the
+    // ordinary death path parks it with an honest cause instead.
+    if (spent === target.harness) return false;
+
+    // Bench the spent seat process-wide, so the NEXT run routes past it instead of rediscovering
+    // the same wall. Wrapped because a ledger write must never be the reason a run fails to change
+    // seats — the fallback matters more than the memo about it.
+    try {
+      recordCooldown(spent as Harness, this.config, { reason: "rate_limit" });
+    } catch (err) {
+      this.logger.warn("could not record the quota cooldown (continuing with the fallback)", {
+        run: run.id,
+        harness: spent,
+        error: (err as Error).message,
+      });
+    }
+
+    this.quotaFallbacks.set(run.id, priorFallbacks + 1);
+
+    // Both seats constrained → park, never burn. Cheap file read first (always available, and it
+    // is what `preflightFor` itself consults), then the wired probe when there is one.
+    let claudeProblem: string | null = null;
+    let cooled: { until: number } | null = null;
+    try {
+      cooled = activeCooldown(target.harness as Harness, this.config);
+    } catch {
+      /* an unreadable cooldown ledger means "nothing known", never "park this run" */
+    }
+    if (cooled) {
+      claudeProblem = `claude is on a rate-limit cooldown until ${new Date(cooled.until).toISOString()}`;
+    } else if (this.preflight) {
+      try {
+        const verdict = await this.preflight(target.harness as Harness);
+        if (!verdict.ok) claudeProblem = verdict.problems.join("; ");
+      } catch {
+        /* a probe fault must never be the reason a run parks instead of continuing */
+      }
+    }
+    if (claudeProblem) {
+      this.trace(
+        run,
+        "implement:quota-fallback",
+        "held",
+        `${spent} quota hit and claude is also constrained — parked, not burned`,
+        claudeProblem,
+      );
+      await this.hold(
+        run,
+        this.transientBlocker(
+          run,
+          `${reason}\n\nClaude is under pressure too (${claudeProblem}), so this run is parked ` +
+            `rather than spending the remaining allowance on it. Nothing is lost: the work is ` +
+            `committed on this branch and the full handoff is at ${CURSOR_HANDOFF_REL}. Resume it ` +
+            `once either seat has quota again.`,
+        ),
+      );
+      return true;
+    }
+
+    // The one-way door. Patching the persisted cast is what makes this durable: `castFor` honours
+    // an explicit cast verbatim, so no later spawn — in this daemon or the next one — can route
+    // this run back onto the seat that just ran out.
+    await this.patchRun(run.id, { cast: { ...run.cast, implement: target } });
+    this.bufferSteer(run.id, handoffResumeNote(reason));
+    this.trace(
+      run,
+      "implement:quota-fallback",
+      "info",
+      `${spent} quota hit — resumed on ${target.model}`,
+      reason,
+    );
+    this.logger.info("quota fallback — re-staffing implement on claude", {
+      run: run.id,
+      from: spent,
+      to: target.model,
+    });
+    await this.patchRun(run.id, { state: "implementing", error: null });
+    const next = this.store.get(run.id);
+    if (next) this.spawnGuarded(next, "implement");
+    return true;
+  }
+
+  /**
    * ONE transition owner for a dead worker (B7) — `finishImplement` and `finishReview` both call
    * this instead of each hand-rolling park logic. `classifyDeath` (`./death.ts`) splits it:
    *
@@ -2824,6 +3003,12 @@ export class RunSupervisor {
    */
   private async handleWorkerDeath(run: Run, stage: RunStage, handle: WorkerHandle): Promise<void> {
     if (stage === "implement") await this.commitWip(run, handle);
+
+    // Quota exhaustion is a SEAT CHANGE, not a death. Checked before `classifyDeath` because that
+    // function's whole vocabulary — self-inflicted vs external — has no word for "this harness's
+    // month is spent but another one is right there," and routing it through `external` would park
+    // a run that has a perfectly good seat available.
+    if (handle.result?.errorClass === "quota" && (await this.handleQuotaFallback(run, stage, handle))) return;
 
     const cancelled = this.cancelling.has(run.id) || run.state === "cancelled";
     const kind = classifyDeath({

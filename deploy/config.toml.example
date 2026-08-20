@@ -53,6 +53,13 @@ default_provider = "openai-codex"
 default_model = "gpt-5.6-terra"
 thinking = "high"
 
+[harness.cursor]
+enabled = true
+bin = "bun"
+default_model = "cursor-auto"
+default_effort = "high"
+runner = ""
+
 [paths]
 home = "/home/beckett"
 beckett_dir = "/home/beckett/.beckett"

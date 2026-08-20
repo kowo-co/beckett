@@ -110,16 +110,19 @@ the login fix and the generator") and leave the plumbing out of it.
 
 ### `--cast` — only when the default seat is wrong
 
-**You do not pick the implement seat. Sonnet 5 implements.** Cast a heavier implement seat only
-when a person named it in this conversation — and then pass `--cast-quote "<their exact words>"`
-alongside `--cast`, or the policy downgrades it back to Sonnet and says so on the run. Casting
-`review` is still yours to choose. `--ultracode` is unchanged.
+**You do not pick the implement seat. The cursor seat implements, and Sonnet 5 catches it when
+that seat runs out.** Cast a heavier implement seat only when a person named it in this
+conversation — and then pass `--cast-quote "<their exact words>"` alongside `--cast`, or the
+policy downgrades it back to Sonnet and says so on the run. Casting `review` is still yours to
+choose. `--ultracode` is unchanged.
 
 Per-stage: who *implements*, who *reviews*, as JSON on one argument. Shape
-`{ "<stage>": { "harness": "claude", "model": "…", "effort": "…" } }` — a run only casts
-`implement` and `review`; `harness` is always `claude`. Cast nothing and implement runs on
-Sonnet 5 at `high`, with the reviewer defaulting to Sonnet at an effort scaled off it. **Every run
-gets that fresh reviewer** — there is no one-pass mode to select any more.
+`{ "<stage>": { "harness": "…", "model": "…", "effort": "…" } }` — a run only casts `implement`
+and `review`. `harness` is `claude` everywhere except the cursor implement seat below; **`review`
+is always a claude seat** and a cast putting `cursor` there is refused at deploy time with an
+error. Cast nothing and implement runs on cursor, with the reviewer defaulting to Sonnet at a
+scaled effort. **Every run gets that fresh reviewer** — there is no one-pass mode to select any
+more.
 
 #### The roster — every model, and when to cast it
 
@@ -164,8 +167,23 @@ only — reaching for Sonnet at `xhigh` means the work outgrew the seat, so cast
 **`claude-haiku-4-5` (Haiku 4.5) — the reflex, not a worker.** Never cast it for implement or
 review: it hallucinates under real load. Its one seat is the fixed ambient-triage classifier.
 
+**`cursor` (a harness, not a model) — the default implement seat, and the only non-claude one.**
+Cast as `{"implement":{"harness":"cursor","model":"cursor-auto"}}`, which is also what casting
+nothing gives you. It runs Cursor's agent loop against the run's own worktree on a flat $20/month
+Pro plan, so its marginal cost is zero until the month's allowance is spent. **Implement only** —
+`review` refuses it, loudly, at deploy time.
+**When the allowance runs out** the run keeps going: whatever is on disk is committed, a handoff
+briefing is written beside `spec.md`, and Sonnet 5 picks the work up on the same branch and
+worktree. The channel gets one line saying so. Nothing to do on your side.
+**Cast around it** exactly as you always would — naming any claude seat for `implement` bypasses
+cursor entirely, so judgment-heavy and correctness-critical work never lands there.
+**Model selection is Cursor's Auto.** This account does not offer the Auto Balance router variant
+(verified against the live API, 2026-08-19), so it runs plain Auto; Auto Cost is never
+substituted. See `docs/cursor-seat-findings.md`.
+
 **No OpenAI models. Ever.** The pi/codex lane is retired. Read any old cast naming them as claude:
-Sonnet 5 `high` for standard grind, Opus 4.8 `high` for looser scopes.
+Sonnet 5 `high` for standard grind, Opus 4.8 `high` for looser scopes. (`cursor` is a harness, not
+an OpenAI model, and is unaffected by this.)
 
 **Fixed seats** (not castable): you run on Opus 5 at `medium`; ambient triage on Haiku 4.5.
 
@@ -175,9 +193,9 @@ Sonnet 5 `high` for standard grind, Opus 4.8 `high` for looser scopes.
 
 | Weight of the work | cast | ~all-in |
 |---|---|---:|
-| **1 · Trivial / mechanical** — copy tweak, version bump, config edit, rename, one obvious diff | nothing (Sonnet 5) | ~$2–3 |
-| **2 · Standard spec'd work** *(the common case)* — APIs, parsers, data layers, business logic, tests, migrations | nothing (Sonnet 5) | ~$5–7 |
-| **3 · Judgment-heavy** — design calls, wide refactor, taste, hard debugging, **anything visual** | nothing (Sonnet 5) — a person naming a heavier seat gets it quoted via `--cast-quote` | ~$8–16 |
+| **1 · Trivial / mechanical** — copy tweak, version bump, config edit, rename, one obvious diff | nothing (cursor; Sonnet 5 on quota) | ~$0–3 |
+| **2 · Standard spec'd work** *(the common case)* — APIs, parsers, data layers, business logic, tests, migrations | nothing (cursor; Sonnet 5 on quota) | ~$0–7 |
+| **3 · Judgment-heavy** — design calls, wide refactor, taste, hard debugging, **anything visual** | `sonnet-5` @ `high` (cast it — this class does not belong on the cursor seat) — a person naming a heavier seat gets it quoted via `--cast-quote` | ~$8–16 |
 | **4 · Correctness-critical** — auth, money, migrations, concurrency, Beckett's own source | `fable-5` @ `high` — **confirm with the human first** — plus `opus-5` on `review` | ~$18–21 |
 | **Multifaceted, any weight** — several subsystems, a migration plus its tests plus its docs | `--ultracode` (no `--cast`) | varies, high |
 
@@ -209,6 +227,8 @@ cast at all.
 - **`claude-opus-4-8`** — **`high`, always.**
 - **`claude-opus-5`** — `high` for most work, `xhigh` for the genuinely harder ones.
 - **`claude-fable-5`** — `high` standard; `xhigh` only for the most crucial work, always confirmed.
+- **`cursor`** — Cursor's Auto exposes no reasoning knob, so `effort` there only sizes Beckett's
+  own supervision envelope (turn cap, wall clock). Leave it unset.
 
 `--ultracode` sets its own tier on implement, but it never overrides an explicit cast: name a
 model for `implement` yourself and yours wins.

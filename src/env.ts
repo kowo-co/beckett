@@ -11,8 +11,17 @@
  * endpoint. Harmless, needed vars that share a prefix go on the explicit allowlist.
  */
 
-/** Env-var prefixes a harness child must never inherit (API auth / endpoint overrides). */
-const FORBIDDEN_ENV_PREFIXES = ["ANTHROPIC_", "OPENAI_", "CLAUDE_CODE_"] as const;
+/**
+ * Env-var prefixes a harness child must never inherit (API auth / endpoint overrides).
+ *
+ * `CURSOR_` is here for a different reason than the others. It is not about forcing subscription
+ * auth — the cursor seat legitimately runs on an API key — it is about BLAST RADIUS: a claude,
+ * codex, or pi worker has no business holding a credential for a harness it does not run, and
+ * `childEnv` is a denylist (everything passes unless blocked), so without this line every worker
+ * on the box would inherit it. `CursorDriver.buildChildEnv` re-injects `CURSOR_API_KEY` for the
+ * one process that actually needs it (`./drivers/cursor.ts`).
+ */
+const FORBIDDEN_ENV_PREFIXES = ["ANTHROPIC_", "OPENAI_", "CLAUDE_CODE_", "CURSOR_"] as const;
 
 /** Prefix-matched vars that are explicitly safe to pass through (none known today). */
 const ALLOWED_ENV_KEYS = new Set<string>([]);

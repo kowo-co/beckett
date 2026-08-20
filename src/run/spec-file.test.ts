@@ -7,6 +7,8 @@ import {
   renderSpecScaffold,
   specProgressLine,
   specRunId,
+  tickedItemTexts,
+  untickItems,
 } from "./spec-file.ts";
 import type { Run } from "./types.ts";
 
@@ -128,5 +130,66 @@ describe("specProgressLine", () => {
   test("formats done/total", () => {
     expect(specProgressLine({ done: 3, total: 7 })).toBe("3/7 checked");
     expect(specProgressLine({ done: 0, total: 0 })).toBe("0/0 checked");
+  });
+});
+
+// =======================================================================================
+// Checklist mutation — the cursor seat's handoff (`../drivers/cursor-runner.ts`)
+// =======================================================================================
+
+describe("tickedItemTexts", () => {
+  test("returns only the CHECKED items under ## Checklist, in order", () => {
+    const text = "## Checklist\n- [x] one\n- [ ] two\n- [X] three\n\n## Notes\n- [x] not a checklist item\n";
+    expect(tickedItemTexts(text)).toEqual(["one", "three"]);
+  });
+
+  test("a spec with no checklist yields nothing rather than throwing", () => {
+    expect(tickedItemTexts("# just a title\n")).toEqual([]);
+    expect(tickedItemTexts("")).toEqual([]);
+  });
+});
+
+describe("untickItems", () => {
+  test("resets only the named checked items and reports what it changed", () => {
+    const text = "## Checklist\n- [x] one\n- [x] two\n- [ ] three\n";
+    const result = untickItems(text, ["two"]);
+    expect(result.changed).toEqual(["two"]);
+    expect(result.text).toBe("## Checklist\n- [x] one\n- [ ] two\n- [ ] three\n");
+  });
+
+  test("the ITEMS survive — only the unverified tick marks are cleared", () => {
+    // "without losing the checklist state" means the work items stay; what is dropped is a claim
+    // of completion nobody can verify. Both halves matter, so both are asserted.
+    const text = "## Checklist\n- [x] wrote the driver\n- [x] wired the registry\n";
+    const result = untickItems(text, ["wrote the driver", "wired the registry"]);
+    expect(parseSpecChecklist(result.text).items.map((i) => i.text)).toEqual([
+      "wrote the driver",
+      "wired the registry",
+    ]);
+    expect(parseSpecChecklist(result.text).done).toBe(0);
+    expect(parseSpecChecklist(result.text).total).toBe(2);
+  });
+
+  test("indentation, bullet marker and the rest of the file survive byte-for-byte", () => {
+    const text =
+      "# Title\n> run: run-1 \u00b7 branch: b\n\n## Goal\ndo a thing\n\n## Checklist\n  * [x] nested item\n\n## Notes\nkeep me\n";
+    const result = untickItems(text, ["nested item"]);
+    expect(result.text).toContain("  * [ ] nested item");
+    expect(result.text).toContain("> run: run-1");
+    expect(result.text).toContain("## Notes\nkeep me\n");
+    expect(specRunId(result.text)).toBe("run-1");
+  });
+
+  test("an item outside ## Checklist is never touched", () => {
+    const text = "## Checklist\n- [ ] real\n\n## Notes\n- [x] decoy\n";
+    expect(untickItems(text, ["decoy"]).changed).toEqual([]);
+    expect(untickItems(text, ["decoy"]).text).toBe(text);
+  });
+
+  test("an empty target list, an unknown item, and an already-unchecked item are all no-ops", () => {
+    const text = "## Checklist\n- [x] one\n- [ ] two\n";
+    expect(untickItems(text, []).text).toBe(text);
+    expect(untickItems(text, ["nope"]).text).toBe(text);
+    expect(untickItems(text, ["two"]).changed).toEqual([]);
   });
 });

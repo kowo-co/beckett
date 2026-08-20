@@ -19,19 +19,30 @@
 
 import { z } from "zod";
 import modelRates from "../../config/model-rates.json";
-import { availableHarnesses, isRegisteredHarness } from "../drivers/index.ts";
+import {
+  availableHarnesses,
+  isRegisteredHarness,
+  isReviewCapable,
+  reviewCapableHarnesses,
+} from "../drivers/index.ts";
 
 // =======================================================================================
 // Casting — which harness/model runs each stage
 // =======================================================================================
 
 /**
- * A coding-agent CLI Beckett drives as a worker (matches root `Harness`). Open toward a
- * registry-validated string: the in-tree core `claude`/`codex`/`pi` stay literals for autocomplete,
- * but which harness names are actually castable is decided at runtime by the driver registry
- * (`isRegisteredHarness`), not by this type — see {@link validateCasting}.
+ * A coding agent Beckett drives as a worker (matches root `Harness`). Open toward a
+ * registry-validated string: the in-tree `claude`/`codex`/`pi`/`cursor` stay literals for
+ * autocomplete, but which harness names are actually castable is decided at runtime by the
+ * driver registry (`isRegisteredHarness`), not by this type — see {@link validateCasting}.
+ *
+ * `cursor` is the odd one: an IMPLEMENTER-ONLY seat. It is castable on `implement` like any
+ * other harness and refused on `review` — see {@link reviewOnlyErrors}.
  */
-export type HarnessName = "claude" | "codex" | "pi" | (string & {});
+export type HarnessName = "claude" | "codex" | "pi" | "cursor" | (string & {});
+
+/** The stage name whose staffing is capability-gated (see {@link reviewOnlyErrors}). */
+const REVIEW_STAGE = "review";
 
 /** One stage's harness selection: which CLI, optionally which model + reasoning effort. */
 export interface HarnessSpec {
@@ -74,8 +85,9 @@ export interface Casting {
 
 /**
  * `harness` is validated against the driver REGISTRY (`src/drivers/index.ts`), not a hardcoded
- * `claude|codex|pi` enum — so registering a new driver makes it castable with no edit here. With
- * only the three in-tree drivers registered this accepts exactly `claude|codex|pi`, as before.
+ * enum — so registering a new driver makes it castable with no edit here. Today the registry
+ * holds `claude|codex|pi|cursor`. SHAPE only: which STAGE a harness may staff is a separate,
+ * capability-driven rule ({@link reviewOnlyErrors}), because it is not a property of the JSON.
  */
 const HarnessSpecSchema: z.ZodType<HarnessSpec> = z.object({
   harness: z.string().refine(isRegisteredHarness, {
@@ -148,6 +160,7 @@ export function validateCasting(casting: unknown): string[] {
   const errors: string[] = [];
   for (const [stage, spec] of Object.entries(parsed.data)) {
     if (!spec) continue;
+    errors.push(...reviewOnlyErrors(stage, spec));
     const model = spec.model?.trim().toLowerCase();
     if (model && BLOCKED_MODELS.has(model)) {
       errors.push(
@@ -165,12 +178,67 @@ export function validateCasting(casting: unknown): string[] {
   return errors;
 }
 
+/**
+ * The implementer-only guard: reject a `review` cast naming a harness the driver registry says
+ * cannot review (`../drivers/index.ts#isReviewCapable`).
+ *
+ * Registry-driven on purpose. The cursor seat implements and never judges — but hardcoding
+ * `harness === "cursor"` here would mean the SECOND implementer-only seat needs a second check
+ * someone will forget to add. One capability flag, one check, one source of truth.
+ *
+ * This fires at DEPLOY time (`../cli/task-deploy.ts` and the preset loader both run
+ * {@link validateCasting} and refuse on any error), so a bad cast produces a loud CLI error before
+ * a run, a worktree, or a worker ever exists. `../dispatch/stages.ts#reviewStage.resolveCast`
+ * carries a second, quieter net for a cast that somehow reached persistence anyway.
+ */
+export function reviewOnlyErrors(stage: string, spec: HarnessSpec): string[] {
+  if (stage !== REVIEW_STAGE || isReviewCapable(spec.harness)) return [];
+  return [
+    `${stage}: harness "${spec.harness}" is an implementer-only seat — cast it under implement, ` +
+      `not review (review-capable harnesses: ${reviewCapableHarnesses().sort().join(", ")}).`,
+  ];
+}
+
 // =======================================================================================
 // Sonnet-first (issue #249): the enforced default IMPLEMENT cast
 // =======================================================================================
 
 /** The enforced default implement model — CLAUDE.md doctrine, made structural instead of aspirational. */
 export const DEFAULT_IMPLEMENT_MODEL = "claude-sonnet-5";
+
+/** The Beckett-side model label for the cursor seat's Auto selection (`../drivers/cursor-model.ts`). */
+const CURSOR_IMPLEMENT_MODEL = "cursor-auto";
+
+/**
+ * The cursor-first implement cast. Used ONLY when `[harness.cursor] enabled = true` — an install
+ * without the block (or with it off) keeps the sonnet-first default exactly as before.
+ *
+ * Cursor first, Sonnet 5 as the fallback: this is the zero-cast seat for the weight classes Sonnet
+ * already owned, and when its quota runs out mid-run the supervisor hands the work to Sonnet 5 on
+ * the same branch and worktree rather than losing it. Judgement-heavy and correctness-critical
+ * work never sees this seat — that work arrives with an EXPLICIT cast naming a heavier claude
+ * seat, and an explicit cast is honoured verbatim.
+ */
+export const CURSOR_IMPLEMENT_SPEC: HarnessSpec = {
+  harness: "cursor",
+  model: CURSOR_IMPLEMENT_MODEL,
+};
+
+/**
+ * The implement seat a run with no explicit cast gets, given the install's config.
+ *
+ * The `[harness.cursor]` block is read DEFENSIVELY (`?.`) rather than through the typed config,
+ * because an install whose `config.toml` predates the cursor seat has no block at all — and the
+ * honest answer for that install is the unchanged sonnet-first default, not a crash and not a
+ * cursor cast it never opted into.
+ */
+export function implementDefaultFor(config: {
+  harness?: { cursor?: { enabled?: boolean } };
+}): HarnessSpec {
+  return config.harness?.cursor?.enabled
+    ? { ...CURSOR_IMPLEMENT_SPEC }
+    : { harness: "claude", model: DEFAULT_IMPLEMENT_MODEL };
+}
 
 /** True for any opus-tier model id (`claude-opus-5`, the older `claude-opus-4-8`, future SKUs). */
 export function isOpusModel(model: string | undefined): boolean {
@@ -210,8 +278,23 @@ export interface SonnetFirstResult {
  *     `--cast-quote`'d cast (or one whose reason survived because it already had one) reaches this
  *     gate carrying a `reason`, and is the only case kept on opus.
  */
-export function applySonnetFirst(explicit: HarnessSpec | undefined): SonnetFirstResult {
-  if (!explicit) return { spec: { harness: "claude", model: DEFAULT_IMPLEMENT_MODEL } };
+export function applySonnetFirst(
+  explicit: HarnessSpec | undefined,
+  /**
+   * The zero-cast IMPLEMENT seat. Omitted ⇒ `claude` + {@link DEFAULT_IMPLEMENT_MODEL}, byte-for-
+   * byte the historical behaviour, which is what every existing caller and test gets.
+   *
+   * The supervisor passes {@link CURSOR_IMPLEMENT_SPEC} here when `[harness.cursor]` is enabled
+   * (cursor-first: implement on the cursor seat, fall back to Sonnet 5 when its quota runs out).
+   * It ONLY replaces the no-explicit-cast branch — an explicit cast is still honoured verbatim,
+   * and the opus-without-a-reason downgrade below still lands on Sonnet, never on cursor, because
+   * the reason that gate exists (a stated case for a heavier seat) is a claude-tier judgement.
+   */
+  implementDefault?: HarnessSpec,
+): SonnetFirstResult {
+  if (!explicit) {
+    return { spec: implementDefault ?? { harness: "claude", model: DEFAULT_IMPLEMENT_MODEL } };
+  }
   if (explicit.harness === "claude" && !explicit.model) {
     return { spec: { ...explicit, model: DEFAULT_IMPLEMENT_MODEL } };
   }

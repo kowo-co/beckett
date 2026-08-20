@@ -57,6 +57,11 @@ const CLASS_BY_ERROR_CLASS: Record<ErrorClass, BlockerClass> = {
   auth: "credential",
   spawn: "transient",
   rate_limit: "transient",
+  // Reached only when a quota death could NOT be handed to another seat — the supervisor's
+  // fallback path (`./supervisor.ts#handleQuotaFallback`) intercepts this class first and only
+  // falls through to a park when there is no healthy seat left to hand to. Transient because the
+  // allowance resets on its own: the remedy really is "resume this later", not "fix something".
+  quota: "transient",
   crash: "transient",
   // Unreachable in practice — a `timeout` errorClass always carries `timedOut: true`, which
   // `classifyDeath` already routes to `self-inflicted` before this table is ever consulted.

@@ -3825,3 +3825,341 @@ describe("RunSupervisor worktree sweep", () => {
     }
   });
 });
+
+// =======================================================================================
+// The cursor seat: cursor-first routing, and the quota fallback that loses nothing
+// =======================================================================================
+
+/**
+ * A config with `[harness.cursor]` on. The plain `cfg()` deliberately has NO cursor block, which
+ * is exactly how an install predating this seat reads — so every other test in this file keeps
+ * asserting the unchanged sonnet-first behaviour, and only the tests below opt in.
+ */
+function cursorCfg(over: Record<string, unknown> = {}): Config {
+  return cfg({
+    harness: {
+      claude: { enabled: true, default_model: "claude-sonnet-5", default_effort: "high" },
+      codex: { enabled: true },
+      pi: { enabled: true },
+      cursor: { enabled: true, bin: "bun", default_model: "cursor-auto", default_effort: "high", runner: "" },
+    },
+    ...over,
+  });
+}
+
+/** Every spend row in a ledger. The file is newline-padded, so blank lines are dropped. */
+function readSpendRows(path: string): SpendRecord[] {
+  return readFileSync(path, "utf8")
+    .split("\n")
+    .filter((line) => line.trim())
+    .map((line) => JSON.parse(line) as SpendRecord);
+}
+
+/** A worker finish that reports quota exhaustion — what `CursorDriver` emits at the wall. */
+function finishOutOfQuota(handle: any, message: string): void {
+  handle.finish("error", "cursor seat ran out", null, {
+    errorClass: "quota",
+    errorMessage: message,
+  });
+}
+
+describe("cursor-first implement routing", () => {
+  test("with the cursor block on, a run with no cast implements on the cursor seat", async () => {
+    const { supervisor, store } = newSupervisor({ config: cursorCfg() });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    expect(spawnCalls[0]!.harness).toEqual({ harness: "cursor", model: "cursor-auto" });
+  });
+
+  test("with the block absent (an older install), the sonnet-first default is untouched", async () => {
+    const { supervisor, store } = newSupervisor();
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    expect(spawnCalls[0]!.harness).toEqual({ harness: "claude", model: "claude-sonnet-5" });
+  });
+
+  test("an explicit cast still wins — judgement-heavy work never lands on the cursor seat", async () => {
+    const { supervisor, store } = newSupervisor({ config: cursorCfg() });
+    const run = seedRun(
+      store,
+      makeRun({ cast: { implement: { harness: "claude", model: "claude-opus-5", reason: "architecture" } } }),
+    );
+    await supervisor.admit(run.id);
+    await tick();
+    expect(spawnCalls[0]!.harness).toMatchObject({ harness: "claude", model: "claude-opus-5" });
+  });
+
+  test("REVIEW is never cursor, even on a cursor-first install", async () => {
+    const { supervisor, store } = newSupervisor({ config: cursorCfg() });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal(true));
+    await settle();
+    expect(spawnCalls[1]!.stage).toBe("review");
+    expect(spawnCalls[1]!.harness.harness).toBe("claude");
+  });
+
+  test("a persisted cursor REVIEW cast is refused at staffing, not honoured", async () => {
+    // `validateCasting` rejects this at deploy time; this covers a row that reached `runs.json`
+    // anyway (hand-edited, or written by an older build) — it must degrade to the claude
+    // reviewer rather than silently staff an implementer-only seat as the judge.
+    const { supervisor, store } = newSupervisor({ config: cursorCfg() });
+    const run = seedRun(store, makeRun({ cast: { review: { harness: "cursor" } } }));
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("success", "implemented", doneSignal(true));
+    await settle();
+    expect(spawnCalls[1]!.stage).toBe("review");
+    expect(spawnCalls[1]!.harness.harness).toBe("claude");
+  });
+
+  test("a cursor seat that fails preflight substitutes claude with the sonnet-first model", async () => {
+    // The self-disabling property: an install with no CURSOR_API_KEY needs no config change.
+    const { supervisor, store } = newSupervisor({
+      config: cursorCfg(),
+      preflight: async (h) => (h === "cursor" ? { ok: false, problems: ["no CURSOR_API_KEY"] } : { ok: true, problems: [] }),
+    });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    expect(spawnCalls[0]!.harness).toMatchObject({ harness: "claude", model: "claude-sonnet-5" });
+  });
+});
+
+describe("quota fallback — cursor runs out, sonnet picks it up, nothing is lost", () => {
+  test("the implement stage is re-staffed on sonnet 5, on the SAME branch and worktree", async () => {
+    const { supervisor, store } = newSupervisor({ config: cursorCfg() });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    expect(spawnCalls[0]!.harness.harness).toBe("cursor");
+    const firstBranch = spawnCalls[0]!.branch;
+
+    finishOutOfQuota(created[0]!, "You have hit your usage limit for this month");
+    await settle();
+
+    expect(spawnCalls).toHaveLength(2);
+    expect(spawnCalls[1]!.stage).toBe("implement");
+    expect(spawnCalls[1]!.harness).toMatchObject({ harness: "claude", model: "claude-sonnet-5" });
+    // Same branch: the point of a checkpoint commit is that the next seat continues, not restarts.
+    expect(spawnCalls[1]!.branch).toBe(firstBranch);
+    expect(store.get(run.id)!.state).toBe("implementing");
+    // NOT parked, and no stale error left on the record.
+    expect(store.get(run.id)!.blocker).toBeNull();
+    expect(store.get(run.id)!.error).toBeNull();
+  });
+
+  test("whatever the seat left uncommitted is committed before the handover", async () => {
+    const { supervisor, store } = newSupervisor({ config: cursorCfg() });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    commitCalls = [];
+    finishOutOfQuota(created[0]!, "usage limit reached");
+    await settle();
+    // The daemon-side backstop, on top of the shim's own checkpoint commit: even if the shim
+    // could not commit (a git fault, a kill mid-exit), the supervisor commits WIP before the seat
+    // changes, so an edit on disk can never be orphaned by the handover.
+    expect(commitCalls).toHaveLength(1);
+    expect(commitCalls[0]!.message).toContain("WIP");
+  });
+
+  test("the incoming worker is told to read the handoff and NOT to restart", async () => {
+    const { supervisor, store } = newSupervisor({ config: cursorCfg() });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    finishOutOfQuota(created[0]!, "You have hit your usage limit");
+    await settle();
+
+    const steering = (spawnCalls[1]!.steering ?? []).join("\n");
+    expect(steering).toContain(".beckett/cursor-handoff.md");
+    expect(steering).toContain(".beckett/spec.md");
+    expect(steering).toContain("do NOT restart the task");
+    expect(steering).toContain("Re-verify");
+    // The actual wall, quoted verbatim, so a human reading the brief knows what happened.
+    expect(steering).toContain("You have hit your usage limit");
+  });
+
+  test("the cast is pinned to claude — a durable one-way door across restarts", async () => {
+    const { supervisor, store } = newSupervisor({ config: cursorCfg() });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    finishOutOfQuota(created[0]!, "spent");
+    await settle();
+    // Persisted, so a later spawn — including one after a daemon restart, where the in-memory
+    // guard is gone — reads claude off `runs.json` and can never route back to cursor.
+    expect(store.get(run.id)!.cast?.implement).toEqual({ harness: "claude", model: "claude-sonnet-5" });
+  });
+
+  test("the channel gets one honest line naming the seat that ran out and where the work went", async () => {
+    const { supervisor, store, events } = newSupervisor({ config: cursorCfg() });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    finishOutOfQuota(created[0]!, "usage limit reached");
+    await settle();
+
+    const note = events.find((e) => e.stage === "implement:quota-fallback");
+    expect(note).toBeDefined();
+    expect(note!.outcome).toBe("info");
+    expect(note!.message).toBe("cursor quota hit — resumed on claude-sonnet-5");
+    expect(note!.error).toContain("usage limit reached");
+  });
+});
+
+describe("quota fallback guards", () => {
+  test("a run cannot bounce between seats: the second quota wall parks instead of re-staffing", async () => {
+    const { supervisor, store } = newSupervisor({ config: cursorCfg() });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+
+    finishOutOfQuota(created[0]!, "first wall");
+    await settle();
+    expect(spawnCalls).toHaveLength(2);
+
+    // The re-staffed worker reports quota too (it cannot in practice — only the cursor driver
+    // emits this class — but the guard must not depend on that being true forever).
+    finishOutOfQuota(created[1]!, "second wall");
+    await settle();
+
+    expect(spawnCalls).toHaveLength(2); // no third staffing
+    const parked = store.get(run.id)!;
+    expect(parked.state).toBe("parked");
+    expect(parked.blocker?.detail).toContain("already changed seats once");
+    expect(parked.blocker?.detail).toContain(".beckett/cursor-handoff.md");
+  });
+
+  test("both seats constrained → park with the handoff intact, never burn the rest of the allowance", async () => {
+    const { supervisor, store, events } = newSupervisor({
+      config: cursorCfg(),
+      // Cursor is healthy at cast time; claude is NOT healthy when the fallback asks.
+      preflight: async (h) =>
+        h === "claude" ? { ok: false, problems: ["claude is rate limited"] } : { ok: true, problems: [] },
+    });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    expect(spawnCalls[0]!.harness.harness).toBe("cursor");
+
+    finishOutOfQuota(created[0]!, "usage limit reached");
+    await settle();
+
+    expect(spawnCalls).toHaveLength(1); // nothing new was staffed — no allowance was spent
+    const parked = store.get(run.id)!;
+    expect(parked.state).toBe("parked");
+    expect(parked.blocker?.detail).toContain("Claude is under pressure too");
+    expect(parked.blocker?.detail).toContain("claude is rate limited");
+    expect(parked.blocker?.detail).toContain(".beckett/cursor-handoff.md");
+    // Reported in channel, not silently held.
+    const note = events.find((e) => e.stage === "implement:quota-fallback");
+    expect(note!.outcome).toBe("held");
+    expect(note!.message).toContain("claude is also constrained");
+  });
+
+  test("a quota death during a daemon drain is left to the drain path, not re-staffed", async () => {
+    const { supervisor, store } = newSupervisor({ config: cursorCfg() });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    const worker = created[0]!;
+    const stopping = supervisor.stop();
+    finishOutOfQuota(worker, "usage limit reached");
+    await settle();
+    await stopping;
+    expect(spawnCalls).toHaveLength(1);
+  });
+
+  test("an ordinary rate_limit is NOT a seat change — it takes the existing park path", async () => {
+    const { supervisor, store } = newSupervisor({ config: cursorCfg() });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.finish("error", "busy", null, { errorClass: "rate_limit", errorMessage: "429 too many requests" });
+    await settle();
+    expect(spawnCalls).toHaveLength(1);
+    expect(store.get(run.id)!.state).toBe("parked");
+    expect(store.get(run.id)!.cast?.implement?.harness ?? "cursor").toBe("cursor");
+  });
+});
+
+describe("quota fallback telemetry", () => {
+  test("a run that spent time on both seats produces one honest row per seat", async () => {
+    const dir = scratch();
+    const ledger = join(dir, "spend.jsonl");
+    const { supervisor, store } = newSupervisor({ config: cursorCfg(), spendLedgerPath: ledger, publish: true });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+
+    created[0]!.telemetry = () => ({
+      turns: 3,
+      toolCalls: 7,
+      tokens: { input: 20_000, output: 900, cacheRead: 5_000, cacheCreate: 0 },
+      usdEstimate: 0.04,
+    });
+    finishOutOfQuota(created[0]!, "usage limit reached");
+    await settle();
+
+    created[1]!.telemetry = () => ({
+      turns: 2,
+      toolCalls: 4,
+      tokens: { input: 8_000, output: 400, cacheRead: 0, cacheCreate: 0 },
+      usdEstimate: 0.03,
+    });
+    created[1]!.finish("success", "finished what cursor started", doneSignal(true));
+    await settle();
+
+    const rows = readSpendRows(ledger);
+    const implementRows = rows.filter((r) => r.stage === "implement");
+    expect(implementRows).toHaveLength(2);
+
+    // Row 1: the cursor seat, billed for what it actually spent, classed by why it stopped.
+    expect(implementRows[0]).toMatchObject({
+      harness: "cursor",
+      model: "cursor-auto",
+      tokensIn: 25_000,
+      tokensOut: 900,
+      costUsd: 0.04,
+      outcome: "failed",
+      errorClass: "quota",
+    });
+    // Row 2: the claude seat that finished it. Neither row claims the other's work.
+    expect(implementRows[1]).toMatchObject({
+      harness: "claude",
+      model: "claude-sonnet-5",
+      tokensIn: 8_000,
+      tokensOut: 400,
+      costUsd: 0.03,
+      outcome: "done",
+    });
+    // And the run's total is the sum, not one seat's slice.
+    expect(implementRows.reduce((sum, r) => sum + (r.costUsd ?? 0), 0)).toBeCloseTo(0.07, 10);
+  });
+
+  test("a seat that hit the wall before its first token is billed as a launch failure, not a failure", async () => {
+    const dir = scratch();
+    const ledger = join(dir, "spend.jsonl");
+    const { supervisor, store } = newSupervisor({ config: cursorCfg(), spendLedgerPath: ledger });
+    const run = seedRun(store, makeRun());
+    await supervisor.admit(run.id);
+    await tick();
+    created[0]!.telemetry = () => ({
+      turns: 0,
+      toolCalls: 0,
+      tokens: { input: 0, output: 0, cacheRead: 0, cacheCreate: 0 },
+      usdEstimate: 0,
+    });
+    finishOutOfQuota(created[0]!, "usage limit reached before the first token");
+    await settle();
+    const rows = readSpendRows(ledger);
+    expect(rows[0]).toMatchObject({ harness: "cursor", outcome: "launch_failed", errorClass: "quota" });
+    // …and it still handed over rather than parking.
+    expect(spawnCalls[1]!.harness).toMatchObject({ harness: "claude", model: "claude-sonnet-5" });
+  });
+});
