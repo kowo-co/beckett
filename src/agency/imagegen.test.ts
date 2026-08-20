@@ -391,3 +391,165 @@ test("openrouter image generation rejects --ref and --transparent as unsupported
     gen.generate({ prompt: "x", model: "openrouter/some/model", transparent: true }),
   ).rejects.toThrow(/does not support --transparent/);
 });
+
+function recordingLogger() {
+  const warnings: Array<[string, Record<string, unknown> | undefined]> = [];
+  const q = {
+    info() {},
+    warn(msg: string, fields?: Record<string, unknown>) {
+      warnings.push([msg, fields]);
+    },
+    debug() {},
+    error() {},
+    child() {
+      return q;
+    },
+  };
+  return { logger: q as unknown as Logger, warnings };
+}
+
+test("a missing codex binary falls back to fal (which is credentialed) instead of hard-failing", async () => {
+  const dir = tmp();
+  delete process.env.OPENROUTER_API_KEY;
+  delete process.env.OPENROUTER_KEY;
+  process.env.FAL_KEY = "fal-test";
+
+  const calls: string[] = [];
+  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    const u = String(url);
+    calls.push(u);
+    if (u === "https://queue.fal.run/fal-ai/flux-pro/v1.1-ultra") {
+      const body = JSON.parse(String(init?.body));
+      expect(body).toEqual({ prompt: "a red cube on black", aspect_ratio: "2:3" });
+      return Response.json({ images: [{ url: "https://cdn.test/fallback.png" }] });
+    }
+    if (u === "https://cdn.test/fallback.png") return new Response(new Uint8Array([1, 2, 3, 4]), { status: 200 });
+    return new Response("not found", { status: 404 });
+  }) as unknown as typeof fetch;
+
+  const { logger, warnings } = recordingLogger();
+  const gen = new CodexImageGen({
+    imagesDir: join(dir, "images"),
+    logger,
+    codexBin: join(dir, "nonexistent-codex-binary"),
+    codexHome: join(dir, "codex-home"),
+  });
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = fetchImpl;
+  try {
+    const out = join(dir, "fallback.png");
+    const res = await gen.generate({ prompt: "a red cube on black", size: "1024x1536", out });
+    expect(res.provider).toBe("fal");
+    expect(res.model).toBe("fal-ai/flux-pro/v1.1-ultra");
+    expect(statSync(out).size).toBe(4);
+    expect(calls).toContain("https://queue.fal.run/fal-ai/flux-pro/v1.1-ultra");
+    expect(warnings.some(([msg]) => /codex not found/.test(msg))).toBe(true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("with no fallback provider credentialed, a missing codex binary fails loudly", async () => {
+  delete process.env.FAL_KEY;
+  delete process.env.FAL_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
+  delete process.env.OPENROUTER_KEY;
+  const dir = tmp();
+  process.env.BECKETT_DIR = dir; // no .env written, so neither fallback provider finds a key
+  const gen = new CodexImageGen({
+    imagesDir: join(dir, "images"),
+    logger: quiet,
+    codexBin: join(dir, "nonexistent-codex-binary"),
+    codexHome: join(dir, "codex-home"),
+  });
+  await expect(gen.generate({ prompt: "x" })).rejects.toThrow(/codex not found/);
+});
+
+test("fal maps --size to flux-pro/v1.1-ultra's aspect_ratio instead of dropping it", async () => {
+  const dir = tmp();
+  const calls: Array<{ url: string; body?: string }> = [];
+  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    const u = String(url);
+    calls.push({ url: u, body: typeof init?.body === "string" ? init.body : undefined });
+    if (u === "https://queue.fal.run/fal-ai/flux-pro/v1.1-ultra") {
+      return Response.json({ images: [{ url: "https://cdn.test/ultra.png" }] });
+    }
+    if (u === "https://cdn.test/ultra.png") return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+    return new Response("not found", { status: 404 });
+  }) as unknown as typeof fetch;
+
+  const gen = new FalMediaGen({ imagesDir: join(dir, "images"), logger: quiet, apiKey: "fal-test", fetchImpl });
+  const out = join(dir, "ultra-portrait.png");
+  const res = await gen.generate({
+    prompt: "vertical portrait phone wallpaper, tall aspect, a red cube on black",
+    model: "fal-ai/flux-pro/v1.1-ultra",
+    size: "1024x1536",
+    out,
+  });
+  expect(res.path).toBe(out);
+  expect(JSON.parse(calls[0]!.body!)).toEqual({
+    prompt: "vertical portrait phone wallpaper, tall aspect, a red cube on black",
+    aspect_ratio: "2:3",
+  });
+  // never sends the ignored image_size field for this model
+  expect(calls[0]!.body).not.toMatch(/image_size/);
+});
+
+test("fal fails loudly, before any network call, when a size can't be mapped to the model's aspect ratios", async () => {
+  const dir = tmp();
+  let called = false;
+  const fetchImpl = (async () => {
+    called = true;
+    return new Response("should not be reached", { status: 500 });
+  }) as unknown as typeof fetch;
+  const gen = new FalMediaGen({ imagesDir: join(dir, "images"), logger: quiet, apiKey: "fal-test", fetchImpl });
+
+  await expect(
+    gen.generate({ prompt: "x", model: "fal-ai/flux-pro/v1.1-ultra", size: "1000x700" }),
+  ).rejects.toThrow(/takes an aspect_ratio, not raw pixels/);
+  expect(called).toBe(false);
+});
+
+test("fal routes --ref through the default edit model when the requested model has no image input", async () => {
+  const dir = tmp();
+  const refPath = join(dir, "ref.png");
+  writeFileSync(refPath, "REFDATA");
+
+  const calls: Array<{ url: string; method: string; body?: string }> = [];
+  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    const u = String(url);
+    const method = init?.method ?? "GET";
+    calls.push({ url: u, method, body: typeof init?.body === "string" ? init.body : undefined });
+    if (u === "https://rest.alpha.fal.ai/storage/upload/initiate?storage_type=fal-cdn-v3") {
+      return Response.json({ file_url: "https://cdn.test/ref.png", upload_url: "https://upload.test/ref.png" });
+    }
+    if (u === "https://upload.test/ref.png") return new Response(null, { status: 200 });
+    if (u === "https://queue.fal.run/fal-ai/flux-pro/kontext") {
+      const body = JSON.parse(String(init?.body));
+      expect(body.image_url).toBe("https://cdn.test/ref.png");
+      return Response.json({ images: [{ url: "https://cdn.test/edited.png" }] });
+    }
+    if (u === "https://cdn.test/edited.png") return new Response(new Uint8Array([9, 9]), { status: 200 });
+    return new Response("not found", { status: 404 });
+  }) as unknown as typeof fetch;
+
+  const gen = new FalMediaGen({ imagesDir: join(dir, "images"), logger: quiet, apiKey: "fal-test", fetchImpl });
+  const out = join(dir, "edited.png");
+  const res = await gen.generate({ prompt: "make it warmer", model: "fal-ai/flux/dev", refs: [refPath], out });
+  expect(res.model).toBe("fal-ai/flux-pro/kontext");
+  expect(statSync(out).size).toBe(2);
+  expect(calls.some((c) => c.url.includes("upload/initiate") && c.method === "POST")).toBe(true);
+  expect(calls.some((c) => c.url === "https://upload.test/ref.png" && c.method === "PUT")).toBe(true);
+});
+
+test("fal rejects more than one --ref image and a missing --ref file", async () => {
+  const dir = tmp();
+  const gen = new FalMediaGen({ imagesDir: join(dir, "images"), logger: quiet, apiKey: "fal-test" });
+  await expect(
+    gen.generate({ prompt: "x", model: "fal-ai/flux/dev", refs: [join(dir, "a.png"), join(dir, "b.png")] }),
+  ).rejects.toThrow(/supports exactly one reference image/);
+  await expect(
+    gen.generate({ prompt: "x", model: "fal-ai/flux/dev", refs: [join(dir, "missing.png")] }),
+  ).rejects.toThrow(/reference image not found/);
+});

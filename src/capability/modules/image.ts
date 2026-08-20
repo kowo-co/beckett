@@ -83,7 +83,8 @@ export const createImageExtension: ExtensionFactory = ({ paths, logger }): Exten
       id: "image",
       version: "1.0.0",
       summary:
-        "in-process image/video generation (Codex by default; fal-ai/... routes to fal, openrouter/... routes to OpenRouter)",
+        "in-process image/video generation (Codex by default — auto-falls back to fal if codex " +
+        "isn't on PATH; fal-ai/... routes to fal, openrouter/... routes to OpenRouter)",
       actionClass: ActionClass.FREE,
       kind: "extension",
     },

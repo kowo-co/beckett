@@ -9,6 +9,22 @@ You can make images. There is **one** way to do it: the `beckett image` command.
 Codex `image_gen` tool (authed and enabled for you) into a single deterministic call that saves
 a real file to an exact path and hands you back that path.
 
+## What's actually available on this box
+
+Codex is the *documented* default, but check before assuming it works: if the `codex` binary
+isn't on `PATH`, `beckett image` now falls back automatically to **fal** (`FAL_KEY` is what makes
+that fallback possible) and says so on stderr — it doesn't hard-fail on a missing default. OpenRouter
+is a third option but only works if `OPENROUTER_API_KEY`/`OPENROUTER_KEY` is set in `~/.beckett/.env`;
+don't add that key yourself, just be aware `--model openrouter/...` will error cleanly if it's absent.
+
+Per-lane flag support:
+
+| Lane | `--size` | `--ref` | `--transparent` |
+|---|---|---|---|
+| Codex (default, when `codex` is on PATH) | `1024x1024` / `1536x1024` / `1024x1536` / `auto` | yes (edit mode) | yes |
+| fal (`--model fal-ai/...`, or the auto-fallback) | any `WIDTHxHEIGHT`; mapped to the model's own dialect (`image_size` pixels, or `aspect_ratio` like `9:16` for models such as `fal-ai/flux-pro/v1.1-ultra`/`kontext`) — a size that can't be expressed for the chosen model is a loud error, never a silent substitution | yes — uploads the file to fal's storage and routes to a model that accepts it (`fal-ai/flux-pro/kontext` by default if the one you picked doesn't take an image input) | no |
+| OpenRouter (`--model openrouter/...`) | `1024x1024` / `1536x1024` / `1024x1536` / `auto` | no | no |
+
 ## The one rule
 
 **Never improvise image generation.** Do NOT create a project (you once made `~/projects/imagegen`
@@ -64,5 +80,10 @@ logo, threw a few options together" — and for delivering visual work ([[delive
 
 - **"codex produced no image"** — the model didn't save a file. Re-run with a more concrete
   description; if it persists, say so plainly rather than faking an image.
+- **"codex not found ... falling back to fal"** — not an error, just a stderr note: the default
+  renderer wasn't on `PATH` so it used fal instead. The image still generated; nothing to do.
 - **"reference image not found"** — the `--ref` path is wrong; check it.
-- It can take ~30–60s (it's one Codex turn). That's normal; the typing indicator covers it.
+- **"takes an aspect_ratio, not raw pixels"** (fal lane) — the model you picked can't express the
+  exact `--size` you asked for. Pick one of the listed ratios, pass `--size auto`, or switch to a
+  model with free-form `image_size` like `fal-ai/flux/dev`.
+- It can take ~30–60s (it's one generation turn). That's normal; the typing indicator covers it.
