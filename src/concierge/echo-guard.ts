@@ -487,6 +487,70 @@ function findPartialEcho(bubble: string, inputTokens: string[], originalText: st
 }
 
 /**
+ * Incident (2026-08-21, channel 1520986792373911622, two confirmed deliveries plus a third found
+ * on retroactive analysis of `~/.beckett/chilltext-transforms.jsonl`, 2026-08-19T05:12:08.718Z): a
+ * chilltext rewrite discarded a bubble's actual input and returned a verbatim line from `persona.md`'s
+ * own sample-lines section instead — a confident, fabricated claim of completed work ("pushed the
+ * fix", "the deploy went about as well as you'd expect") with zero relationship to what Beckett
+ * actually said. `detectEchoedInput` above cannot catch this: it compares the rewrite against the
+ * USER's message, and this bug compares nothing against nothing — the rewrite just isn't a rewrite
+ * of anything in the reply it was handed.
+ *
+ * `detectContentSubstitution` scores a bubble against the text it was SUPPOSED to be a rewrite of
+ * (a blank-line block of the pre-chill reply, or the whole reply when there's only one block) using
+ * a one-sided CONTAINMENT score, not `detectEchoedInput`'s symmetric Dice: what fraction of the
+ * bubble's own content words (stopwords stripped) also appear in the source. Symmetric Dice
+ * penalizes a short bubble scored against a much longer source it only covers a fragment of (the
+ * source's own size inflates the denominator); containment doesn't, since only the bubble's own
+ * word count sets the denominator. That distinction matters here because chilltext's ordinary,
+ * harmless behavior is to freely re-chunk a reply — split one long paragraph into several short
+ * bubbles, or merge several short ones into one — so a bubble legitimately covering only a
+ * FRAGMENT of its source block is the common case, not the exception. Confirmed against a sample of
+ * ~800 real bubbles in `~/.beckett/chilltext-transforms.jsonl`: legitimate bubbles (including
+ * fragment-of-a-longer-block splits) score containment ≥0.65 in the overwhelming majority of cases,
+ * with a single softer legitimate outlier at 0.11 (a short reactive aside chilltext appended on top
+ * of an otherwise faithful rewrite); the three confirmed substitutions scored 0.00, 0.00, 0.00, and
+ * 0.095 — a wide, unambiguous gap below that floor. `FIDELITY_CONTAINMENT_THRESHOLD` sits at 0.3,
+ * comfortably inside that gap (full measurement and rationale: this change's PR description).
+ *
+ * `chill-gate.ts`'s `reconcileBubblesWithBlocks` is the caller: it walks chilltext's returned
+ * bubbles against the pre-chill reply's blank-line blocks, using this score to decide, per bubble,
+ * whether it belongs to the block it's positioned against — and, structurally, whether a SURPLUS
+ * bubble (more bubbles than blocks) is fabricated content to drop outright, or a block got no
+ * bubble at all (fewer bubbles than blocks) and its content needs to post verbatim rather than
+ * silently vanish. See that function's doc for the full two-mode incident writeup.
+ */
+const FIDELITY_CONTAINMENT_THRESHOLD = 0.3;
+
+/** A rewritten bubble scored against the text it was supposedly rewritten FROM. */
+interface ContentFidelityResult {
+  /** True when `rewritten` shares essentially nothing with `source` — substituted/fabricated
+   * content, not a rewrite of it. */
+  unrelated: boolean;
+  /** Fraction of `rewritten`'s own content words (stopwords stripped) that also appear among
+   * `source`'s content words. `null` when `rewritten` or `source` has no content words at all —
+   * nothing to judge, so never flagged in that case (a bare ack, an all-stopword source, …). */
+  score: number | null;
+}
+
+/**
+ * Score whether `rewritten` retains any substantive connection to `source` — the text it was
+ * supposedly rewritten FROM. See the doc above for why this is a one-sided CONTAINMENT score
+ * rather than `detectEchoedInput`'s symmetric Dice, and for the incident and real-data threshold
+ * justification behind `FIDELITY_CONTAINMENT_THRESHOLD`.
+ */
+export function detectContentSubstitution(rewritten: string, source: string): ContentFidelityResult {
+  const rewrittenContent = tokenize(rewritten).filter((word) => !STOPWORDS.has(word));
+  if (rewrittenContent.length === 0) return { unrelated: false, score: null };
+  const sourceContent = new Set(tokenize(source).filter((word) => !STOPWORDS.has(word)));
+  if (sourceContent.size === 0) return { unrelated: false, score: null };
+  let shared = 0;
+  for (const word of rewrittenContent) if (sourceContent.has(word)) shared++;
+  const score = shared / rewrittenContent.length;
+  return { unrelated: score < FIDELITY_CONTAINMENT_THRESHOLD, score };
+}
+
+/**
  * Score a rewritten bubble against the user's triggering message and decide whether it has
  * drifted into being substantially the user's own words — either the whole bubble, or a leading/
  * trailing span of it. Pure and deterministic — no network, no randomness — so a caller can unit

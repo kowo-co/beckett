@@ -271,7 +271,7 @@ test("a chilled multi-bubble reply records one entry per bubble — no 'mega' en
   // bubble's own text — leaving a store entry that duplicated what the later bubbles already
   // recorded correctly. Fixed by having `deliverChilled` record every bubble it actually posts.
   const realFetch = globalThis.fetch;
-  const FULL_REPLY = "found it: X lives in foo.ts, wired up exactly the way you described in the mention";
+  const FULL_REPLY = "hey\n\nfound it\n\ncheck foo.ts";
   globalThis.fetch = (async () =>
     new Response(JSON.stringify({ messages: ["hey", "found it", "check foo.ts"] }), { status: 200 })) as unknown as typeof fetch;
   try {

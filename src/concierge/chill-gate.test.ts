@@ -125,7 +125,7 @@ describe("deliverChilled — multi-bubble posting order/opts", () => {
     const { sleep, calls } = noSleep();
     const postOpts: ReplyOptions = { replyToMessageId: "m1", replyToUserId: "u1" };
     const result: ChillTransformResult = { messages: ["hey", "so about that", "done!"] };
-    const id = await deliverChilled(CHAN, "the original long reply", {
+    const id = await deliverChilled(CHAN, "hey\n\nso about that\n\ndone!", {
       gateway,
       cfg: cfg(),
       postOpts,
@@ -146,7 +146,7 @@ describe("deliverChilled — multi-bubble posting order/opts", () => {
   test("a single-bubble chilled reply posts once, with postOpts, no delay", async () => {
     const { gateway, posts } = fakeGateway();
     const { sleep, calls } = noSleep();
-    const id = await deliverChilled(CHAN, "short-ish reply that got chilled", {
+    const id = await deliverChilled(CHAN, "one bubble", {
       gateway,
       cfg: cfg(),
       postOpts: { replyToMessageId: "m1" },
@@ -171,7 +171,7 @@ describe("deliverChilled — multi-bubble posting order/opts", () => {
     // the recording, one call per message it actually posted, each with that message's own text.
     const { gateway } = fakeGateway();
     const recorded: Array<[string, string, string | null]> = [];
-    await deliverChilled(CHAN, "the original long reply", {
+    await deliverChilled(CHAN, "hey\n\nso about that\n\ndone!", {
       gateway,
       cfg: cfg(),
       sleep: async () => {},
@@ -184,7 +184,7 @@ describe("deliverChilled — multi-bubble posting order/opts", () => {
       [CHAN, "done!", "msg-3"],
     ]);
     // Never the full pre-chill text under any id — that's the "mega message" duplicate.
-    expect(recorded.some(([, text]) => text === "the original long reply")).toBe(false);
+    expect(recorded.some(([, text]) => text === "hey\n\nso about that\n\ndone!")).toBe(false);
   });
 
   test("a bypass post is recorded once, with the exact text posted", async () => {
@@ -283,7 +283,7 @@ describe("deliverChilled — a --ping mention survives a mangling chilltext rewr
 
   test("the repaired mention rides the FIRST bubble — the only one the gateway pings from", async () => {
     const { gateway, posts } = fakeGateway();
-    await deliverChilled(CHAN, `<@${RO}>\nlong reply`, {
+    await deliverChilled(CHAN, `so here is the thing\n\nanyway thoughts?`, {
       gateway,
       cfg: cfg(),
       postOpts: pingOpts,
@@ -317,7 +317,7 @@ describe("deliverChilled — a --ping mention survives a mangling chilltext rewr
 
   test("no pingUserIds: ordinary prose (even prose the model happened to @-mangle) is untouched", async () => {
     const { gateway, posts } = fakeGateway();
-    await deliverChilled(CHAN, "just a normal reply", {
+    await deliverChilled(CHAN, "yeah all good\n\ntalk soon", {
       gateway,
       cfg: cfg(),
       postOpts: { replyToMessageId: "m1" },
@@ -384,7 +384,10 @@ describe("deliverChilled — a bubble that echoes the user's own input falls bac
 
   test("only the echoed bubble falls back to the original text; the other bubbles post as rewritten", async () => {
     const { gateway, posts } = fakeGateway();
-    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+    // One block (no blank line): the two legitimate bubbles are each a genuine fragment of it, and
+    // the echoed one falls back to this same text wholesale — all three "belong" to it.
+    const text = "wrote three, they're in the graph now. want me to walk you through them?";
+    await deliverChilled(CHAN, text, {
       gateway,
       cfg: cfg(),
       input: INPUT,
@@ -395,7 +398,7 @@ describe("deliverChilled — a bubble that echoes the user's own input falls bac
     });
     expect(posts.map((p) => p.text)).toEqual([
       "wrote three, they're in the graph now",
-      ORIGINAL_TEXT,
+      text,
       "want me to walk you through them?",
     ]);
   });
@@ -422,7 +425,9 @@ describe("deliverChilled — a bubble that echoes the user's own input falls bac
 
   test("a legitimate short agreement is not treated as an echo", async () => {
     const { gateway, posts } = fakeGateway();
-    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+    // Agreeing with something the reply itself said — the block genuinely contains "agreed".
+    const text = "sounds like we're agreed on the plan then";
+    await deliverChilled(CHAN, text, {
       gateway,
       cfg: cfg(),
       input: INPUT,
@@ -434,7 +439,9 @@ describe("deliverChilled — a bubble that echoes the user's own input falls bac
 
   test("no input provided: the guard never runs, bubbles post exactly as rewritten", async () => {
     const { gateway, posts } = fakeGateway();
-    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+    // The fidelity guard (unlike the echo guard) doesn't care whether `input` was supplied — it
+    // only needs the bubble to relate to the pre-chill text, so this must be that text verbatim.
+    await deliverChilled(CHAN, ECHOED_BUBBLE, {
       gateway,
       cfg: cfg(),
       sleep: async () => {},
@@ -445,7 +452,7 @@ describe("deliverChilled — a bubble that echoes the user's own input falls bac
 
   test("a throwing echo guard fails open: the rewritten bubble is kept, not dropped or blocked", async () => {
     const { gateway, posts } = fakeGateway();
-    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+    await deliverChilled(CHAN, "hey\n\nso about that", {
       gateway,
       cfg: cfg(),
       input: INPUT,
@@ -470,6 +477,131 @@ describe("deliverChilled — a bubble that echoes the user's own input falls bac
       transform: async () => ({ messages: [ECHOED_BUBBLE] }),
     });
     expect(posts[0]!.text).toBe(`<@${RO}>\n${ORIGINAL_TEXT}`);
+  });
+});
+
+describe("deliverChilled — content substitution and injection (the 2026-08-21 incident)", () => {
+  // Channel 1520986792373911622, 04:57:58.516Z: chilltext discarded the first block of the reply
+  // and returned a verbatim `persona.md` sample line ("yeah that's broken. i know why. gimme 10")
+  // instead. The second bubble was a faithful (here, verbatim) rewrite of the second block. Neither
+  // `echoContentScore` nor `echoFullScore` caught it — both were 0, because the echo guard compares
+  // against the USER's message, not against what the bubble was supposedly rewritten FROM.
+  const BLOCK_1 =
+    "classifier's actually going now — comedy counts as a reason to speak, serious rooms stay locked down";
+  const BLOCK_2 = "also correcting myself from earlier: the image fix IS live, has been since 23:49. i said it wasn't";
+  const FABRICATED_BUBBLE = "yeah that's broken. i know why. gimme 10";
+  const TEXT = `${BLOCK_1}\n\n${BLOCK_2}`;
+
+  test("substitution: the fabricated bubble never posts — the real block posts in its place, the other bubble posts as rewritten", async () => {
+    const { gateway, posts } = fakeGateway();
+    await deliverChilled(CHAN, TEXT, {
+      gateway,
+      cfg: cfg(),
+      sleep: async () => {},
+      transform: async () => ({ messages: [FABRICATED_BUBBLE, BLOCK_2] }),
+    });
+    expect(posts.map((p) => p.text)).toEqual([BLOCK_1, BLOCK_2]);
+    expect(posts.some((p) => p.text === FABRICATED_BUBBLE)).toBe(false);
+  });
+
+  test("the substitution is logged with its fidelity score and the fallback flag", async () => {
+    const { gateway } = fakeGateway();
+    const logPath = tmpLogPath();
+    await deliverChilled(CHAN, TEXT, {
+      gateway,
+      cfg: cfg(),
+      sleep: async () => {},
+      transform: async () => ({ messages: [FABRICATED_BUBBLE, BLOCK_2] }),
+      logPath,
+    });
+    const rows = readChillTransformLog(logPath);
+    const bubbles = rows[0]!.bubbles!;
+    const droppedEntry = bubbles.find((b) => b.rewritten === FABRICATED_BUBBLE);
+    expect(droppedEntry).toBeDefined();
+    expect(droppedEntry!.posted).toBeNull();
+    expect(droppedEntry!.fidelityDropped).toBe(true);
+    const fallbackEntry = bubbles.find((b) => b.posted === BLOCK_1);
+    expect(fallbackEntry).toBeDefined();
+    expect(fallbackEntry!.rewritten).toBeNull();
+    expect(fallbackEntry!.fidelityFallback).toBe(true);
+  });
+
+  // The 2026-08-21 05:00:35.558Z widening: `agentOutput` had exactly two blank-line-separated
+  // blocks, but chilltext returned THREE bubbles — the fabricated one PREPENDED ahead of two
+  // faithful rewrites. A count mismatch, not just a content mismatch.
+  test("injection: a surplus bubble ahead of two faithful ones is dropped — exactly two post, matching the two blocks", async () => {
+    const { gateway, posts } = fakeGateway();
+    await deliverChilled(CHAN, TEXT, {
+      gateway,
+      cfg: cfg(),
+      sleep: async () => {},
+      transform: async () => ({ messages: [FABRICATED_BUBBLE, BLOCK_1, BLOCK_2] }),
+    });
+    expect(posts.map((p) => p.text)).toEqual([BLOCK_1, BLOCK_2]);
+  });
+
+  test("injection: the dropped surplus bubble never posts, in any position", async () => {
+    const { gateway, posts } = fakeGateway();
+    await deliverChilled(CHAN, TEXT, {
+      gateway,
+      cfg: cfg(),
+      sleep: async () => {},
+      // The fabricated bubble at the END this time, not the front — the structural check doesn't
+      // care where the surplus bubble sits.
+      transform: async () => ({ messages: [BLOCK_1, BLOCK_2, FABRICATED_BUBBLE] }),
+    });
+    expect(posts.map((p) => p.text)).toEqual([BLOCK_1, BLOCK_2]);
+  });
+
+  // The reverse of injection: FEWER bubbles than blocks. Silently dropping a real block would be
+  // its own defect, so the unmatched block falls back to posting verbatim rather than vanishing.
+  test("reverse: fewer bubbles than blocks — the block with no matching bubble still posts, verbatim", async () => {
+    const { gateway, posts } = fakeGateway();
+    await deliverChilled(CHAN, TEXT, {
+      gateway,
+      cfg: cfg(),
+      sleep: async () => {},
+      // Only ONE bubble came back, covering just the first block — the second block's content
+      // never made it into anything chilltext returned.
+      transform: async () => ({ messages: [BLOCK_1] }),
+    });
+    expect(posts.map((p) => p.text)).toEqual([BLOCK_1, BLOCK_2]);
+  });
+
+  test("a legitimate rewrite — different wording, same meaning — passes through unchanged, proving this isn't a blanket disable", async () => {
+    const { gateway, posts } = fakeGateway();
+    const block1 = "the giveaway form got filled and submitted, page came back with \"Unable to accept this submission.\" and nothing else";
+    const block2 = "second attempt, same wall. \"Unable to accept this submission.\" and still no reason given";
+    const rewrite1 = "the giveaway form got filled and submitted, then it just came back with \"unable to accept this submission\"";
+    const rewrite2 = "second attempt, same wall. \"unable to accept this submission.\" and still no reason";
+    await deliverChilled(CHAN, `${block1}\n\n${block2}`, {
+      gateway,
+      cfg: cfg(),
+      sleep: async () => {},
+      transform: async () => ({ messages: [rewrite1, rewrite2] }),
+    });
+    expect(posts.map((p) => p.text)).toEqual([rewrite1, rewrite2]);
+  });
+
+  test("a legitimate one-block-split-into-several-bubbles delivery is untouched", async () => {
+    // chilltext's ordinary, harmless re-chunking: one paragraph split into three short bubbles.
+    // None of them individually equals the block, but each is a genuine fragment of it.
+    const { gateway, posts } = fakeGateway();
+    const block =
+      "grug get email. grug read email. grug not happy. grug write code because grug like write code. " +
+      "grug ask with much respect: no send more email.";
+    const bubbles = [
+      "grug get email. grug read email. grug not happy.",
+      "grug write code because grug like write code.",
+      "grug ask with much respect: no send more email.",
+    ];
+    await deliverChilled(CHAN, block, {
+      gateway,
+      cfg: cfg(),
+      sleep: async () => {},
+      transform: async () => ({ messages: bubbles }),
+    });
+    expect(posts.map((p) => p.text)).toEqual(bubbles);
   });
 });
 
@@ -598,7 +730,7 @@ describe("deliverChilled — a bubble that echoes the rewrite's own instructions
 
   test("a throwing prompt guard fails open: the rewritten bubble is kept, not dropped or blocked", async () => {
     const { gateway, posts } = fakeGateway();
-    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+    await deliverChilled(CHAN, "hey\n\nso about that", {
       gateway,
       cfg: cfg(),
       sleep: async () => {},
@@ -613,7 +745,10 @@ describe("deliverChilled — a bubble that echoes the rewrite's own instructions
   test("the log records promptLeak and its matched signals", async () => {
     const { gateway } = fakeGateway();
     const logPath = tmpLogPath();
-    await deliverChilled(CHAN, ORIGINAL_TEXT, {
+    // One block: the legitimate bubble is a fragment of it, and the leaked bubble's fallback is
+    // this same text wholesale.
+    const text = "all good here. stopped. nothing deployed, nothing running, we're clean.";
+    await deliverChilled(CHAN, text, {
       gateway,
       cfg: cfg(),
       sleep: async () => {},
@@ -627,7 +762,7 @@ describe("deliverChilled — a bubble that echoes the rewrite's own instructions
     );
     expect(bubbles[0]!.promptLeak).toBeUndefined();
     expect(bubbles[1]).toEqual(
-      expect.objectContaining({ rewritten: LEAKED_INSTRUCTIONS, posted: ORIGINAL_TEXT, promptLeak: true }),
+      expect.objectContaining({ rewritten: LEAKED_INSTRUCTIONS, posted: text, promptLeak: true }),
     );
     expect(bubbles[1]!.promptLeakSignals!.length).toBeGreaterThanOrEqual(2);
   });
@@ -645,7 +780,7 @@ describe("deliverChilled — a missing persona file never costs a message", () =
       return new Response(JSON.stringify({ messages: ["yeah it landed"] }), { status: 200 });
     }) as unknown as typeof fetch;
 
-    const id = await deliverChilled(CHAN, "a normal reply that would have been chilled", {
+    const id = await deliverChilled(CHAN, "yeah, it landed on main and deployed clean.", {
       gateway,
       cfg: cfg(),
       personaPath: missingPersona,
@@ -696,7 +831,7 @@ describe("deliverChilled — chilltext transform transcript (logPath)", () => {
   test("a normal chilled transform writes one 'ok' record with input/before/after and per-bubble echo scores", async () => {
     const { gateway } = fakeGateway();
     const logPath = tmpLogPath();
-    await deliverChilled(CHAN, "the real reply beckett meant to send", {
+    await deliverChilled(CHAN, "hey\n\nso about that", {
       gateway,
       cfg: cfg(),
       input: "what's the status",
@@ -709,17 +844,25 @@ describe("deliverChilled — chilltext transform transcript (logPath)", () => {
     const row = rows[0]!;
     expect(row.channelId).toBe(CHAN);
     expect(row.input).toBe("what's the status");
-    expect(row.agentOutput).toBe("the real reply beckett meant to send");
+    expect(row.agentOutput).toBe("hey\n\nso about that");
     expect(row.outcome).toBe("ok");
     expect(row.durationMs).toBeGreaterThanOrEqual(0);
     expect(row.bubbles).toEqual([
-      { rewritten: "hey", posted: "hey", echoFallback: false, echoContentScore: expect.any(Number), echoFullScore: expect.any(Number) },
+      {
+        rewritten: "hey",
+        posted: "hey",
+        echoFallback: false,
+        echoContentScore: expect.any(Number),
+        echoFullScore: expect.any(Number),
+        fidelityScore: expect.any(Number),
+      },
       {
         rewritten: "so about that",
         posted: "so about that",
         echoFallback: false,
         echoContentScore: expect.any(Number),
         echoFullScore: expect.any(Number),
+        fidelityScore: expect.any(Number),
       },
     ]);
   });
@@ -773,7 +916,9 @@ describe("deliverChilled — chilltext transform transcript (logPath)", () => {
     const ECHOED_BUBBLE =
       "yeah that's the right flow. questions or like 90% of stuff should go to you, not me. " +
       "imagine bothering the ceo with every task, you're the cto, so you gotta step up and lead lol.";
-    const ORIGINAL_TEXT = "the real reply beckett actually meant to send";
+    // One block: the legitimate bubble is a fragment of it, and the echoed bubble's fallback is
+    // this same text wholesale.
+    const ORIGINAL_TEXT = "all good here. the real reply beckett actually meant to send";
     const { gateway } = fakeGateway();
     const logPath = tmpLogPath();
     await deliverChilled(CHAN, ORIGINAL_TEXT, {
@@ -806,7 +951,7 @@ describe("deliverChilled — chilltext transform transcript (logPath)", () => {
     const warnings: Array<[string, unknown]> = [];
     const logger = { warn: (msg: string, meta?: unknown) => warnings.push([msg, meta]) } as unknown as Logger;
 
-    const id = await deliverChilled(CHAN, "a normal reply here", {
+    const id = await deliverChilled(CHAN, "hey\n\nso about that", {
       gateway,
       cfg: cfg(),
       sleep: async () => {},
