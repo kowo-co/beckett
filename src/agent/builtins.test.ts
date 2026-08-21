@@ -52,6 +52,64 @@ test("PING SOMEONE names an explicit roster, rotates the target, and never @s a 
   expect(prompt).toContain("PICK A LANE (vary it — do not lean on the same lane every time):");
 });
 
+test("the prompt forbids inventing an event and requires the SOURCES block to back a factual claim (real-sources ticket, Half 1)", () => {
+  const prompt = builtinAgentDefs().find((a) => a.id === SOCIAL_MEDIA_AGENT_ID)!.systemPrompt;
+  const flat = prompt.toLowerCase().replace(/\s+/g, " ");
+
+  expect(flat).toContain("grounding rule");
+  // Plain-language ban on the exact fabrication categories the ticket's two real examples hit
+  // (an invented npm supply-chain incident, an invented Cloudflare outage).
+  expect(flat).toContain("may never invent an event, an");
+  expect(flat).toContain("outage");
+  expect(flat).toContain("cve");
+  expect(flat).toContain("maintainer change");
+  expect(flat).toContain("company statement");
+  expect(flat).toContain("personal incident that did not");
+  expect(flat).toContain("not even as a bit");
+  // Every factual claim must trace to the SOURCES block; an opinion needs no source but its
+  // object still has to be real.
+  expect(flat).toContain("sources block");
+  expect(flat).toContain("must trace to one of those entries");
+  expect(flat).toContain("its object still has to be real");
+  // The two legitimate grounding sources named explicitly, and no third.
+  expect(flat).toContain("real tech news fetched just now");
+  expect(flat).toContain("the run ledger, the deploy/uptime ledger, the");
+  expect(flat).toContain("journal");
+});
+
+test("the STUPID ON PURPOSE / BAD OPINION lanes still need no source for the opinion itself", () => {
+  const prompt = builtinAgentDefs().find((a) => a.id === SOCIAL_MEDIA_AGENT_ID)!.systemPrompt;
+  expect(prompt).toContain("BAD OPINION, FULL CONFIDENCE");
+  expect(prompt).toContain("STUPID ON PURPOSE");
+});
+
+test("the prompt defines a TIMELINE REPLY ROUND job, distinct from composing, with its own guardrails (Half 2)", () => {
+  const prompt = builtinAgentDefs().find((a) => a.id === SOCIAL_MEDIA_AGENT_ID)!.systemPrompt;
+  const flat = prompt.toLowerCase().replace(/\s+/g, " ");
+
+  expect(flat).toContain("timeline reply round");
+  // It authors a browser task instead of using the POST: contract.
+  expect(flat).toContain("do not use the post: contract for this job");
+  // Selectivity is explicit and skipping is normal — mirrors ro's own words ("not like everything
+  // but cool posts") and the existing mention-REPLIES "forced reply is worse than no reply" rule.
+  expect(flat).toContain("a handful at most per round");
+  expect(flat).toContain("replying to none of them is a normal, often correct outcome");
+  expect(flat).toContain("a forced reply is worse than no reply");
+  // Guardrails at least as strict as an original post's.
+  expect(flat).toContain("harassment");
+  expect(flat).toContain("pile-on");
+  expect(flat).toContain("private life");
+  expect(flat).toContain("punch up or sideways only");
+  expect(flat).toContain("no engagement farming");
+  expect(flat).toContain("reply-guying a large account");
+  // Never invents what a post says — grounded in the live page.
+  expect(flat).toContain("never invent a post's content");
+  // Credential discipline carried over from the compose path.
+  expect(flat).toContain("never touch a credential field");
+  // The existing mention-REPLIES block is untouched, not replaced.
+  expect(prompt).toContain("REPLIES: when you're checking mentions");
+});
+
 test("the store seeds the social-media agent into agents.json on first load", async () => {
   const dir = mkdtempSync(join(tmpdir(), "agent-builtins-"));
   dirs.push(dir);

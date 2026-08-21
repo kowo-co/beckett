@@ -47,11 +47,37 @@ export const X_CREDS_ENTRY = "x-account";
 export const MODEL_NEWS_WATCH_ID = "model-news-watch";
 
 /**
+ * Id of the timeline-reply routine (real-sources ticket, Half 2): ro's ask — be "relevant and
+ * active in ... replying to people on the home page ... not like everything but cool posts." Runs
+ * the SAME `social-media` agent path as `daily-x-shitpost`, but the agent's job for this fire is
+ * to author a browser task that reads the live home timeline and replies selectively, instead of
+ * composing a fresh post — see `TIMELINE_REPLY_INPUT` and the TIMELINE REPLY ROUND section of the
+ * agent's prompt (`../agent/builtins.ts`).
+ */
+export const TIMELINE_REPLY_ID = "x-timeline-replies";
+
+/**
  * The instruction handed to the social-media agent each fire. Deliberately terse — the agent's
  * prompt owns the voice and the browser-task shape; this only names the job.
  */
 export const DAILY_SHITPOST_INPUT =
   "Compose today's shitpost — one fresh, in-voice line — and author the browser task that posts it to X.";
+
+/**
+ * The instruction handed to the social-media agent for a timeline-reply round. Unlike
+ * `DAILY_SHITPOST_INPUT` this does not ask for a `POST:`-contract line: the agent has no browser
+ * of its own ({@link ../agent/invoke.ts}'s doc comment — it authors, the dispatcher dispatches),
+ * so for this job it authors the FULL self-contained browser task that reads the live timeline and
+ * replies, and the dispatcher's legacy fallback (no `POST:` line ⇒ the whole output IS the task)
+ * hands that straight to the background browser lane. The literal phrase "TIMELINE REPLY ROUND" is
+ * what `./social-grounding.ts#needsGroundingSources` reads to skip the compose-time SOURCES block
+ * — a reply's grounding is the live page the browsing agent actually reads, not a fetched feed.
+ */
+export const TIMELINE_REPLY_INPUT =
+  "TIMELINE REPLY ROUND: open the home timeline as @beckposting, read what is genuinely there " +
+  "right now, and author the self-contained browser task that reads it and replies to a SMALL " +
+  "number of genuinely good posts — a handful at most, and zero is a normal, often correct " +
+  "outcome. Do not use the POST: contract for this job; write out the full browser task instead.";
 
 /**
  * Id of the weekly dependency-update routine (issue #85) — ro's ask: stop hand-bumping deps forever.
@@ -166,6 +192,27 @@ export function builtinRoutineDefs(
         agentId: SOCIAL_MEDIA_AGENT_ID,
         credsEntry: X_CREDS_ENTRY,
         dryRun: false,
+      },
+    },
+    {
+      id: TIMELINE_REPLY_ID,
+      name: "X timeline replies",
+      builtin: true,
+      enabled: true,
+      action: {
+        kind: "agent",
+        agentId: SOCIAL_MEDIA_AGENT_ID,
+        input: TIMELINE_REPLY_INPUT,
+        credsEntry: X_CREDS_ENTRY,
+      },
+      // Once a day, a few hours off the shitpost window so the two fires never collide. Daily —
+      // not hourly — is the conservative choice: this job reads a live timeline and decides on its
+      // own who to reply to, so a small daily blast radius (and a human able to see one round's
+      // worth of replies at a glance) beats a chattier cadence, especially before the selectivity
+      // bar has a track record.
+      schedule: {
+        cadence: { kind: "daily" },
+        window: { start: "16:00", end: "17:00", tz: "America/Los_Angeles" },
       },
     },
     {

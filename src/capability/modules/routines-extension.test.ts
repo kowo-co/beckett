@@ -555,6 +555,123 @@ test("an agent-lane POST: output fails open to the draft when chillTransform err
   expect(posted[0]).toContain("ship it");
 });
 
+// ── the social-media agent's mandatory grounding step (real-sources ticket, Half 1) ──────────
+
+test("a compose fire appends the fetched SOURCES block to the agent's input before it composes", async () => {
+  const seenInputs: string[] = [];
+  const dispatcher = await dispatcherOf({
+    browserAgent: () => ({ async run() { return undefined as never; } }) as never,
+    agentRegistry: () => ({ get: () => ({ id: "social-media" }) }) as never,
+    agentRunner: () => ({
+      run: async (_def: unknown, input: string) => {
+        seenInputs.push(input);
+        return { state: "done", output: "POST: fine" };
+      },
+    }) as never,
+    gatherGrounding: async () => "SOURCES FOR THIS RUN (read before you write anything) — fake test sources",
+  });
+
+  await dispatcher.dispatch(agentPlanFor("social-media", "Compose today's shitpost.") as never, {} as never);
+
+  expect(seenInputs).toHaveLength(1);
+  expect(seenInputs[0]).toContain("Compose today's shitpost.");
+  expect(seenInputs[0]).toContain("SOURCES FOR THIS RUN");
+  expect(seenInputs[0]).toContain("fake test sources");
+});
+
+test("an unwired grounding dependency degrades to the honest unavailable note — no live network call", async () => {
+  const seenInputs: string[] = [];
+  const dispatcher = await dispatcherOf({
+    browserAgent: () => ({ async run() { return undefined as never; } }) as never,
+    agentRegistry: () => ({ get: () => ({ id: "social-media" }) }) as never,
+    agentRunner: () => ({
+      run: async (_def: unknown, input: string) => {
+        seenInputs.push(input);
+        return { state: "done", output: "POST: fine" };
+      },
+    }) as never,
+    // No gatherGrounding provided — this must never attempt a real fetch.
+  });
+
+  await dispatcher.dispatch(agentPlanFor("social-media", "Compose today's shitpost.") as never, {} as never);
+
+  expect(seenInputs).toHaveLength(1);
+  expect(seenInputs[0]).toContain("SOURCES FOR THIS RUN: none available");
+});
+
+test("a failing grounding fetch is caught and falls back to the unavailable note, not a thrown error", async () => {
+  const seenInputs: string[] = [];
+  const dispatcher = await dispatcherOf({
+    browserAgent: () => ({ async run() { return undefined as never; } }) as never,
+    agentRegistry: () => ({ get: () => ({ id: "social-media" }) }) as never,
+    agentRunner: () => ({
+      run: async (_def: unknown, input: string) => {
+        seenInputs.push(input);
+        return { state: "done", output: "POST: fine" };
+      },
+    }) as never,
+    gatherGrounding: async () => {
+      throw new Error("network exploded");
+    },
+  });
+
+  await dispatcher.dispatch(agentPlanFor("social-media", "Compose today's shitpost.") as never, {} as never);
+
+  expect(seenInputs).toHaveLength(1);
+  expect(seenInputs[0]).toContain("SOURCES FOR THIS RUN: none available");
+});
+
+test("a TIMELINE REPLY ROUND fire never fetches grounding sources — its grounding is the live page", async () => {
+  const seenInputs: string[] = [];
+  let groundingCalls = 0;
+  const dispatcher = await dispatcherOf({
+    browserAgent: () => ({ async run() { return undefined as never; } }) as never,
+    agentRegistry: () => ({ get: () => ({ id: "social-media" }) }) as never,
+    agentRunner: () => ({
+      run: async (_def: unknown, input: string) => {
+        seenInputs.push(input);
+        return { state: "done", output: "go read the timeline" };
+      },
+    }) as never,
+    gatherGrounding: async () => {
+      groundingCalls++;
+      return "SOURCES FOR THIS RUN — should never appear here";
+    },
+  });
+
+  await dispatcher.dispatch(
+    agentPlanFor("social-media", "TIMELINE REPLY ROUND: open the home timeline...") as never,
+    {} as never,
+  );
+
+  expect(groundingCalls).toBe(0);
+  expect(seenInputs).toEqual(["TIMELINE REPLY ROUND: open the home timeline..."]);
+});
+
+test("a non-social-media agent's input is never touched by the grounding step", async () => {
+  const seenInputs: string[] = [];
+  let groundingCalls = 0;
+  const dispatcher = await dispatcherOf({
+    browserAgent: () => ({ async run() { return undefined as never; } }) as never,
+    agentRegistry: () => ({ get: () => ({ id: "some-other-agent" }) }) as never,
+    agentRunner: () => ({
+      run: async (_def: unknown, input: string) => {
+        seenInputs.push(input);
+        return { state: "done", output: "POST: fine" };
+      },
+    }) as never,
+    gatherGrounding: async () => {
+      groundingCalls++;
+      return "SOURCES";
+    },
+  });
+
+  await dispatcher.dispatch(agentPlanFor("some-other-agent", "do a thing") as never, {} as never);
+
+  expect(groundingCalls).toBe(0);
+  expect(seenInputs).toEqual(["do a thing"]);
+});
+
 test("a self fire wakes the concierge and never resolves the browser lane (issue #26)", async () => {
   const woke: Array<{ routineId: string; prompt: string; channelId: string }> = [];
   const dispatcher = await dispatcherOf({

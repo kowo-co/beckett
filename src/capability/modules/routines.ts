@@ -67,7 +67,8 @@ import { loadIdentity } from "../../agency/index.ts";
 import { resolveSelfProjectOwner } from "../../github/owner.ts";
 import type { AgentDefinition, AgentRunner } from "../../agent/index.ts";
 import { extractPostText, composeXPostBrowserTask } from "../../agent/invoke.ts";
-import { X_SOCIAL_ACCOUNT } from "../../agent/builtins.ts";
+import { X_SOCIAL_ACCOUNT, SOCIAL_MEDIA_AGENT_ID } from "../../agent/builtins.ts";
+import { needsGroundingSources, GROUNDING_UNAVAILABLE_NOTE } from "../../routine/social-grounding.ts";
 import {
   chillTransform,
   type ChilltextConfig,
@@ -149,6 +150,16 @@ export interface RoutinesExtensionDeps {
    * test can assert the bill forks off the scheduler tick and never resolves the browser lane.
    */
   spawnSpendReport?: (argv: string[]) => void;
+  /**
+   * The social-media agent's mandatory grounding step (real-sources ticket, Half 1):
+   * `../../routine/social-grounding.ts#buildGroundingBlock`, fetched right before a COMPOSE fire
+   * (never a `watch`/timeline-reply fire — see `needsGroundingSources`) and appended to the
+   * agent's input. Deliberately NOT defaulted to the real fetch here: an unwired caller (a test
+   * harness written before this dependency existed) must never make a live network call by
+   * accident — it degrades to {@link GROUNDING_UNAVAILABLE_NOTE} instead. `shell/main.ts` always
+   * wires the real implementation (`createDefaultGrounding`).
+   */
+  gatherGrounding?: () => Promise<string>;
   /** Test seams — the scheduler's injectable clock/RNG/cadence (see {@link RoutineSchedulerDeps}). */
   now?: () => Date;
   rng?: () => number;
@@ -489,9 +500,25 @@ export const createRoutinesExtension =
       }
       const def = deps.agentRegistry().get(agentId);
       if (!def) throw new Error(`routine references unknown agent: ${agentId}`);
+      // The mandatory grounding step (Half 1): a plain compose fire (daily-x-shitpost, the legacy
+      // x-shitpost shape) gets a SOURCES block appended to its input BEFORE the agent ever writes
+      // a word. A `watch` event fire or a TIMELINE REPLY ROUND is already grounded some other way
+      // (the specific feed item; the live page) and skips this — see `needsGroundingSources`.
+      let input = agentInput;
+      if (agentId === SOCIAL_MEDIA_AGENT_ID && needsGroundingSources(agentInput)) {
+        const sources = deps.gatherGrounding
+          ? await deps.gatherGrounding().catch((err) => {
+              ctx.logger.warn("social-media grounding fetch failed; composing with no fetched sources", {
+                error: String(err),
+              });
+              return GROUNDING_UNAVAILABLE_NOTE;
+            })
+          : GROUNDING_UNAVAILABLE_NOTE;
+        input = `${agentInput}\n\n${sources}`;
+      }
       const outcome = await deps
         .agentRunner()
-        .run(def, agentInput, { channelId: origin.channelId, requesterId: origin.requesterId });
+        .run(def, input, { channelId: origin.channelId, requesterId: origin.requesterId });
       if (outcome.state !== "done" || !outcome.output.trim()) {
         throw new Error(`agent ${agentId} did not author a post: ${outcome.error ?? outcome.state}`);
       }

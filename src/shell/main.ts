@@ -87,6 +87,8 @@ import {
 import { createQuickExtension } from "../capability/modules/quick.ts";
 // Phase 3b routines wiring: same additive-import posture.
 import { createRoutinesExtension } from "../capability/modules/routines.ts";
+// The social-media agent's mandatory grounding step (real-sources ticket, Half 1).
+import { createDefaultGrounding } from "../routine/social-grounding.ts";
 // Phase 6 memory wiring (the LAST organ): same additive-import posture.
 import { createMemoryExtension } from "../capability/modules/memory.ts";
 
@@ -583,6 +585,7 @@ async function boot(): Promise<BootedSystem> {
     browserAgent: () => browserExtension.agent(),
     agentRegistry: () => agentRegistry,
     agentRunner: () => agentRunner,
+    gatherGrounding: createDefaultGrounding(paths),
     // Resolve the origin channel/requester at fire time from env so no id is baked into a
     // routine definition (BECKETT_ROUTINE_CHANNEL_ID / DISCORD_OWNER_ID).
     defaultOrigin: () => ({
