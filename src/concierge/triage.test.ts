@@ -370,6 +370,36 @@ describe("OPS-193 tightened cold-interjection bar", () => {
   });
 });
 
+describe("ambient triage: humor and banter permissiveness (ro's 2026-08-21 ask)", () => {
+  // ro asked to let the classifier prompt be more permissive of funny and comedic interjections —
+  // ordinary room banter (keyboard mashing, riffing on a running bit) should not be funneled into
+  // the silence band merely for being banter; a specific, on-point joke should clear the welcome
+  // floor the same as a good answer would. Pin the rubric text that teaches this.
+  const rubric = readFileSync(join(import.meta.dir, "triage.md"), "utf8");
+
+  test("comedic value is scored the same as an answer or pointer, not treated as a lesser contribution", () => {
+    expect(rubric).toContain("Comedic value is a real contribution, not a lesser");
+  });
+
+  test("the welcome band (0.55-0.74) explicitly includes a joke or riff that lands, not just invited contests", () => {
+    expect(rubric).toContain("a joke or riff that actually lands the room's current bit all\n  qualify equally");
+    expect(rubric).toContain("Ordinary channel banter is exactly where this band lives");
+  });
+
+  test("a specific funny line does not get funneled into the silence band merely for arriving as banter", () => {
+    expect(rubric).toContain("does not belong in this band\n  merely because it arrived as banter");
+  });
+
+  test("open-channel riffing (nobody addressed, nobody excluded) can clear the bar on a genuinely funny line", () => {
+    expect(rubric).toContain("ordinary room banter is exactly where being funnier is\n  wanted, not merely tolerated");
+  });
+
+  test("a private back-and-forth addressed to someone else still stays silent regardless of how funny Beckett could be", () => {
+    // Being funnier is not a licence to butt in — the addressee guard stays exactly as strict.
+    expect(rubric).toContain("`other`, stay silent regardless of how good Beckett's line would be");
+  });
+});
+
 describe("extractVerdictJson", () => {
   test("strips ```json fences", () => {
     expect(extractVerdictJson("```json\n" + VERDICT + "\n```")).toBe(VERDICT);

@@ -8870,11 +8870,17 @@ function frameAmbientCandidate(
     `[channel:${channelId}] recent conversation:\n${lines}\n` +
     `Triage says: ${verdict.kind} (confidence ${verdict.confidence.toFixed(2)}).\n` +
     `${addresseeFrameLine(verdict.addressee)}\n` +
-    `Triage found a possible beat, not an obligation to speak. If the latest unresolved turn still\n` +
-    `has specific, welcome value you can add, reply with ONE short message in your voice. A concrete\n` +
-    `offer or answer, a genuinely funny line, or a useful pointer can qualify.\n` +
-    `Use delivery decision "pass" when a human already answered, the plan is settled, the moment closed,\n` +
-    `someone is upset, or your reply would only agree, restate, nitpick, or add a generic quip.\n` +
+    `Triage found a possible beat, not an obligation to speak. A joke that actually lands is a real\n` +
+    `contribution here, same as an answer or a pointer — humor, riffing, and comedic interjections in\n` +
+    `casual channel talk are wanted, not merely tolerated. If the latest unresolved turn still has\n` +
+    `specific, welcome value you can add — a concrete offer or answer, a genuinely funny line that\n` +
+    `plays off what's actually happening, or a useful pointer — reply with ONE short message in your\n` +
+    `voice.\n` +
+    `Use delivery decision "pass" when a human already answered, the plan is settled, the moment\n` +
+    `closed, or someone is upset — those hold no matter how funny the room is. Also pass when your\n` +
+    `reply would only agree, restate, nitpick, or land a generic quip that isn't actually funny or\n` +
+    `specific to this moment; a quip that's genuinely funny and on-point is not "generic" just\n` +
+    `because it's short.\n` +
     `If on reflection this turn belongs to someone else (triage can misread the addressee), run\n` +
     `\`beckett discord decline --channel ${channelId}\` BEFORE you write anything — that quietly\n` +
     `drops the turn, posting nothing. Prefer it over posting a reply into a conversation that\n` +
@@ -8902,7 +8908,10 @@ export function addresseeFrameLine(addressee: TriageVerdict["addressee"]): strin
         `staying out of it — decline unless you have a genuinely high-value beat only you can add.`
       );
     case "group":
-      return `Addressee (triage's read): addressed to the room broadly — chime in if you've got a beat.`;
+      return (
+        `Addressee (triage's read): addressed to the room broadly — chime in if you've got a beat,\n` +
+        `and a genuinely funny line counts as one.`
+      );
     default:
       return `Addressee (triage's read): unclear who this was aimed at — only speak up if the beat is real.`;
   }
