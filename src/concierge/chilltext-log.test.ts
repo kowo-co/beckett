@@ -89,6 +89,34 @@ describe("appendChillTransformLog / readChillTransformLog", () => {
   });
 });
 
+describe("appendChillTransformLog / readChillTransformLog — fidelity fields (2026-08-21 incident)", () => {
+  test("a dropped surplus bubble and a block-only fallback round-trip with null rewritten/posted", () => {
+    const path = tmpLogPath();
+    const rec = record({
+      bubbles: [
+        {
+          rewritten: "yeah that's broken. i know why. gimme 10",
+          posted: null,
+          echoFallback: false,
+          echoContentScore: null,
+          echoFullScore: null,
+          fidelityDropped: true,
+        },
+        {
+          rewritten: null,
+          posted: "the real block text",
+          echoFallback: false,
+          echoContentScore: null,
+          echoFullScore: null,
+          fidelityFallback: true,
+        },
+      ],
+    });
+    appendChillTransformLog(path, rec);
+    expect(readChillTransformLog(path)).toEqual([rec]);
+  });
+});
+
 describe("formatChillTransformLog", () => {
   test("an empty ledger reads as explicitly empty, not a blank string", () => {
     expect(formatChillTransformLog([], 10)).toBe("(no chilltext transforms recorded yet)");
@@ -118,5 +146,37 @@ describe("formatChillTransformLog", () => {
     expect(out).toContain("an echoed bubble");
     expect(out).toContain("ECHO FALLBACK");
     expect(out).toContain("0.91");
+  });
+
+  test("a dropped surplus bubble and a block-only fallback render distinctly, not as blank text", () => {
+    const rows = [
+      record({
+        bubbles: [
+          {
+            rewritten: "yeah that's broken. i know why. gimme 10",
+            posted: null,
+            echoFallback: false,
+            echoContentScore: null,
+            echoFullScore: null,
+            fidelityDropped: true,
+            fidelityScore: 0,
+          },
+          {
+            rewritten: null,
+            posted: "the real block text",
+            echoFallback: false,
+            echoContentScore: null,
+            echoFullScore: null,
+            fidelityFallback: true,
+          },
+        ],
+      }),
+    ];
+    const out = formatChillTransformLog(rows, 1);
+    expect(out).toContain("(dropped — never posted)");
+    expect(out).toContain("(no bubble — block posted verbatim)");
+    expect(out).toContain("the real block text");
+    expect(out).toContain("FIDELITY DROPPED");
+    expect(out).toContain("FIDELITY FALLBACK");
   });
 });

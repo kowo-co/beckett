@@ -48,7 +48,7 @@
 import type { Config, DiscordGateway, Logger, ReplyOptions } from "../types.ts";
 import { chillTransform, shouldBypassChill, type ChillTransformResult } from "../chilltext.ts";
 import { enforceMentions } from "../discord/mentions.ts";
-import { detectEchoedInput, detectPromptScaffolding, type PromptScaffoldResult } from "./echo-guard.ts";
+import { detectEchoedInput, detectPromptScaffolding, detectContentSubstitution, type PromptScaffoldResult } from "./echo-guard.ts";
 import { appendChillTransformLog, type ChillTransformLogRecord } from "./chilltext-log.ts";
 
 /** How much of a bubble/input to keep in a trip's warning log — enough to diagnose, not a full dump. */
@@ -56,6 +56,119 @@ const LOG_SNIPPET_CHARS = 200;
 
 function truncateForLog(text: string): string {
   return text.length > LOG_SNIPPET_CHARS ? `${text.slice(0, LOG_SNIPPET_CHARS)}…` : text;
+}
+
+/** Split the pre-chill reply into its blank-line-separated blocks — the unit
+ * `reconcileBubblesWithBlocks` matches chilltext's returned bubbles against. A reply with no blank
+ * line at all is one block: itself. */
+function splitIntoBlocks(text: string): string[] {
+  const blocks = text
+    .split(/\n\s*\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return blocks.length > 0 ? blocks : [text];
+}
+
+/** One entry in the reconciled bubble/block sequence, in the original bubbles' relative order —
+ * covers both what actually gets POSTED (`kind !== "dropped"`) and what was dropped, purely for
+ * logging. */
+interface ReconciledEntry {
+  kind: "bubble" | "block-fallback" | "dropped";
+  /** What should be posted for this entry (`kind !== "dropped"`), or the fabricated bubble text
+   * that never posts at all (`kind === "dropped"`). */
+  text: string;
+  /** The chilltext bubble this entry came from. `null` for a `"block-fallback"` with no bubble at
+   * all — every other kind always has one. */
+  rewritten: string | null;
+  /** Index into the ORIGINAL bubbles array this entry came from. `null` for a `"block-fallback"`
+   * with no bubble at all. */
+  sourceIndex: number | null;
+  /** `detectContentSubstitution`'s containment score for the matched (bubble, block) pair. `null`
+   * when there was no bubble to score (a `"block-fallback"` with no bubble, or a `"dropped"` bubble
+   * that matched no block at all). */
+  fidelityScore: number | null;
+}
+
+/**
+ * Reconcile chilltext's returned bubbles against the blank-line blocks of the pre-chill reply —
+ * the guard against BOTH shapes of the 2026-08-21 incident (channel 1520986792373911622, plus a
+ * third occurrence found on retroactive analysis, 2026-08-19T05:12:08.718Z):
+ *
+ *   - INJECTION: chilltext returns a surplus bubble with nothing behind it — more bubbles than the
+ *     reply had blocks, and the extra one is fabricated persona text. That bubble is dropped
+ *     outright, never posted; it is never a candidate for the delivery at all, unlike every other
+ *     guard in this file which falls back to something truthful.
+ *   - SUBSTITUTION: the count lines up, but a bubble's content has nothing to do with the block it
+ *     was supposedly rewritten from. That bubble is replaced with the block, verbatim — same
+ *     fail-open shape as `detectEchoedInput`'s whole-bubble fallback.
+ *
+ * Both are decided by ONE monotonic walk over the bubbles, advancing a block cursor only when the
+ * bubble IN HAND relates better to a LATER block than to the current one. That "only when
+ * justified" rule is what keeps this safe against chilltext's ordinary, harmless re-chunking: one
+ * block legitimately split into several bubbles just matches the same block repeatedly (the cursor
+ * never advances on its own), and several blocks merged into fewer bubbles advances the cursor
+ * exactly as many times as the bubbles justify — it never speculatively skips ahead. A block the
+ * walk never lands a bubble on (content genuinely dropped, not merged) falls back to posting that
+ * block verbatim, in its correct order — a lost block is a defect same as a fabricated one, so this
+ * never lets one disappear silently.
+ *
+ * Returns every entry in original-bubble order — matched bubbles, block-only fallbacks, and
+ * dropped bubbles, interleaved as they actually occurred — so a caller can both post
+ * (`kind !== "dropped"`) and log (every entry) from one pass.
+ */
+function reconcileBubblesWithBlocks(blocks: string[], bubbles: string[]): ReconciledEntry[] {
+  interface RawMatch {
+    bubble: string;
+    sourceIndex: number;
+    blockIndex: number | null;
+    score: number | null;
+  }
+  // A bubble with no content words at all (a bare "ok") has nothing to score — treat it as a
+  // perfect fit either way, so it never drives the cursor by itself.
+  const matchScore = (bubble: string, block: string) => detectContentSubstitution(bubble, block).score ?? 1;
+
+  const raw: RawMatch[] = [];
+  let bi = 0;
+  bubbles.forEach((bubble, sourceIndex) => {
+    // Advance the block cursor only when this bubble fits the NEXT block strictly better than the
+    // current one — a genuine comparison, not just "current fails a threshold" (two consecutive
+    // blocks that happen to share a quoted phrase can both clear the threshold; picking whichever
+    // fits better is what keeps that from mis-binding a bubble to the wrong one).
+    while (bi < blocks.length - 1 && matchScore(bubble, blocks[bi + 1]!) > matchScore(bubble, blocks[bi]!)) {
+      bi++;
+    }
+    const check = bi < blocks.length ? detectContentSubstitution(bubble, blocks[bi]!) : { unrelated: true, score: null };
+    if (bi < blocks.length && !check.unrelated) {
+      raw.push({ bubble, sourceIndex, blockIndex: bi, score: check.score });
+    } else {
+      raw.push({ bubble, sourceIndex, blockIndex: null, score: null });
+    }
+  });
+
+  const entries: ReconciledEntry[] = [];
+  let rawPtr = 0;
+  const flushDropped = () => {
+    while (rawPtr < raw.length && raw[rawPtr]!.blockIndex === null) {
+      const r = raw[rawPtr]!;
+      entries.push({ kind: "dropped", text: r.bubble, rewritten: r.bubble, sourceIndex: r.sourceIndex, fidelityScore: null });
+      rawPtr++;
+    }
+  };
+  for (let k = 0; k < blocks.length; k++) {
+    flushDropped();
+    let matchedAny = false;
+    while (rawPtr < raw.length && raw[rawPtr]!.blockIndex === k) {
+      const r = raw[rawPtr]!;
+      entries.push({ kind: "bubble", text: r.bubble, rewritten: r.bubble, sourceIndex: r.sourceIndex, fidelityScore: r.score });
+      matchedAny = true;
+      rawPtr++;
+    }
+    if (!matchedAny) {
+      entries.push({ kind: "block-fallback", text: blocks[k]!, rewritten: null, sourceIndex: null, fidelityScore: null });
+    }
+  }
+  flushDropped();
+  return entries;
 }
 
 export interface DeliverChilledOptions {
@@ -251,22 +364,59 @@ export async function deliverChilled(
   // `postOpts.pingUserIds` back to a real `<@id>` in the FIRST bubble (the only one the gateway
   // allow-lists), regardless of what the model returned. Runs AFTER the echo guard so it still
   // lands the ping correctly even when the first bubble was just replaced with the original text.
-  const messages = enforceMentions(echoChecked, postOpts?.pingUserIds ?? []);
+  const mentionRepaired = enforceMentions(echoChecked, postOpts?.pingUserIds ?? []);
+
+  // The last guard: content substitution/injection (2026-08-21). Neither of the checks above
+  // catches a bubble that just isn't a rewrite of anything in the reply at all — `input`-echo and
+  // prompt-scaffolding are both checks against a DIFFERENT text, and a fabricated bubble can score
+  // zero on both (the real incident did) while still not being caught. `single` forces exactly one
+  // message for the caller (the early-ack seam) — never let a fallback split it into more.
+  const blocks = single ? [text] : splitIntoBlocks(text);
+  const reconciled = reconcileBubblesWithBlocks(blocks, mentionRepaired);
+  for (const entry of reconciled) {
+    if (entry.kind === "dropped") {
+      logger?.warn(
+        "chilltext returned a surplus bubble unrelated to any block of the reply — dropping it, never posting fabricated content",
+        { bubble: truncateForLog(entry.text) },
+      );
+    } else if (entry.kind === "block-fallback" && entry.rewritten === null) {
+      logger?.warn("no chilltext bubble corresponded to this block of the reply — falling back to posting it verbatim", {
+        block: truncateForLog(entry.text),
+      });
+    } else if (entry.kind === "block-fallback") {
+      logger?.warn("chilltext bubble is unrelated to the block it was rewritten from — falling back to the original block", {
+        fidelityScore: entry.fidelityScore,
+        bubble: truncateForLog(entry.rewritten ?? ""),
+        block: truncateForLog(entry.text),
+      });
+    }
+  }
+  const messages = reconciled.filter((e) => e.kind !== "dropped").map((e) => e.text);
 
   logTransform({
     outcome: "ok",
     durationMs: transformDurationMs,
-    bubbles: result.messages.map((rewritten, i) => ({
-      rewritten,
-      posted: messages[i]!,
-      echoFallback: echoScores[i]!.echoed,
-      echoContentScore: echoScores[i]!.contentScore,
-      echoFullScore: echoScores[i]!.fullScore,
-      ...(echoScores[i]!.repaired ? { echoRepaired: true } : {}),
-      ...(promptLeakScores[i]!.leaked
-        ? { promptLeak: true, promptLeakSignals: promptLeakScores[i]!.signals, promptTextEcho: promptLeakScores[i]!.textEcho }
-        : {}),
-    })),
+    bubbles: reconciled.map((entry) => {
+      const i = entry.sourceIndex;
+      const echo = i !== null ? echoScores[i]! : NOT_CHECKED;
+      const leak = i !== null ? promptLeakScores[i]! : NO_PROMPT_LEAK;
+      return {
+        // The RAW bubble chilltext returned, before the echo/prompt guards touched it — same
+        // convention `rewritten` has always had here. `entry.rewritten` is the POST-guard text
+        // (what the fidelity check actually scored), which can differ from this when an earlier
+        // guard already repaired the bubble.
+        rewritten: i !== null ? result.messages[i]! : null,
+        posted: entry.kind === "dropped" ? null : entry.text,
+        echoFallback: echo.echoed,
+        echoContentScore: echo.contentScore,
+        echoFullScore: echo.fullScore,
+        ...(echo.repaired ? { echoRepaired: true } : {}),
+        ...(leak.leaked ? { promptLeak: true, promptLeakSignals: leak.signals, promptTextEcho: leak.textEcho } : {}),
+        fidelityScore: entry.fidelityScore,
+        ...(entry.kind === "block-fallback" ? { fidelityFallback: true } : {}),
+        ...(entry.kind === "dropped" ? { fidelityDropped: true } : {}),
+      };
+    }),
   });
 
   let firstId: string | null = null;

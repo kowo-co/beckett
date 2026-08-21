@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { detectEchoedInput, detectPromptScaffolding } from "./echo-guard.ts";
+import { detectContentSubstitution, detectEchoedInput, detectPromptScaffolding } from "./echo-guard.ts";
 
 describe("detectEchoedInput — the 2026-08-18 incident", () => {
   // Channel 1520986792373911622, message 1539063244914950257. The user's triggering message
@@ -205,6 +205,64 @@ describe("detectPromptScaffolding — the 2026-08-20 incident", () => {
     const result = detectPromptScaffolding(paraphrase);
     expect(result.leaked).toBe(true);
     expect(result.signals.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("detectContentSubstitution — the 2026-08-21 incident", () => {
+  // Channel 1520986792373911622, 04:57:58.516Z: chilltext discarded the first block's content
+  // entirely and returned a verbatim `persona.md` sample line instead. The second bubble was a
+  // faithful rewrite (verbatim, in this case) of the second block.
+  const BLOCK_1 =
+    "classifier's actually going now — comedy counts as a reason to speak, serious rooms stay locked down";
+  const BLOCK_2 = "also correcting myself from earlier: the image fix IS live, has been since 23:49. i said it wasn't";
+  const FABRICATED_BUBBLE = "yeah that's broken. i know why. gimme 10";
+
+  test("the fabricated bubble is unrelated to the block it replaced", () => {
+    const result = detectContentSubstitution(FABRICATED_BUBBLE, BLOCK_1);
+    expect(result.unrelated).toBe(true);
+    expect(result.score).toBe(0);
+  });
+
+  test("the fabricated bubble is also unrelated to the OTHER block — it isn't just misaligned", () => {
+    expect(detectContentSubstitution(FABRICATED_BUBBLE, BLOCK_2).unrelated).toBe(true);
+  });
+
+  test("the faithful second bubble scores maximal containment against its own block", () => {
+    const result = detectContentSubstitution(BLOCK_2, BLOCK_2);
+    expect(result.unrelated).toBe(false);
+    expect(result.score).toBe(1);
+  });
+
+  // A third, previously undetected occurrence found on retroactive analysis of
+  // `~/.beckett/chilltext-transforms.jsonl` (2026-08-19T05:12:08.718Z) — same shape, different
+  // persona sample line.
+  test("a second confirmed real substitution also scores unrelated", () => {
+    const block = "last time we rushed this we shipped a green test suite and a browser that couldn't open. you'll get it in a minute";
+    const fabricated = "yeah, that's broken. i know why. gimme 10";
+    expect(detectContentSubstitution(fabricated, block).unrelated).toBe(true);
+  });
+});
+
+describe("detectContentSubstitution — legitimate rewrites, including fragments of a longer block", () => {
+  test("a faithful paraphrase, heavily reworded, still scores related", () => {
+    const block =
+      "the giveaway form got filled and submitted, page came back with \"Unable to accept this submission.\" and nothing else";
+    const rewrite = "the giveaway form got filled and submitted, then it just came back with \"unable to accept this submission\"";
+    expect(detectContentSubstitution(rewrite, block).unrelated).toBe(false);
+  });
+
+  test("a bubble covering only a FRAGMENT of a much longer block is not flagged — chilltext splitting one paragraph into several bubbles is normal, not drift", () => {
+    const longBlock =
+      "grug get email. grug read email. grug not happy. grug write code because grug like write code. " +
+      "grug not want robot go find people for grug. grug ask with much respect: no send more email.";
+    const fragment = "grug get email. grug read email. grug not happy.";
+    expect(detectContentSubstitution(fragment, longBlock).unrelated).toBe(false);
+  });
+
+  test("a bare acknowledgment with no content words at all is never flagged", () => {
+    const result = detectContentSubstitution("ok", "the deploy finished and everything looks green");
+    expect(result.unrelated).toBe(false);
+    expect(result.score).toBeNull();
   });
 });
 

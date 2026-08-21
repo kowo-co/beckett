@@ -40,10 +40,14 @@ type ChillTransformOutcome = "ok" | "bypassed" | "fallback" | "threw";
 
 /** One rewritten bubble's before/after/echo-guard verdict. */
 interface ChillTransformBubbleRecord {
-  /** Exactly what chilltext returned for this bubble, before the echo/mention guards touched it. */
-  rewritten: string;
-  /** What was actually posted, after the per-bubble echo guard and mention repair. */
-  posted: string;
+  /** Exactly what chilltext returned for this bubble, before the echo/mention/fidelity guards
+   * touched it. `null` for a block of the reply that got no bubble from chilltext at all — see
+   * `fidelityFallback`. */
+  rewritten: string | null;
+  /** What was actually posted, after every guard ran. `null` for a bubble the fidelity guard
+   * dropped outright as fabricated surplus — see `fidelityDropped`; that bubble was NEVER posted,
+   * unlike every other fallback here which always posts something truthful. */
+  posted: string | null;
   /** True when the echo guard flagged this bubble as echoing `input` — whether it was repaired
    * (see `echoRepaired`) or replaced wholesale with the original `agentOutput`. */
   echoFallback: boolean;
@@ -65,6 +69,19 @@ interface ChillTransformBubbleRecord {
   /** True when the trip was (also) a near-copy of the `system` prompt this call sent, as opposed
    * to only the structural shape check. Present only alongside `promptLeak: true`. */
   promptTextEcho?: boolean;
+  /** `detectContentSubstitution`'s containment score for this bubble against the block of the
+   * reply it was matched to (the 2026-08-21 incident — see `reconcileBubblesWithBlocks` in
+   * `chill-gate.ts`). `null` when there was no bubble to score (a `block-fallback` entry with no
+   * bubble at all, or a `dropped` bubble that matched no block whatsoever). */
+  fidelityScore?: number | null;
+  /** True when this position posted the ORIGINAL block instead of chilltext's rewrite — either the
+   * matched bubble failed the fidelity check (substitution), or no bubble matched this block at
+   * all (`rewritten` is `null`). Omitted (not `false`) when the rewrite was used as-is. */
+  fidelityFallback?: boolean;
+  /** True when this was a chilltext bubble discarded outright as fabricated surplus — unrelated to
+   * every block of the reply, structurally in excess of what chilltext should have returned. Never
+   * posted; `posted` is `null`. Omitted (not `false`) otherwise. */
+  fidelityDropped?: boolean;
 }
 
 export interface ChillTransformLogRecord {
@@ -153,8 +170,16 @@ function formatChillTransformRecord(record: ChillTransformLogRecord): string {
     const promptLeakNote = bubble.promptLeak
       ? ` [PROMPT LEAK signals=${(bubble.promptLeakSignals ?? []).join(",") || "(none)"}${bubble.promptTextEcho ? " textEcho" : ""}]`
       : "";
-    lines.push(`  bubble ${i + 1} rewritten: ${oneLine(bubble.rewritten)}`);
-    lines.push(`  bubble ${i + 1} posted:    ${oneLine(bubble.posted)}${echoNote}${promptLeakNote}`);
+    const fidelityScoreText = typeof bubble.fidelityScore === "number" ? ` fidelity=${bubble.fidelityScore.toFixed(2)}` : "";
+    const fidelityNote = bubble.fidelityDropped
+      ? ` [FIDELITY DROPPED — surplus bubble, unrelated to any block${fidelityScoreText}]`
+      : bubble.fidelityFallback
+        ? ` [FIDELITY FALLBACK — block posted verbatim${fidelityScoreText}]`
+        : "";
+    lines.push(`  bubble ${i + 1} rewritten: ${bubble.rewritten === null ? "(no bubble — block posted verbatim)" : oneLine(bubble.rewritten)}`);
+    lines.push(
+      `  bubble ${i + 1} posted:    ${bubble.posted === null ? "(dropped — never posted)" : oneLine(bubble.posted)}${echoNote}${promptLeakNote}${fidelityNote}`,
+    );
   }
   return lines.join("\n");
 }

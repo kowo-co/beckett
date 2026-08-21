@@ -316,7 +316,7 @@ test("chilltext enabled: the auto-posted reply is chilled into bubbles — first
   try {
     const { concierge, posts } = harness({
       replyViaCli: false,
-      turnText: "found it: X lives in foo.ts, wired up exactly the way you described in the mention",
+      turnText: "hey\n\nfound it\n\ncheck foo.ts",
       config: chillConfig({ enabled: true }),
     });
     await concierge.onMessage(mention());
