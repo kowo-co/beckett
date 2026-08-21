@@ -204,6 +204,28 @@ test("candidate reply auto-posts plainly (no native reply) and frames the transc
   expect(frame).not.toContain("Do not deploy any work yet");
 });
 
+test("the candidate frame treats humor and riffing as a wanted contribution, not merely a tolerated exception", async () => {
+  // ro asked Beckett to be more permissive of funny/comedic interjections in ambient banter. The
+  // frame must say humor is wanted (not just "can qualify" buried after other options), and must
+  // distinguish a generic quip (still noise) from a specific, funny one (welcome) instead of
+  // reading as a blanket ban on jokes.
+  const h = harness({ reply: "PASS" });
+  const clock = clockOf(h);
+
+  await h.concierge.onMessage(msg("m1", "keyboard mash lol asdkfj", 0));
+  clock.advance(2_000);
+  await drain();
+
+  const frame = h.asks[0] as string;
+  expect(frame).toContain("humor, riffing, and comedic interjections");
+  expect(frame).toContain("wanted, not merely tolerated");
+  expect(frame).toContain("genuinely funny and on-point is not \"generic\"");
+  // The guards that matter more than comedy still hold, verbatim.
+  expect(frame).toContain("someone is upset");
+  expect(frame).toContain("a human already answered");
+  expect(frame).toContain("the plan is settled");
+});
+
 test("the cold candidate frame carries the classifier's addressee read + the decline backstop", async () => {
   // The `yes` fixture reads addressee:"group"; the frame must surface that signal AND tell the
   // concierge it can `beckett discord decline` before writing anything (OPS-101 / OPS-99 §3.1,§5.3).
