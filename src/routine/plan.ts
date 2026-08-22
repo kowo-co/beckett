@@ -49,8 +49,9 @@ import { X_CREDS_ENTRY } from "./builtins.ts";
  *   - the task text references the account handle ({@link X_SOCIAL_ACCOUNT}), says "tweet" in any
  *     form, says "twitter" bare (not just `twitter.com`), or uses "x" as a standalone word — which
  *     also catches `x.com` and phrasing like "post it to X" that names no domain at all. A bare `x`
- *     is deliberately over-inclusive (a non-social browser task that happens to say "x-ray" or "10x"
- *     gets refused too) because the cost of a false refusal — rephrase the routine — is far lower
+ *     is deliberately over-inclusive (a non-social browser task that happens to say "x-ray" or
+ *     "x axis" gets refused too — note "10x" does NOT match: `0` and `x` are both word characters,
+ *     so there is no word boundary between them) because the cost of a false refusal — rephrase the routine — is far lower
  *     than the cost of a false negative — another ungrounded post reaching X.
  * A `browser` routine that matches is refused at dispatch (`dispatchPlan` in
  * `../capability/modules/routines.ts`) rather than silently forced through a compose gate it was
