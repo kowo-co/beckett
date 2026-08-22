@@ -112,6 +112,71 @@ function buildGh(config: Config, dir: string | undefined): GitHubCli {
   });
 }
 
+/** Resolve `ref` to a commit sha inside `dir`, or throw a `beckett gh push`-flavored error. */
+function resolveLocalCommit(dir: string, ref: string): string {
+  const r = Bun.spawnSync(["git", "-C", dir, "rev-parse", "--verify", `${ref}^{commit}`]);
+  if (!r.success) {
+    throw new Error(
+      `beckett gh push: could not resolve --ref ${JSON.stringify(ref)} to a commit in ${dir}: ` +
+        (r.stderr.toString().trim() || "not a valid ref"),
+    );
+  }
+  return r.stdout.toString().trim();
+}
+
+/** The branch `dir`'s checkout currently sits on, or `null` for a detached HEAD. */
+function currentLocalBranch(dir: string): string | null {
+  const r = Bun.spawnSync(["git", "-C", dir, "symbolic-ref", "--short", "-q", "HEAD"]);
+  if (!r.success) return null;
+  const name = r.stdout.toString().trim();
+  return name || null;
+}
+
+/**
+ * `beckett gh push --branch`'s core (2026-08-22 fix): a push that reports success without moving
+ * the remote branch to the intended commit cost a courier run three rework cycles — the CLI ran
+ * `--repo <o/n> --branch <remoteBranch>` from the daemon checkout (defaulting `--ref` to `HEAD`
+ * and `--dir` to `cwd`) while the run's actual commits sat in an unrelated worktree, uploaded the
+ * WRONG commit under the run's branch name, and printed `{ pushed: true }` with nothing to
+ * contradict it.
+ *
+ * Two changes close that hole:
+ *  - GUARD: when `--ref` is left to its HEAD default, the checkout in `dir` must already be ON the
+ *    named `--branch` — otherwise this refuses rather than guess. An explicit `--ref` (the courier
+ *    shape: `--dir <worktree> --ref <branch> --branch <branch>`) always bypasses the guard, since
+ *    the caller has said exactly what they mean. `--tag` publishing never reaches this function.
+ *  - VERIFY: after pushing, the remote branch is read back and compared to the sha resolved
+ *    locally BEFORE the push ran. A mismatch — nothing moved, or it moved to the wrong place — is
+ *    an error, not a success.
+ */
+export async function pushBranchVerified(
+  gh: GitHubCli,
+  opts: { repo: string; branch: string; dir: string; ref?: string },
+): Promise<{ pushed: true; repo: string; branch: string; ref: string; sha: string }> {
+  const ref = opts.ref ?? "HEAD";
+  const sha = resolveLocalCommit(opts.dir, ref);
+  if (opts.ref === undefined) {
+    const current = currentLocalBranch(opts.dir);
+    if (current !== opts.branch) {
+      throw new Error(
+        `beckett gh push: --ref was not given, so it defaults to HEAD — but the checkout in ${opts.dir} is on ` +
+          `${current ? `branch '${current}'` : "a detached HEAD"}, not '${opts.branch}'. Pushing HEAD there would ` +
+          `silently upload the wrong commit under that branch name. Pass --ref ${opts.branch} (or the local ` +
+          `ref/sha you actually mean) to push explicitly.`,
+      );
+    }
+  }
+  await gh.pushBranch(opts.repo, ref, opts.branch);
+  const remoteSha = await gh.remoteBranchSha(opts.repo, opts.branch);
+  if (remoteSha !== sha) {
+    throw new Error(
+      `beckett gh push: pushed ${ref} (${sha}) toward ${opts.repo}:${opts.branch}, but the remote branch now reads ` +
+        `${remoteSha ?? "(no such branch)"} — the push did not land the intended commit.`,
+    );
+  }
+  return { pushed: true, repo: opts.repo, branch: opts.branch, ref, sha };
+}
+
 /**
  * Best-effort: tell the running daemon to watch a just-opened PR (#31). The `gh` surface is a
  * stateless subprocess with no handle on the in-daemon poller, so it forwards over the control bus
@@ -414,8 +479,14 @@ export const createGithubExtension: ExtensionFactory = ({ config }): Extension =
         out({ pushed: true, repo: String(flags.repo), tag });
       }
       if (!flags.repo || !flags.branch) fail("usage: beckett gh push --repo <owner/name> --branch <remoteBranch> [--ref <localRef>] [--dir <d>]");
-      await gh.pushBranch(String(flags.repo), flags.ref ? String(flags.ref) : "HEAD", String(flags.branch));
-      out({ pushed: true, repo: String(flags.repo), branch: String(flags.branch) });
+      out(
+        await pushBranchVerified(gh, {
+          repo: String(flags.repo),
+          branch: String(flags.branch),
+          dir: flags.dir ? String(flags.dir) : process.cwd(),
+          ref: flags.ref !== undefined ? String(flags.ref) : undefined,
+        }),
+      );
     }
 
     // `beckett gh land` — get a branch's commits ONTO a protected base the only way protection
