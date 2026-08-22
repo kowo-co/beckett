@@ -134,6 +134,28 @@ function parseExportList(body: string): string[] {
   return names;
 }
 
+/**
+ * Parse an import specifier list, e.g. `import { a, b as c } from "./x.ts"`. Unlike
+ * {@link parseExportList} (which resolves "a as c" to the DECLARED/public name "c"), an import
+ * alias renames the SOURCE export locally — "b as c" imports `b` from the target module, so the
+ * reference recorded against the target must be "b", not the caller's local alias "c".
+ */
+function parseImportList(body: string): string[] {
+  const names: string[] = [];
+  for (const rawPart of body.split(",")) {
+    const part = rawPart.trim().replace(/^type\s+/, "");
+    if (!part) continue;
+    const asMatch = part.match(/^([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/);
+    if (asMatch) {
+      names.push(asMatch[1]!); // the source module's export name, not the local alias
+    } else {
+      const m = part.match(/^([A-Za-z_$][\w$]*)$/);
+      if (m) names.push(m[1]!);
+    }
+  }
+  return names;
+}
+
 function resolveSpecifier(fromAbsFile: string, specifier: string): string | null {
   if (!specifier.startsWith(".")) return null; // bare specifier, skipped
   const base = dirname(fromAbsFile);
@@ -231,7 +253,7 @@ function scanImportersInFile(absFile: string, source: string): ImportRef[] {
   for (const m of source.matchAll(RE_IMPORT_NAMED)) {
     const target = resolveSpecifier(absFile, m[3]!);
     if (target && target !== absFile) {
-      for (const name of parseExportList(m[2]!)) {
+      for (const name of parseImportList(m[2]!)) {
         refs.push({ targetAbsFile: target, symbol: name });
       }
     }
@@ -261,7 +283,7 @@ function scanImportersInFile(absFile: string, source: string): ImportRef[] {
   for (const m of source.matchAll(RE_DYNAMIC_DESTRUCTURE)) {
     const target = resolveSpecifier(absFile, m[2]!);
     if (target && target !== absFile) {
-      for (const name of parseExportList(m[1]!)) {
+      for (const name of parseImportList(m[1]!)) {
         refs.push({ targetAbsFile: target, symbol: name });
       }
     }

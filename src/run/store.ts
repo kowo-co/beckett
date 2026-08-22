@@ -433,7 +433,3 @@ function normalizeTitle(raw: string): string {
   const title = raw.replace(/\s+/g, " ").trim();
   return title || "untitled run";
 }
-
-export function createRunStore(path: string, opts?: RunStoreOptions): RunStore {
-  return new RunStore(path, opts);
-}
