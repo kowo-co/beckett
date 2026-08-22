@@ -779,6 +779,165 @@ test("a non-social-media agent's input is never touched by the grounding step", 
   expect(seenInputs).toEqual(["do a thing"]);
 });
 
+// ── the grounding-verification gate (real-sources ticket, Half 2: enforce, don't just ask) ──────
+
+/** The exact fabricated post from the 2026-08-22T01:34 PT incident — Beckett has no AWS account. */
+const AWS_LOCKOUT_POST =
+  'aws locked me out for twenty minutes today over "unusual activity" right after i rotated an ssh key i\'ve had since 2021. the unusual activity was rotating the key';
+
+test("the AWS-lockout post, checked against sources that never mention AWS, is REFUSED — nothing reaches the browser lane", async () => {
+  const posted: string[] = [];
+  const verifyCalls: Array<{ postText: string; sourcesBlock: string }> = [];
+  const notified: Array<{ channelId: string; text: string }> = [];
+  const dispatcher = await dispatcherOf({
+    browserAgent: () => ({ async run(task: string) { posted.push(task); return undefined as never; } }) as never,
+    agentRegistry: () => ({ get: () => ({ id: "social-media" }) }) as never,
+    agentRunner: () => ({
+      run: async () => ({ state: "done", output: `POST: ${AWS_LOCKOUT_POST}` }),
+    }) as never,
+    gatherGrounding: async () => "SOURCES FOR THIS RUN — real tech news, fetched this run — (nothing about AWS)",
+    verifyGrounding: async (postText, sourcesBlock) => {
+      verifyCalls.push({ postText, sourcesBlock });
+      return { claims: [{ claim: postText, tracesToSource: false, sourceLine: "" }], reason: "no AWS entry in sources", grounded: false };
+    },
+    notifyOrigin: async (channelId, text) => {
+      notified.push({ channelId, text });
+    },
+  });
+
+  await dispatcher.dispatch(agentPlanFor("social-media", "Compose today's shitpost.") as never, {} as never);
+
+  // NEVER dispatched to the browser lane — refused twice (the one allowed retry also refused,
+  // since the fake agent keeps authoring the same unfounded claim).
+  expect(posted).toEqual([]);
+  expect(verifyCalls.length).toBe(2); // the original attempt + the one allowed retry
+  for (const call of verifyCalls) {
+    expect(call.postText).toBe(AWS_LOCKOUT_POST);
+    expect(call.sourcesBlock).toContain("nothing about AWS");
+  }
+  // Refusal is a visible outcome, not a silent drop — logged AND reported to the origin channel.
+  expect(notified.length).toBe(1);
+  expect(notified[0]!.channelId).toBe("chan");
+  expect(notified[0]!.text).toContain(AWS_LOCKOUT_POST);
+  expect(notified[0]!.text.toLowerCase()).toContain("refused");
+});
+
+test("a post whose claim traces to a real source line PASSES and reaches the browser lane", async () => {
+  const posted: string[] = [];
+  const dispatcher = await dispatcherOf({
+    browserAgent: () => ({ async run(task: string) { posted.push(task); return undefined as never; } }) as never,
+    agentRegistry: () => ({ get: () => ({ id: "social-media" }) }) as never,
+    agentRunner: () => ({
+      run: async () => ({
+        state: "done",
+        output: "POST: crashed and came back today and nobody even noticed. humbling.",
+      }),
+    }) as never,
+    gatherGrounding: async () =>
+      "SOURCES FOR THIS RUN\n\n— Beckett's own real history —\n- [uptime ledger, 2026-08-21T09:00:00Z] the daemon restarted unclean",
+    verifyGrounding: async (postText) => ({
+      claims: [{ claim: postText, tracesToSource: true, sourceLine: "uptime ledger, 2026-08-21T09:00:00Z" }],
+      reason: "traced to the uptime ledger",
+      grounded: true,
+    }),
+  });
+
+  await dispatcher.dispatch(agentPlanFor("social-media", "Compose today's shitpost.") as never, {} as never);
+
+  expect(posted.length).toBe(1);
+  expect(posted[0]).toContain("crashed and came back");
+});
+
+test("a refused first draft that's corrected on retry publishes the CORRECTED post, not the refused one", async () => {
+  const posted: string[] = [];
+  const authored: string[] = [];
+  const dispatcher = await dispatcherOf({
+    browserAgent: () => ({ async run(task: string) { posted.push(task); return undefined as never; } }) as never,
+    agentRegistry: () => ({ get: () => ({ id: "social-media" }) }) as never,
+    agentRunner: () => ({
+      run: async (_def: unknown, input: string) => {
+        authored.push(input);
+        // First call authors the fabrication; the retry (its input carries the refusal reason)
+        // authors something else entirely.
+        const isRetry = input.includes("REFUSED by the grounding-verification gate");
+        return { state: "done", output: isRetry ? "POST: a flat bad opinion about tabs vs spaces. that's it." : `POST: ${AWS_LOCKOUT_POST}` };
+      },
+    }) as never,
+    gatherGrounding: async () => "SOURCES FOR THIS RUN — (nothing about AWS)",
+    verifyGrounding: async (postText) =>
+      postText === AWS_LOCKOUT_POST
+        ? { claims: [{ claim: postText, tracesToSource: false }], reason: "no AWS entry", grounded: false }
+        : { claims: [], reason: "pure opinion, nothing to trace", grounded: true },
+  });
+
+  await dispatcher.dispatch(agentPlanFor("social-media", "Compose today's shitpost.") as never, {} as never);
+
+  expect(authored.length).toBe(2);
+  expect(posted.length).toBe(1);
+  expect(posted[0]).toContain("tabs vs spaces");
+  expect(posted[0]).not.toContain("aws locked me out");
+});
+
+test("an unwired verifier degrades to an open pass (test-harness safety) — production always wires the real gate", async () => {
+  const posted: string[] = [];
+  const dispatcher = await dispatcherOf({
+    browserAgent: () => ({ async run(task: string) { posted.push(task); return undefined as never; } }) as never,
+    agentRegistry: () => ({ get: () => ({ id: "social-media" }) }) as never,
+    agentRunner: () => ({ run: async () => ({ state: "done", output: "POST: fine" }) }) as never,
+    gatherGrounding: async () => "SOURCES FOR THIS RUN — fake test sources",
+    // No verifyGrounding provided.
+  });
+
+  await dispatcher.dispatch(agentPlanFor("social-media", "Compose today's shitpost.") as never, {} as never);
+  expect(posted.length).toBe(1);
+});
+
+test("a TIMELINE REPLY ROUND fire never calls the grounding-verification gate — it skips the compose gate entirely", async () => {
+  const posted: string[] = [];
+  let verifyCalls = 0;
+  const dispatcher = await dispatcherOf({
+    browserAgent: () => ({ async run(task: string) { posted.push(task); return undefined as never; } }) as never,
+    agentRegistry: () => ({ get: () => ({ id: "social-media" }) }) as never,
+    agentRunner: () => ({ run: async () => ({ state: "done", output: "go read the timeline" }) }) as never,
+    gatherGrounding: async () => "SOURCES FOR THIS RUN — should never be fetched here",
+    verifyGrounding: async (postText, sourcesBlock) => {
+      verifyCalls++;
+      return { claims: [], reason: "should never be called", grounded: true };
+    },
+  });
+
+  await dispatcher.dispatch(
+    agentPlanFor("social-media", "TIMELINE REPLY ROUND: open the home timeline...") as never,
+    {} as never,
+  );
+
+  expect(verifyCalls).toBe(0);
+  expect(posted.length).toBe(1); // unaffected — the fire still dispatches normally
+});
+
+test("a watch-lane EVENT TRIGGER fire never calls the grounding-verification gate — it skips the compose gate entirely", async () => {
+  const posted: string[] = [];
+  let verifyCalls = 0;
+  const dispatcher = await dispatcherOf({
+    browserAgent: () => ({ async run(task: string) { posted.push(task); return undefined as never; } }) as never,
+    agentRegistry: () => ({ get: () => ({ id: "social-media" }) }) as never,
+    agentRunner: () => ({ run: async () => ({ state: "done", output: "POST: reacting to the event" }) }) as never,
+    gatherGrounding: async () => "SOURCES FOR THIS RUN — should never be fetched here",
+    verifyGrounding: async () => {
+      verifyCalls++;
+      return { claims: [], reason: "should never be called", grounded: true };
+    },
+  });
+
+  await dispatcher.dispatch(
+    agentPlanFor("social-media", "EVENT TRIGGER (not a scheduled lane): the model-news feed...") as never,
+    {} as never,
+  );
+
+  expect(verifyCalls).toBe(0);
+  expect(posted.length).toBe(1); // unaffected — the fire still dispatches normally
+});
+
 test("a self fire wakes the concierge and never resolves the browser lane (issue #26)", async () => {
   const woke: Array<{ routineId: string; prompt: string; channelId: string }> = [];
   const dispatcher = await dispatcherOf({

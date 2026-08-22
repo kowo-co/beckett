@@ -89,6 +89,7 @@ import { createQuickExtension } from "../capability/modules/quick.ts";
 import { createRoutinesExtension } from "../capability/modules/routines.ts";
 // The social-media agent's mandatory grounding step (real-sources ticket, Half 1).
 import { createDefaultGrounding } from "../routine/social-grounding.ts";
+import { createGroundingVerifier } from "../routine/social-verify.ts";
 // Phase 6 memory wiring (the LAST organ): same additive-import posture.
 import { createMemoryExtension } from "../capability/modules/memory.ts";
 
@@ -586,6 +587,11 @@ async function boot(): Promise<BootedSystem> {
     agentRegistry: () => agentRegistry,
     agentRunner: () => agentRunner,
     gatherGrounding: createDefaultGrounding(paths),
+    // The code-enforced grounding-verification gate (real-sources ticket, Half 2): a separate,
+    // cheap sonnet-class model call that checks a composed post against the exact SOURCES block
+    // it was handed, run between compose and the browser lane. `logger` is scoped so a refusal is
+    // findable under its own component.
+    verifyGrounding: createGroundingVerifier({ model: "claude-sonnet-5", logger: logger.child("social-verify") }),
     // Resolve the origin channel/requester at fire time from env so no id is baked into a
     // routine definition (BECKETT_ROUTINE_CHANNEL_ID / DISCORD_OWNER_ID).
     defaultOrigin: () => ({

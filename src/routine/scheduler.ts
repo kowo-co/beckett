@@ -27,8 +27,19 @@
 import type { Logger } from "../types.ts";
 import type { RoutineStore } from "./store.ts";
 import type { Routine } from "./types.ts";
-import { periodKey, rollFireTime } from "./schedule.ts";
+import { periodDateKey, periodKey, rollFireTime, windowBounds } from "./schedule.ts";
 import { buildDispatchPlan, type RoutineDispatchPlan } from "./plan.ts";
+
+/**
+ * At most this many LATE fires (a routine whose window has already fully elapsed, not merely a
+ * few ticks behind) may catch up in a single tick. A boot right after a long downtime otherwise
+ * evaluates every enabled routine in one pass, and every one whose window already passed today
+ * fires within the same second — the 2026-08-22T00:57 restart storm that fired three sibling
+ * `daily-x-shitpost` lanes together. A late routine that loses the race is NOT retried later this
+ * tick or a later one: {@link evaluate} marks its period spent right away, so it rolls cleanly to
+ * its next period (tomorrow, for a daily routine) instead of piling up.
+ */
+const LATE_CATCH_UP_BUDGET_PER_TICK = 1;
 
 /** Default tick cadence — 30s keeps the fired minute within half a minute of the chosen time. */
 export const ROUTINE_TICK_MS = 30_000;
@@ -73,7 +84,7 @@ export function startRoutineScheduler(deps: RoutineSchedulerDeps): RoutineSchedu
   const rng = deps.rng ?? Math.random;
   const interval = deps.intervalMs ?? ROUTINE_TICK_MS;
 
-  async function evaluate(routine: Routine): Promise<void> {
+  async function evaluate(routine: Routine, catchUpBudget: { remaining: number }): Promise<void> {
     if (!routine.enabled) return;
     // `watch` routines have no `schedule` — they poll on their own interval via a SEPARATE loop
     // ({@link ./watch.ts}'s `startWatchLoop`), not this humanized-period one. Nothing below this
@@ -107,6 +118,25 @@ export function startRoutineScheduler(deps: RoutineSchedulerDeps): RoutineSchedu
       return;
     }
 
+    // 4. The boot catch-up guard: a fire whose WINDOW has fully elapsed (not just its chosen
+    //    minute) is "late" — the daemon was down through it. At most
+    //    `LATE_CATCH_UP_BUDGET_PER_TICK` late routines may claim+dispatch per tick; any others
+    //    roll straight to their next period instead of storming in together.
+    const windowEnd = windowBounds(routine.schedule.window, periodDateKey(routine.schedule.cadence, key)).end;
+    const isLate = at.getTime() > windowEnd.getTime();
+    if (isLate) {
+      if (catchUpBudget.remaining <= 0) {
+        const skipped = { ...state, lastFiredPeriodKey: key };
+        await deps.store.setState(routine.id, skipped);
+        deps.logger.info(
+          "routine fire skipped: window already elapsed and this tick's catch-up budget is spent — rolling to the next period",
+          { id: routine.id, period: key, windowEnd: windowEnd.toISOString() },
+        );
+        return;
+      }
+      catchUpBudget.remaining -= 1;
+    }
+
     // Claim the period BEFORE dispatching so a crash mid-dispatch never double-fires.
     const claimed = { ...state, lastFiredPeriodKey: key, lastFiredAt: at.toISOString() };
     await deps.store.setState(routine.id, claimed);
@@ -127,9 +157,10 @@ export function startRoutineScheduler(deps: RoutineSchedulerDeps): RoutineSchedu
       deps.logger.warn("routine tick could not read the store", { error: String(err) });
       return;
     }
+    const catchUpBudget = { remaining: LATE_CATCH_UP_BUDGET_PER_TICK };
     for (const routine of routines) {
       try {
-        await evaluate(routine);
+        await evaluate(routine, catchUpBudget);
       } catch (err) {
         deps.logger.warn("routine evaluation failed", { id: routine.id, error: String(err) });
       }
