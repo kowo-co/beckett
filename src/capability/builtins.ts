@@ -425,28 +425,6 @@ export const configFragments = {
       // 0 (the default) falls back to `[budget] per_task_usd_cap`, so an install that already
       // tuned the task cap keeps exactly that behavior.
       budget_usd_per_run: z.number().min(0).default(0),
-      // The deploy receipt (progress cards, `src/progress/cards.ts`). Default ON.
-      cards: z.boolean().default(true),
-      // The live-progress-with-terminal card (`src/progress/live-card.ts`): a SIBLING of `cards`,
-      // its own switch so a boot with no live-progress channel configured (or that wants the
-      // quieter task/branch cards only) can turn it off without touching `cards`. Default ON.
-      live_progress_card: z.boolean().default(true),
-      // The live activity blurb on that card (`src/run/activity.ts`): "editing index.html" in
-      // place of the phase word while a worker runs. DERIVED from the run's own journal — no
-      // model, no network — and absent or stale it renders the card that shipped without it.
-      activity: z
-        .object({
-          enabled: z.boolean().default(true),
-          // OPTIONAL micro-model polish over the derived phrase. `off` (the default) is the whole
-          // feature: deterministic, free, and on the hot path. `cerebras` matches the ambient
-          // triage lane (a keyless box degrades to the `claude` CLI on its own).
-          provider: z.enum(["cerebras", "claude", "off"]).default("off"),
-          // Seconds between blurb refreshes for one run. Clamped to ≥5 at the call site — a
-          // shorter cadence is a card that repaints per tool call, which nobody can read.
-          throttle_secs: posInt.default(15),
-        })
-        .strict()
-        .default({}),
     })
     .strict()
     .default({}),

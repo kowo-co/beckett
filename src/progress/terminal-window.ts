@@ -1,12 +1,9 @@
 /**
- * Beckett — the live-progress card's terminal window (`src/progress/terminal-window.ts`)
+ * Beckett — the training progress card's terminal window (`src/progress/terminal-window.ts`)
  * =======================================================================================
- * {@link renderTerminalWindow} is the whole feature: a pure, deterministic function that turns a
- * run's raw ticket-journal lines (`./journal.ts`'s exact wire shape — the same lines
- * `../run/activity.ts#deriveActivity` reads) into a fixed-height monospace pane for a Discord
- * Components V2 card. No model, no network, no fs — the caller (`./live-card.ts`) supplies the
- * lines, sourced off the SAME journal the activity blurb and `beckett journal --tail` already
- * read. There is no second capture path and no tmux.
+ * {@link renderTerminalWindow} is the whole feature: a pure, deterministic function that turns
+ * raw log lines into a fixed-height monospace pane for a Discord Components V2 card. No model,
+ * no network, no fs — the caller (`./training-card.ts`) supplies the lines.
  *
  * Two shaping decisions:
  *   - **Fixed window, not a scrollbar.** Discord has no scrollable component; "scrolling" here
@@ -17,13 +14,13 @@
  *     cut to {@link TERMINAL_LINE_MAX_CHARS}.
  */
 import { redactSecrets } from "../discord/redact.ts";
-import { STAMP_PREFIX } from "../run/activity.ts";
+
+/** Leading ISO stamp on journal-shaped lines — stripped so the pane isn't 15 clocks. */
+const STAMP_PREFIX = /^\s*\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s*/;
 
 /**
- * Lines shown at once. Matches `../run/activity.ts#ACTIVITY_CONTEXT_LINES` — the same "enough to
- * see a rhythm, small enough nobody has to scroll Discord's own message view to read it" budget
- * that module already settled on for the same journal. At ~100 chars/line this renders as a
- * single-screen code block on both desktop and mobile Discord clients.
+ * Lines shown at once. Small enough nobody has to scroll Discord's own message view to read it.
+ * At ~100 chars/line this renders as a single-screen code block on both desktop and mobile Discord clients.
  */
 export const TERMINAL_WINDOW_LINES = 15;
 

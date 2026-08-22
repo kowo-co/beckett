@@ -31,11 +31,8 @@ import { log as rootLog } from "../log.ts";
 import type { Config, Harness, Logger } from "../types.ts";
 import { RunStore } from "../run/store.ts";
 import type { CiVerdict, RunState } from "../run/types.ts";
-import { createRunSupervisor, runProjectSlug, runSpecReader, type RunSupervisor } from "../run/supervisor.ts";
+import { createRunSupervisor, runProjectSlug, type RunSupervisor } from "../run/supervisor.ts";
 import { createStagesExtension, stageViewOf } from "../dispatch/stages.ts";
-import { createProgressCardService, shouldObserveRunCard, type ProgressCardService } from "../progress/cards.ts";
-import { createLiveProgressCardService, type LiveProgressCardService } from "../progress/live-card.ts";
-import { readJournalLines } from "../progress/journal.ts";
 import { createTrainingProgressCardService, trainingProgressCardsPath, type TrainingProgressCardService } from "../progress/training-card.ts";
 import { defaultFileTailProgressSources } from "../progress/training-sources.ts";
 import { createGitHubPrPoller, type GitHubPrPoller } from "../github/poll.ts";
@@ -315,51 +312,12 @@ async function boot(): Promise<BootedSystem> {
 
   // The run ledger — constructed before the card service, which needs it for the checklist reader.
   const runStore = new RunStore(join(beckettDir, "runs.json"));
-  // Zero-token progress cards: CODE keeps one status message per active run, edited straight off
-  // the dispatch event bus — no Concierge involvement, honoring "the Concierge and the run engine
-  // never call each other directly". Channel: the event's stamped originChannel, else the task
-  // registry's thread/origin (same precedent as the PR re-watch loop below). `runs.cards`
-  // (default ON — the deploy receipt) is the one switch.
-  const runCardsEnabled = config.runs?.cards ?? true;
-  const progressCards: ProgressCardService | null = runCardsEnabled
-    ? createProgressCardService({
-        gateway,
-        statePath: join(beckettDir, "progress-cards.json"),
-        resolveChannel: (event) => {
-          if (event.channel) return event.channel;
-          const hit = tasks.findByRun(event.runId) ?? tasks.findByRun(event.runRef);
-          return hit ? hit.task.threadId ?? hit.task.originChannelId ?? null : null;
-        },
-        // The run card's checklist line (spec.md progress) — cards.ts stays fs-free, this reads
-        // the run's live workspace off the same store the run engine drives.
-        specReader: runSpecReader(runStore),
-        logger: logger.child("progress-cards"),
-      })
-    : null;
 
-  // The live-progress-with-terminal card (`../progress/live-card.ts`, ro's ask): a SIBLING of
-  // `progressCards` above, gated by its own `runs.live_progress_card` flag so turning this off
-  // never touches the task/branch cards or the deploy-receipt progress cards. One card per run,
-  // in its own dedicated channel — folding it into `progressCards`' channel would bury the
-  // quieter task/branch cards under a terminal window scrolling every 5 seconds.
-  const liveProgressCardEnabled = config.runs?.live_progress_card ?? true;
-  const liveProgressCard: LiveProgressCardService | null = liveProgressCardEnabled
-    ? createLiveProgressCardService({
-        gateway,
-        statePath: join(beckettDir, "live-progress-cards.json"),
-        resolveChannel: () => liveProgressChannelId(),
-        readJournalLines: (runId, tail) => readJournalLines(paths.journalDir, runId, tail),
-        specReader: runSpecReader(runStore),
-        logger: logger.child("live-progress-card"),
-      })
-    : null;
-
-  // The training progress card (`../progress/training-card.ts`, ro's other ask): a window into the
+  // The training progress card (`../progress/training-card.ts`): a window into the
   // throttled CPU pretrain, which runs as a systemd --user unit entirely outside Beckett's own
-  // run engine — there is no `DispatchEvent` for it, so this is a plain 60s poll rather than a
-  // sibling of the two services above. Same channel by default (`liveProgressChannelId()`, the
-  // `disabled`/env-override seam this daemon already has for that channel) — an empty source list
-  // when it's disabled makes the service a no-op.
+  // run engine — there is no `DispatchEvent` for it, so this is a plain 60s poll. Same channel
+  // by default (`liveProgressChannelId()`, the `disabled`/env-override seam this daemon already
+  // has for that channel) — an empty source list when it's disabled makes the service a no-op.
   const trainingProgressCard = createTrainingProgressCardService({
     gateway,
     statePath: trainingProgressCardsPath(beckettDir),
@@ -430,15 +388,7 @@ async function boot(): Promise<BootedSystem> {
     capabilityPreflight,
     progress: concierge.progressSink(),
     dispatchEventsPath: join(paths.eventsDir, "dispatch.jsonl"),
-    dispatchLiveSink: (event) => {
-      // `runs.cards` (default ON) is this lane's own switch — the deploy receipt posts
-      // independently of the ticket dispatcher's `progress.cards_as_code` above.
-      if (shouldObserveRunCard(progressCards, runCardsEnabled)) void progressCards?.observe(event);
-      // `runs.live_progress_card` (default ON) is its OWN switch, independent of `runs.cards` —
-      // see the construction site above for why the two never share a gate.
-      if (shouldObserveRunCard(liveProgressCard, liveProgressCardEnabled)) void liveProgressCard?.observe(event);
-      return concierge.postDispatchEvent(event);
-    },
+    dispatchLiveSink: (event) => concierge.postDispatchEvent(event),
     publishOutboxPath: join(beckettDir, "run-publish-outbox.jsonl"),
     runtimeStatePath: join(beckettDir, "run-state.json"),
     spendLedgerPath: paths.spend,

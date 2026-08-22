@@ -232,11 +232,8 @@ export function cardsChannelId(): string | null {
 }
 
 /**
- * Home for the live-progress-with-terminal card (`../progress/live-card.ts`) — ro's ask (issue:
- * "a component v2 card that shows the active progress with a 'window' into the terminal"). A
- * dedicated channel rather than {@link CARDS_CHANNEL_ID}: that channel's cards are per-task and
- * per-branch; this one is per-RUN and edits far more often (a terminal window scrolling), so
- * mixing the two would bury the quieter task/branch cards in noise.
+ * Home for the training progress card (`../progress/training-card.ts`). A dedicated channel
+ * rather than {@link CARDS_CHANNEL_ID}: that channel's cards are per-task and per-branch.
  */
 export const LIVE_PROGRESS_CHANNEL_ID = "1525690195234521179";
 
@@ -2993,7 +2990,7 @@ interface RunUpdate {
  * The three terminal states that owe their requester a confirmed word (issue #233): `done` is
  * the payoff of the whole pipeline, `failed`/`parked` are the two states where work stopped and
  * nobody would otherwise know. `cancelled` and the mid-flight restart pings are NOT owed — they
- * are machine churn a live card already shows, or a deliberate stop, not a promise made.
+ * are machine churn, or a deliberate stop, not a promise made.
  */
 function isOwedRunNotificationState(state: RunState): state is OwedRunNotificationState {
   return state === "done" || state === "failed" || state === "parked";

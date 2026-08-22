@@ -33,7 +33,7 @@ test("a bare provider token or bearer header is redacted by its shape alone", ()
 });
 
 test("a harmless line with no credential shape passes through byte-for-byte", () => {
-  const line = "Bash  bun test src/progress/live-card.test.ts";
+  const line = "Bash  bun test src/progress/training-card.test.ts";
   expect(redactSecrets(line)).toBe(line);
 });
 

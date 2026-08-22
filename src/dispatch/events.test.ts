@@ -35,8 +35,6 @@ describe("DispatchEventBus", () => {
     const bus = new DispatchEventBus({ path, liveSink: (event) => void seen.push(event.stage) });
     try {
       bus.emit({ runId: "run-1", runRef: "run-1", branchRef: "b", stage: "implement", outcome: "started" });
-      // The run card's activity blurb repaints a live surface every few seconds; a forensic
-      // ledger whose whole point is that nothing rewrites it must not fill up with repaints.
       const blurb = bus.emitEphemeral({
         runId: "run-1",
         runRef: "run-1",

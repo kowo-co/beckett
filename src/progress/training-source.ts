@@ -2,7 +2,7 @@
  * Beckett — the file-tailing training progress source (`src/progress/training-source.ts`)
  * =======================================================================================
  * ro's other ask: a window into the throttled CPU pretrain, which is a systemd --user unit, not a
- * Beckett run — so `./live-card.ts` and `./cards.ts` (both driven by `DispatchEvent`) never see it.
+ * Beckett run — so the run engine never sees it.
  * This is a SIBLING progress source with its own read path: bounded tails of the unit's own
  * `loss.jsonl` (structured, one record per step) and console log (`train.out`, human-readable),
  * plus a `systemctl --user is-active` check — never a write into the unit's scratch directory, and

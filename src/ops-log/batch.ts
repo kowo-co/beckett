@@ -12,7 +12,7 @@
  * never take down the caller — the whole point of a log mirror is that it must never become a
  * NEW way for the daemon to break.
  *
- * `now`/`schedule` follow the same injectable-clock seam as `src/progress/cards.ts`, so tests
+ * `now`/`schedule` follow an injectable-clock seam so tests
  * drive the window with a fake clock instead of real timers.
  */
 import { log as rootLog } from "../log.ts";

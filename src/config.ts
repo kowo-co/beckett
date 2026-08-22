@@ -153,7 +153,7 @@ function mergeProactivityOverride(rawConfig: unknown, overridePath: string): unk
  *
  *   - `plane`   — the first tracker section, long since folded into `[tracker]` (itself now gone).
  *   - `tracker` — the out-of-process ticket queue. v7 has no board; the run ledger is the queue.
- *   - `progress`— `cards_as_code`, the ticket dispatcher's card switch. Runs use `[runs] cards`.
+ *   - `progress`— `cards_as_code`, the ticket dispatcher's card switch (retired with the v7 run engine).
  *   - `dream`   — the nightly dream pass, deleted whole in the v7 debt sweep (overhaul P16).
  */
 const RETIRED_CONFIG_SECTIONS = ["plane", "tracker", "progress", "dream"] as const;
@@ -207,6 +207,31 @@ export function dropRetiredChilltextSystem(raw: unknown, warn: (message: string)
   return { ...raw, concierge: { ...concierge, chilltext } };
 }
 
+const RETIRED_RUN_PROGRESS_KEYS = ["cards", "live_progress_card", "activity"] as const;
+
+/**
+ * Per-run live progress cards (PR #337) and their activity-blurb config were removed. The
+ * `[runs]` slice is `.strict()`, so a live config.toml still carrying `cards`, `live_progress_card`,
+ * or `[runs.activity]` would refuse to start. Strip them loudly the same way as
+ * {@link dropRetiredChilltextSystem}.
+ */
+export function dropRetiredRunProgressCards(raw: unknown, warn: (message: string) => void): unknown {
+  if (!isRecord(raw)) return raw;
+  const runs = raw.runs;
+  if (!isRecord(runs)) return raw;
+  const present = RETIRED_RUN_PROGRESS_KEYS.filter((key) => Object.prototype.hasOwnProperty.call(runs, key));
+  if (present.length === 0) return raw;
+  const nextRuns = cloneRecord(runs);
+  for (const key of present) {
+    delete nextRuns[key];
+    warn(
+      `beckett: config key [runs] ${key} was retired with the per-run live progress cards and is being IGNORED. ` +
+        `Delete it from your config.toml.`,
+    );
+  }
+  return { ...raw, runs: nextRuns };
+}
+
 export interface LoadConfigOptions {
   /** Override env source (for tests). Defaults to process.env. */
   env?: PathEnv;
@@ -253,6 +278,9 @@ export function loadConfig(opts: LoadConfigOptions = {}): Config {
   // 3c. the retired `[concierge.chilltext] system` voice string → stripped the same way, so prod's
   //     config.toml (which still carries one) boots and the persona file is the only voice left.
   raw = dropRetiredChilltextSystem(raw, (message) => console.warn(message));
+
+  // 3d. retired per-run live progress card keys under `[runs]`.
+  raw = dropRetiredRunProgressCards(raw, (message) => console.warn(message));
 
   // 4. validate + apply defaults (loud refuse-to-start on invalid).
   const result = ConfigSchema.safeParse(raw);

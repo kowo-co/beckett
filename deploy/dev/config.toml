@@ -8,11 +8,9 @@
 [concurrency]
 max_workers = 1
 
-# One live run at a time, and no cards: DEV shares the run ledger's shape but not prod's volume,
-# and it must never post a run card into a production channel.
+# One live run at a time: DEV shares the run ledger's shape but not prod's volume.
 [runs]
 max_live = 1
-cards = false
 
 # The staffing watchdog is the run engine's own heartbeat. Keep it armed but slow on staging.
 [supervise]
