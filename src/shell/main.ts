@@ -36,6 +36,8 @@ import { createStagesExtension, stageViewOf } from "../dispatch/stages.ts";
 import { createProgressCardService, shouldObserveRunCard, type ProgressCardService } from "../progress/cards.ts";
 import { createLiveProgressCardService, type LiveProgressCardService } from "../progress/live-card.ts";
 import { readJournalLines } from "../progress/journal.ts";
+import { createTrainingProgressCardService, trainingProgressCardsPath, type TrainingProgressCardService } from "../progress/training-card.ts";
+import { defaultFileTailProgressSources } from "../progress/training-sources.ts";
 import { createGitHubPrPoller, type GitHubPrPoller } from "../github/poll.ts";
 import { createGitHubActivityPoller, type GitHubActivityPoller } from "../github/activity.ts";
 import { parsePrUrl } from "../github/types.ts";
@@ -138,6 +140,7 @@ interface BootedSystem {
   concierge: Concierge;
   voiceGateway: VoiceGateway;
   statusDashboard: StatusDashboardService;
+  trainingProgressCard: TrainingProgressCardService;
   quick: QuickRunner;
   browserAgent: BrowserAgent;
   browser: BrowserRuntime;
@@ -350,6 +353,19 @@ async function boot(): Promise<BootedSystem> {
         logger: logger.child("live-progress-card"),
       })
     : null;
+
+  // The training progress card (`../progress/training-card.ts`, ro's other ask): a window into the
+  // throttled CPU pretrain, which runs as a systemd --user unit entirely outside Beckett's own
+  // run engine — there is no `DispatchEvent` for it, so this is a plain 60s poll rather than a
+  // sibling of the two services above. Same channel by default (`liveProgressChannelId()`, the
+  // `disabled`/env-override seam this daemon already has for that channel) — an empty source list
+  // when it's disabled makes the service a no-op.
+  const trainingProgressCard = createTrainingProgressCardService({
+    gateway,
+    statePath: trainingProgressCardsPath(beckettDir),
+    sources: defaultFileTailProgressSources(liveProgressChannelId()),
+    logger: logger.child("training-progress-card"),
+  });
 
   // The task registry ↔ run engine bridge (`../task/run-sync.ts`): what keeps `beckett task list`,
   // the #104 task card, the branch card and the Merge button moving as a run works. Without it a
@@ -795,6 +811,7 @@ async function boot(): Promise<BootedSystem> {
     logger: logger.child("status.dashboard"),
   });
   await statusDashboard.start();
+  await trainingProgressCard.start();
   if (prPoller) {
     // Re-arm the watch list after a restart. Two sources, both restored here. (1) Hand-opened PRs
     // (`beckett gh pr create`, #31) live ONLY in the poller's own persisted registry
@@ -945,7 +962,7 @@ async function boot(): Promise<BootedSystem> {
 
   logger.info("beckett online", { liveRuns: runSupervisor.live().length });
 
-  return { config, logger, prPoller, activityPoller, mailPoller, mailIntake, runSupervisor, concierge, voiceGateway, statusDashboard, quick, browserAgent, browser, extensions, lifecycleLedgerPath, opsLog };
+  return { config, logger, prPoller, activityPoller, mailPoller, mailIntake, runSupervisor, concierge, voiceGateway, statusDashboard, trainingProgressCard, quick, browserAgent, browser, extensions, lifecycleLedgerPath, opsLog };
 }
 
 /** Tear the system down in reverse boot order. Best-effort: one failure never blocks the rest. */
@@ -958,6 +975,7 @@ async function shutdown(sys: BootedSystem, signal: string): Promise<void> {
   // straggler maintain pass is serialized + best-effort by construction. Memory registered
   // LAST, so its stop runs FIRST in the reverse sweep.
   sys.statusDashboard.stop();
+  sys.trainingProgressCard.stop();
   // Leave any voice channel before the gateway goes down so Beckett doesn't linger connected.
   try {
     await sys.voiceGateway.leaveAll();

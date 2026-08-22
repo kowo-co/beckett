@@ -11,6 +11,12 @@ export interface CoreOperationHealth {
   consecutiveFailures: number;
   /** A short, non-secret diagnostic such as an HTTP status. */
   detail?: string;
+  /**
+   * True when `reachable === null` only because the daemon just booted and this operation has not
+   * had a chance to tick yet — renders yellow ("starting up") instead of red ("down"). A null tick
+   * well past the boot grace window leaves this false, which is a genuine failure.
+   */
+  startingUp?: boolean;
 }
 
 /** How much work the run engine is holding right now (`RunStore.live()`, bucketed). */

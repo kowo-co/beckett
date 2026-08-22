@@ -19,6 +19,13 @@ export interface RunEngineView {
   lastTickAt(): number | null;
 }
 
+/**
+ * How many watchdog intervals of grace a fresh boot gets before a null tick stops meaning
+ * "hasn't ticked yet" and starts meaning "is actually dead". "Roughly one-and-a-bit" — one full
+ * interval plus slack for the daemon's own startup work before the watchdog loop even begins.
+ */
+export const HEALTH_STARTUP_GRACE_POLL_INTERVALS = 1.5;
+
 export interface StatusSnapshotCollectorDeps {
   version: string;
   /** The supervisor's staffing-watchdog cadence — what gives health staleness a concrete meaning. */
@@ -54,9 +61,13 @@ export class StatusSnapshotCollector {
     ]);
     const runs = this.collectRuns();
     const lastTickAt = this.readTick();
+    const uptime = readUptimeSnapshot(this.deps.lifecycleLedgerPath, now);
     // ONE core-operation row now: the run supervisor IS the engine. There is no out-of-process
     // tracker to be reachable or unreachable, so the honest liveness signal is "did the staffing
-    // watchdog tick recently" — the same staleness question the old poller row answered.
+    // watchdog tick recently" — the same staleness question the old poller row answered. A null
+    // tick right after boot is not yet a failure — the watchdog ticks on a 60s cadence, so there is
+    // always a window with no tick at all — so a fresh boot renders "starting up", not "down".
+    const startingUp = lastTickAt === null && isWithinBootGrace(uptime.currentUptimeMs, this.deps.pollIntervalMs);
     const health: CoreOperationHealth[] = [
       {
         name: "Run supervisor",
@@ -64,7 +75,10 @@ export class StatusSnapshotCollector {
         lastSuccessAt: lastTickAt,
         lastSuccessAgeMs: age(now, lastTickAt),
         consecutiveFailures: 0,
-        detail: `${runs.live} live · ${runs.queued} queued · ${runs.parked} parked`,
+        detail: startingUp
+          ? `starting up — first watchdog tick pending · ${runs.live} live · ${runs.queued} queued · ${runs.parked} parked`
+          : `${runs.live} live · ${runs.queued} queued · ${runs.parked} parked`,
+        startingUp,
       },
     ];
     return {
@@ -74,7 +88,7 @@ export class StatusSnapshotCollector {
         beckett: this.deps.version,
         bun: process.versions.bun ?? "unknown",
       },
-      uptime: readUptimeSnapshot(this.deps.lifecycleLedgerPath, now),
+      uptime,
       system,
       runs,
       health,
@@ -137,6 +151,16 @@ function compact(row: { records: number; turns: number; tokensIn: number; tokens
 
 function age(now: number, at: number | null): number | null {
   return at === null ? null : Math.max(0, now - at);
+}
+
+/**
+ * True while the daemon is still inside its post-boot grace window. Unknown uptime (no lifecycle
+ * ledger yet) is treated as OUTSIDE the grace window — with no boot time to reason from, "genuinely
+ * down" is the safer default than silently painting an unknown state yellow.
+ */
+function isWithinBootGrace(currentUptimeMs: number | null, pollIntervalMs: number): boolean {
+  if (currentUptimeMs === null) return false;
+  return currentUptimeMs <= Math.max(1, pollIntervalMs) * HEALTH_STARTUP_GRACE_POLL_INTERVALS;
 }
 
 export function createStatusSnapshotCollector(deps: StatusSnapshotCollectorDeps): StatusSnapshotCollector {
