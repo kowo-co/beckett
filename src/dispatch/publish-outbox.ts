@@ -12,8 +12,6 @@ import type { BranchVsMainRaw } from "../worker/worktree.ts";
 import type { Logger } from "../types.ts";
 
 export const PUBLISH_RETRY_DELAYS_MS = [30_000, 2 * 60_000, 10 * 60_000] as const;
-/** Longest a retry hold can legitimately be scheduled out; anything beyond is a sentinel/bug. */
-export const MAX_PUBLISH_RETRY_DELAY_MS = Math.max(...PUBLISH_RETRY_DELAYS_MS);
 /**
  * attempts 1..4: the first 3 failures each schedule the next delay off the ladder above; the 4th
  * failure parks for a human courier instead of scheduling a 4th delay (#227 — an unattended row

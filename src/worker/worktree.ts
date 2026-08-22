@@ -17,7 +17,7 @@
  *    REVIEW/checkpoint diffs without staging their contents.
  */
 
-import { mkdirSync, existsSync, appendFileSync, readFileSync, writeFileSync, chmodSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, existsSync, appendFileSync, readFileSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { log } from "../log.ts";
 import { codemapPath, writeCodemap } from "../codemap/generate.ts";
@@ -105,13 +105,6 @@ export interface WorktreeHandle {
   repoRoot: string;
   workspace: string;
   branch: string;
-}
-
-/** Aggregate diff size for a worktree (Spec 02 §7.4). */
-export interface DiffStat {
-  files: number;
-  added: number;
-  removed: number;
 }
 
 /** Result of committing a worktree's working tree. */
@@ -321,26 +314,6 @@ async function ensureBaseRepo(repoRoot: string): Promise<void> {
     await git(["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "init: beckett project"], repoRoot);
     logger.info("created initial commit", { repoRoot });
   }
-}
-
-/** Canonicalize a path for comparison (resolves symlinks like macOS /var → /private/var). */
-function canon(p: string): string {
-  try {
-    return realpathSync(p);
-  } catch {
-    return resolve(p);
-  }
-}
-
-/** True if `workspace` is a registered worktree of `repoRoot` (symlink-tolerant comparison). */
-export async function worktreeExists(repoRoot: string, workspace: string): Promise<boolean> {
-  const r = await runGit(["worktree", "list", "--porcelain"], repoRoot);
-  if (r.code !== 0) return false;
-  const target = canon(workspace);
-  for (const line of r.stdout.split(/\r?\n/)) {
-    if (line.startsWith("worktree ") && canon(line.slice("worktree ".length)) === target) return true;
-  }
-  return false;
 }
 
 /**

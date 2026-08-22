@@ -525,7 +525,3 @@ export class SessionPool {
     }
   }
 }
-
-export function createSessionPool(opts: SessionPoolOptions): SessionPool {
-  return new SessionPool(opts);
-}

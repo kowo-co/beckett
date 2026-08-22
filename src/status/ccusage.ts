@@ -85,7 +85,3 @@ function record(value: unknown): Record<string, unknown> | null {
 function number(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
-
-export function createCcusageSource(deps: CcusageSourceDeps = {}): CcusageSource {
-  return new CcusageSource(deps);
-}

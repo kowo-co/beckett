@@ -13,7 +13,7 @@ import {
   type FileTailProgressSourceConfig,
   type TrainingStepRecord,
 } from "./training-source.ts";
-import { BABBLE_TOKEN_BUDGET, defaultFileTailProgressSources } from "./training-sources.ts";
+import { defaultFileTailProgressSources } from "./training-sources.ts";
 
 const dirs: string[] = [];
 afterEach(() => dirs.splice(0).forEach((dir) => rmSync(dir, { recursive: true, force: true })));
@@ -212,7 +212,6 @@ test("defaultFileTailProgressSources points at cpu-continue with the 680M total-
   expect(source!.jsonlPath).toBe(join(homedir(), "babble-scratch", "cpu-continue", "loss.jsonl"));
   expect(source!.consoleLogPath).toBe(join(homedir(), "babble-scratch", "cpu-continue", "train.out"));
   expect(source!.tokenBudget).toBe(680_000_000);
-  expect(BABBLE_TOKEN_BUDGET).toBe(680_000_000);
 });
 
 test("readFileTailProgress tolerates a partial final jsonl line (mid-write)", () => {

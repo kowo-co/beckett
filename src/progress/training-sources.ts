@@ -19,7 +19,7 @@ const BABBLE_SCRATCH_DIR = join(homedir(), "babble-scratch", "cpu-continue");
  * counter was seeded at ~600,206,202 from the served checkpoint, so this is NOT "tokens this
  * session" and is NOT an epoch size. Percent = tokens_seen / this, ETA = (this − tokens_seen) / rate.
  */
-export const BABBLE_TOKEN_BUDGET = 680_000_000;
+const BABBLE_TOKEN_BUDGET = 680_000_000;
 
 /** Every configured source, or `[]` when `channelId` is null (the card's channel is disabled). */
 export function defaultFileTailProgressSources(channelId: string | null): FileTailProgressSourceConfig[] {

@@ -96,6 +96,28 @@ describe("dead-exports census", () => {
     }
   });
 
+  test("an aliased named import is live under its SOURCE name, not the local alias", () => {
+    const root = makeFixtureRoot();
+    try {
+      // Regression for a real false-dead: `import { workerId as mintWorkerId } from "../ids.ts"`
+      // was recording usage of "mintWorkerId" (the local alias) against ids.ts, which never
+      // matches any real export there — so the census reported the actually-used `workerId` as
+      // dead. The importer reference must use the SOURCE name ("workerId"), not the alias.
+      writeFixtureFile(root, "src/x.ts", `export function workerId() { return 1; }\n`);
+      writeFixtureFile(
+        root,
+        "src/caller.ts",
+        `import { workerId as mintWorkerId } from "./x.ts";\nmintWorkerId();\n`,
+      );
+      const result = census(root);
+      const entry = result.entries.find((e) => e.symbol === "workerId");
+      expect(entry).toBeUndefined();
+      expect(result.live).toBe(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("an in-file-only caller does not count as an importer", () => {
     const root = makeFixtureRoot();
     try {
