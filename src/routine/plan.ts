@@ -35,7 +35,32 @@
  */
 
 import type { Routine } from "./types.ts";
-import { SOCIAL_MEDIA_AGENT_ID } from "../agent/builtins.ts";
+import { SOCIAL_MEDIA_AGENT_ID, X_SOCIAL_ACCOUNT } from "../agent/builtins.ts";
+import { X_CREDS_ENTRY } from "./builtins.ts";
+
+/**
+ * Whether a `browser`-lane routine's STATIC task targets X/social rather than some unrelated
+ * site. This is the only signal available for a `browser` routine: unlike the `agent` lane (see
+ * {@link SOCIAL_MEDIA_AGENT_ID} + `needsGroundingSources` in `../capability/modules/routines.ts`),
+ * a `browser` routine names no agent and carries no marker of "this is social media" other than
+ * what's IN the action — its creds entry and its task text. True when either:
+ *   - `credsEntry` names the X account's jingle vault entry ({@link X_CREDS_ENTRY}), the one
+ *     entry that can authenticate as the account these routines post through; or
+ *   - the task text references the X domain or the account handle ({@link X_SOCIAL_ACCOUNT}).
+ * A `browser` routine that matches is refused at dispatch (`dispatchPlan` in
+ * `../capability/modules/routines.ts`) rather than silently forced through a compose gate it was
+ * never written to expect: `x-social-morning`/`x-social-evening` (removed 2026-08-22) proved that
+ * lane composes AND publishes in one ungrounded step, with no SOURCES block, no `POST:` contract,
+ * and no verification — refusal is the cleaner fix because retrofitting grounding onto a FREEFORM
+ * task string would mean parsing prose for intent, exactly the kind of fuzzy heuristic that let
+ * the bypass happen in the first place. A routine that wants to post to X belongs on the `agent`
+ * lane instead, targeting {@link SOCIAL_MEDIA_AGENT_ID}, where grounding is structural.
+ */
+export function browserActionTargetsXSocial(task: string, credsEntry: string | null): boolean {
+  if (credsEntry === X_CREDS_ENTRY) return true;
+  const lower = task.toLowerCase();
+  return lower.includes("x.com") || lower.includes("twitter.com") || lower.includes(X_SOCIAL_ACCOUNT.toLowerCase());
+}
 
 /** The `deps-update` lane's parameters, resolved from the action (defaults filled at fire time). */
 export interface DepsUpdateTarget {
