@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   deriveTrainingStats,
@@ -13,6 +13,7 @@ import {
   type FileTailProgressSourceConfig,
   type TrainingStepRecord,
 } from "./training-source.ts";
+import { BABBLE_TOKEN_BUDGET, defaultFileTailProgressSources } from "./training-sources.ts";
 
 const dirs: string[] = [];
 afterEach(() => dirs.splice(0).forEach((dir) => rmSync(dir, { recursive: true, force: true })));
@@ -137,6 +138,25 @@ test("deriveTrainingStats clamps percent at 100 once the budget is exceeded", ()
   expect(stats!.etaMs).toBe(0);
 });
 
+test("deriveTrainingStats is sane when tokens_seen starts far above zero (resumed checkpoint)", () => {
+  // Seeded at ~600,206,202; live around 600.4M; budget is TOTAL tokens_consumed 680M.
+  const resumeStart = 600_206_202;
+  const latestSeen = 600_445_439;
+  const budget = 680_000_000;
+  const rate = 310.58;
+  const stats = deriveTrainingStats(
+    [record(3118, 1.2, resumeStart, rate), record(3385, 1.196, latestSeen, rate)],
+    [record(3118, 1.2, resumeStart, rate)],
+    budget,
+  );
+  expect(stats!.tokensPct).toBeCloseTo((latestSeen / budget) * 100, 5);
+  expect(stats!.tokensPct).toBeGreaterThan(88);
+  expect(stats!.tokensPct).toBeLessThan(90);
+  const remaining = budget - latestSeen;
+  expect(stats!.etaMs).toBeCloseTo((remaining / rate) * 1000, 0);
+  expect(stats!.etaMs).toBeGreaterThan(2 * 24 * 60 * 60 * 1000); // still days, not zero/unknown
+});
+
 // ── systemd unit liveness ─────────────────────────────────────────────────────────────────────
 
 test("isSystemdUserUnitActive reflects the real box (either active or not, never throws)", () => {
@@ -181,6 +201,18 @@ test("readFileTailProgress degrades to 'no data yet' when the jsonl is absent, w
   expect(snapshot.active).toBe(true);
   expect(snapshot.stats).toBeNull();
   expect(snapshot.consoleLines).toEqual([]);
+});
+
+test("defaultFileTailProgressSources points at cpu-continue with the 680M total-token budget", () => {
+  expect(defaultFileTailProgressSources(null)).toEqual([]);
+  const [source] = defaultFileTailProgressSources("chan");
+  expect(source).toBeDefined();
+  expect(source!.label).toBe("CPU continue from checkpoint");
+  expect(source!.unit).toBe("babble-cpu-pretrain.service");
+  expect(source!.jsonlPath).toBe(join(homedir(), "babble-scratch", "cpu-continue", "loss.jsonl"));
+  expect(source!.consoleLogPath).toBe(join(homedir(), "babble-scratch", "cpu-continue", "train.out"));
+  expect(source!.tokenBudget).toBe(680_000_000);
+  expect(BABBLE_TOKEN_BUDGET).toBe(680_000_000);
 });
 
 test("readFileTailProgress tolerates a partial final jsonl line (mid-write)", () => {

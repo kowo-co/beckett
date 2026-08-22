@@ -67,6 +67,23 @@ test("header text shows step, loss trend, token progress, rate, and ETA when act
   expect(text).toContain("ETA");
 });
 
+test("header text shows a sensible percent and remaining ETA when tokens_seen starts far above zero", () => {
+  const snapshot: FileTailProgressSnapshot = {
+    label: "CPU continue from checkpoint", active: true,
+    stats: {
+      latest: { step: 3385, loss: 1.1961, tokensSeen: 600_445_439, docsConsumed: 410717, elapsedS: 770.3, tokensPerS: 310.58, wallClock: "x", threads: 6, batchSize: 8, blockSize: 1024 },
+      recentAvgLoss: 1.18, firstAvgLoss: 1.22, tokensPct: 88.3008, progressBar: "[##################--]", etaMs: 256_162_000,
+    },
+    consoleLines: [],
+  };
+  const text = renderTrainingHeaderText(snapshot, 680_000_000);
+  expect(text).toContain("step 3385");
+  expect(text).toContain("88.3%");
+  expect(text).toContain("600.4M / 680.0M tokens");
+  expect(text).toContain("310.6 tok/s");
+  expect(text).toContain("ETA 2d 23h");
+});
+
 // ── the posting service ───────────────────────────────────────────────────────────────────────
 
 function fakeGateway() {

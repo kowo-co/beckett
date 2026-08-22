@@ -1,7 +1,7 @@
 /**
  * Beckett — the file-tailing training progress source (`src/progress/training-source.ts`)
  * =======================================================================================
- * ro's other ask: a window into the throttled CPU pretrain, which is a systemd --user unit, not a
+ * A window into the CPU continue training run, which is a systemd --user unit, not a
  * Beckett run — so the run engine never sees it.
  * This is a SIBLING progress source with its own read path: bounded tails of the unit's own
  * `loss.jsonl` (structured, one record per step) and console log (`train.out`, human-readable),
@@ -168,6 +168,8 @@ export function deriveTrainingStats(
   const latest = recent[recent.length - 1]!;
   const recentAvgLoss = average(recent.map((r) => r.loss));
   const firstAvgLoss = first.length > 0 ? average(first.map((r) => r.loss)) : null;
+  // Denominator is total tokens_consumed (may already be hundreds of millions on a resumed
+  // run). Remaining-to-budget, not "tokens this process has written", is what ETA uses.
   const tokensPct = tokenBudget > 0 ? Math.max(0, Math.min(100, (latest.tokensSeen / tokenBudget) * 100)) : 0;
   const remainingTokens = Math.max(0, tokenBudget - latest.tokensSeen);
   const etaMs = latest.tokensPerS > 0 ? (remainingTokens / latest.tokensPerS) * 1000 : null;
@@ -191,7 +193,7 @@ export function isSystemdUserUnitActive(unit: string): boolean {
 
 /** Everything one file-tailed progress source needs — the whole generalization. */
 export interface FileTailProgressSourceConfig {
-  /** Card header label, e.g. "throttled CPU pretrain". */
+  /** Card header label, e.g. "CPU continue from checkpoint". */
   label: string;
   /** systemd --user unit gating whether the card's numbers are live. */
   unit: string;
@@ -199,7 +201,7 @@ export interface FileTailProgressSourceConfig {
   jsonlPath: string;
   /** The human console log — becomes the card's "window into the terminal". */
   consoleLogPath: string;
-  /** Tokens in one epoch; powers the percent, bar, and ETA. */
+  /** Total tokens_consumed this run is aiming at; powers the percent, bar, and ETA. */
   tokenBudget: number;
   /** Where the card lands. */
   channelId: string;
