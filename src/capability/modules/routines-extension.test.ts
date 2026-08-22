@@ -648,6 +648,113 @@ test("a TIMELINE REPLY ROUND fire never fetches grounding sources — its ground
   expect(seenInputs).toEqual(["TIMELINE REPLY ROUND: open the home timeline..."]);
 });
 
+// ── the hard stop: a grounded fire with no POST: line must never reach the browser lane ──────
+// (fabricated-posts ticket, 2026-08-22: `daily-x-shitpost-4` posted a fabricated AWS-lockout
+// story because the compose-time agent's whole freeform output — never grounded by SOURCES, since
+// it was never sent to a second agent that had them — was handed straight to the background
+// browser lane under the legacy no-`POST:`-line fallback. See routines.ts#dispatchAgentLane.)
+
+test("a compose fire whose agent output has no POST: line is refused, never shipped to the browser lane ungrounded", async () => {
+  const posted: string[] = [];
+  const dispatcher = await dispatcherOf({
+    browserAgent: () => ({ async run(task: string) { posted.push(task); return undefined as never; } }) as never,
+    agentRegistry: () => ({ get: () => ({ id: "social-media" }) }) as never,
+    agentRunner: () => ({
+      run: async () => ({
+        state: "done",
+        // No `POST:` line — a freeform, self-authored browser instruction, exactly the shape that
+        // let the browser-driving agent invent the AWS-lockout incident with zero grounding.
+        output:
+          "Log into X and compose one fresh post in voice, rotating across tech news and your own actual life...",
+      }),
+    }) as never,
+    gatherGrounding: async () => "SOURCES FOR THIS RUN — real sources were fetched this run",
+  });
+
+  await expect(
+    dispatcher.dispatch(agentPlanFor("social-media", "Compose today's shitpost.") as never, {} as never),
+  ).rejects.toThrow(/did not follow the POST: output contract/);
+
+  expect(posted).toEqual([]);
+});
+
+test("a legacy x-shitpost fire with no POST: line is refused the same way as the new compose shape", async () => {
+  const posted: string[] = [];
+  const dispatcher = await dispatcherOf({
+    browserAgent: () => ({ async run(task: string) { posted.push(task); return undefined as never; } }) as never,
+    agentRegistry: () => ({ get: () => ({ id: "social-media" }) }) as never,
+    agentRunner: () => ({ run: async () => ({ state: "done", output: "just going to wing this one" }) }) as never,
+    gatherGrounding: async () => "SOURCES FOR THIS RUN — real sources were fetched this run",
+  });
+
+  await expect(
+    dispatcher.dispatch(
+      agentPlanFor(
+        "social-media",
+        "Compose today's shitpost — one fresh, in-voice line — and author the browser task that posts it to X.",
+      ) as never,
+      {} as never,
+    ),
+  ).rejects.toThrow(/did not follow the POST: output contract/);
+
+  expect(posted).toEqual([]);
+});
+
+test("an EVENT TRIGGER fire with no POST: line is refused the same way as a plain compose fire — it skips the SOURCES fetch but not the hard stop", async () => {
+  const posted: string[] = [];
+  let groundingCalls = 0;
+  const dispatcher = await dispatcherOf({
+    browserAgent: () => ({ async run(task: string) { posted.push(task); return undefined as never; } }) as never,
+    agentRegistry: () => ({ get: () => ({ id: "social-media" }) }) as never,
+    agentRunner: () => ({
+      run: async () => ({
+        state: "done",
+        // No `POST:` line — the same shape that let the browser-driving agent invent an incident
+        // with zero grounding, this time on the `watch` lane's own EVENT TRIGGER fire
+        // (needsGroundingSources returns false for it, so it never sees a fetched SOURCES block —
+        // but it still owes the OUTPUT CONTRACT, and this is the same fallback hole either way).
+        output: "Log into X and post something about the new model release, in voice...",
+      }),
+    }) as never,
+    gatherGrounding: async () => {
+      groundingCalls++;
+      return "SOURCES FOR THIS RUN — should never be fetched for an EVENT TRIGGER";
+    },
+  });
+
+  await expect(
+    dispatcher.dispatch(
+      agentPlanFor(
+        "social-media",
+        "EVENT TRIGGER (not a scheduled lane): the model-news feed just reported a new model release.",
+      ) as never,
+      {} as never,
+    ),
+  ).rejects.toThrow(/did not follow the POST: output contract/);
+
+  expect(groundingCalls).toBe(0);
+  expect(posted).toEqual([]);
+});
+
+test("a TIMELINE REPLY ROUND fire keeps the legacy whole-output-is-the-task fallback — it is exempt from the hard stop", async () => {
+  const posted: string[] = [];
+  const dispatcher = await dispatcherOf({
+    browserAgent: () => ({ async run(task: string) { posted.push(task); return undefined as never; } }) as never,
+    agentRegistry: () => ({ get: () => ({ id: "social-media" }) }) as never,
+    agentRunner: () => ({ run: async () => ({ state: "done", output: "go read the timeline and reply" }) }) as never,
+    gatherGrounding: async () => {
+      throw new Error("grounding must never be fetched for a TIMELINE REPLY ROUND");
+    },
+  });
+
+  await dispatcher.dispatch(
+    agentPlanFor("social-media", "TIMELINE REPLY ROUND: open the home timeline...") as never,
+    {} as never,
+  );
+
+  expect(posted).toEqual(["go read the timeline and reply"]);
+});
+
 test("a non-social-media agent's input is never touched by the grounding step", async () => {
   const seenInputs: string[] = [];
   let groundingCalls = 0;
