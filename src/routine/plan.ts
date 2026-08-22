@@ -125,6 +125,15 @@ export interface RoutineDispatchPlan {
   channelId: string | null;
   /** Authenticated requester the run is attributed to (may be filled from env). */
   requesterId: string | null;
+  /**
+   * Non-null → this plan must NOT be dispatched; the executor logs this reason, reports it to the
+   * origin channel, and returns without touching the browser lane. Only ever set on the `browser`
+   * lane, when {@link browserActionTargetsXSocial} says the task targets X/social — see that
+   * function's doc comment for why refusal, not retrofitted grounding, was picked. Optional (not
+   * `| null`) so existing plan literals built before this field existed keep type-checking; absent
+   * is treated the same as `null`.
+   */
+  refusalReason?: string | null;
 }
 
 /** Build the dispatch plan for a routine firing now. Pure — no I/O, no dispatch, no composition. */
@@ -316,19 +325,30 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
   }
 
   // kind === "browser"
-  return {
-    routineId: routine.id,
-    lane: "browser",
-    agentId: null,
-    agentInput: null,
-    browserTask: action.task,
-    depsUpdate: null,
-    proactiveSweep: null,
-    selfPrompt: null,
-    freeTime: false,
-    preview: action.task,
-    credsEntry: action.credsEntry ?? null,
-    channelId: action.channelId ?? null,
-    requesterId: action.requesterId ?? null,
-  };
+  {
+    const credsEntry = action.credsEntry ?? null;
+    const refused = browserActionTargetsXSocial(action.task, credsEntry);
+    const refusalReason = refused
+      ? `an "action: browser" routine dispatches its static task straight to the browser lane with ` +
+        `no SOURCES block, no POST: contract, and no verification gate — this task's credentials or ` +
+        `text target X/social, so it is refused. Use an "action: agent" routine on the ` +
+        `"${SOCIAL_MEDIA_AGENT_ID}" agent instead, which is grounded.`
+      : null;
+    return {
+      routineId: routine.id,
+      lane: "browser",
+      agentId: null,
+      agentInput: null,
+      browserTask: action.task,
+      depsUpdate: null,
+      proactiveSweep: null,
+      selfPrompt: null,
+      freeTime: false,
+      preview: refused ? `REFUSED (targets X/social on the ungrounded browser lane): ${action.task}` : action.task,
+      credsEntry,
+      channelId: action.channelId ?? null,
+      requesterId: action.requesterId ?? null,
+      refusalReason,
+    };
+  }
 }

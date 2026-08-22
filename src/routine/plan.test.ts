@@ -1,7 +1,7 @@
 /** Routine dispatch-plan building: agent lane, browser lane, and the legacy x-shitpost fold. */
 
 import { expect, test } from "bun:test";
-import { buildDispatchPlan, LEGACY_SHITPOST_INPUT } from "./plan.ts";
+import { buildDispatchPlan, browserActionTargetsXSocial, LEGACY_SHITPOST_INPUT } from "./plan.ts";
 import type { Routine, RoutineAction } from "./types.ts";
 import { SOCIAL_MEDIA_AGENT_ID } from "../agent/builtins.ts";
 
@@ -36,6 +36,52 @@ test("browser action → browser lane with the static task known at plan time", 
   expect(plan.browserTask).toBe("go do the thing");
   expect(plan.agentId).toBeNull();
   expect(plan.agentInput).toBeNull();
+});
+
+// ── close the browser-action grounding bypass: a `browser` routine that targets X/social must ──
+// ── never reach the browser lane with a compose-and-post task that skipped grounding ────────────
+// REGRESSION (2026-08-22): `x-social-morning`/`x-social-evening` were `action: "browser"` routines
+// whose static task was dispatched straight to the background browser lane — no SOURCES block, no
+// `POST:` contract, no verification gate — and one of them fabricated a live post. Before this fix
+// `buildDispatchPlan` carried no `refusalReason` field at all, so every case below FAILED (the
+// field was `undefined` for every plan, including one whose creds/task plainly named the X
+// account). After this fix, a `browser` action whose creds or task target X/social is refused at
+// plan-build time; anything else keeps building an ordinary, undispatch-refused plan.
+
+test("a browser routine authenticated as the X account (credsEntry names the vault entry) is refused", () => {
+  const plan = buildDispatchPlan(
+    routine({ kind: "browser", task: "check the timeline and reply to anything interesting", credsEntry: "x-account" }),
+  );
+  expect(plan.lane).toBe("browser"); // still builds — the executor is what refuses to dispatch it
+  expect(plan.refusalReason).toBeTruthy();
+  expect(plan.preview).toContain("REFUSED");
+});
+
+test("a browser routine whose task names the X domain is refused even with no credsEntry", () => {
+  const plan = buildDispatchPlan(
+    routine({ kind: "browser", task: "Compose one fresh post in voice and post it to x.com" }),
+  );
+  expect(plan.refusalReason).toBeTruthy();
+});
+
+test("a browser routine whose task names the account handle is refused", () => {
+  const plan = buildDispatchPlan(routine({ kind: "browser", task: "post something fun as @beckposting" }));
+  expect(plan.refusalReason).toBeTruthy();
+});
+
+test("an unrelated browser routine (no X creds, no X text) is NOT refused — the general browser lane keeps working", () => {
+  const plan = buildDispatchPlan(routine({ kind: "browser", task: "check the status page and post a summary" }));
+  expect(plan.refusalReason).toBeFalsy();
+  expect(plan.preview).toBe("check the status page and post a summary");
+});
+
+test("browserActionTargetsXSocial: the exact detection rules, unit-tested in isolation", () => {
+  expect(browserActionTargetsXSocial("go check the weather", null)).toBe(false);
+  expect(browserActionTargetsXSocial("go check the weather", "x-account")).toBe(true);
+  expect(browserActionTargetsXSocial("browse to X.COM and look around", null)).toBe(true); // case-insensitive
+  expect(browserActionTargetsXSocial("check twitter.com/home", null)).toBe(true);
+  expect(browserActionTargetsXSocial("DM @beckposting's followers", null)).toBe(true);
+  expect(browserActionTargetsXSocial("check the status page", "some-other-vault-entry")).toBe(false);
 });
 
 test("legacy x-shitpost action folds onto the social-media agent lane — one runtime path", () => {

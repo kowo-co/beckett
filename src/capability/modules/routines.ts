@@ -44,7 +44,7 @@ import {
   type RoutineScheduler,
   type RoutineSchedulerDeps,
 } from "../../routine/scheduler.ts";
-import { buildDispatchPlan, type RoutineDispatchPlan } from "../../routine/plan.ts";
+import { buildDispatchPlan, browserActionTargetsXSocial, type RoutineDispatchPlan } from "../../routine/plan.ts";
 import { nextFireAt, isValidTimeZone } from "../../routine/schedule.ts";
 import { WeekdaySchema, type Cadence, type Routine, type RoutineAction } from "../../routine/types.ts";
 import { WatchStateStore } from "../../routine/watch-store.ts";
@@ -577,16 +577,30 @@ export const createRoutinesExtension =
       // agent call and the same OUTPUT CONTRACT, so it has the identical fallback hole a plain
       // compose fire does. Falling back here would ship this agent's raw, self-authored, freeform
       // output straight to the background browser lane's own model as its task — a second,
-      // completely ungrounded agent invocation — which is exactly how `daily-x-shitpost-4`
-      // fabricated the AWS-lockout post on 2026-08-22T01:32:28Z: the compose-time agent never
-      // emitted `POST:`, so its whole (ungrounded-looking) output became the browser task verbatim,
-      // and the browser-driving model — which never saw SOURCES or the GROUNDING RULE — invented an
-      // incident to satisfy it. So the gate here is NOT `needsGroundingSources` (that only decides
-      // whether to fetch a SOURCES block); it's "every social-media fire except a TIMELINE REPLY
-      // ROUND" — no `POST:` line on any of those is now a hard stop, not a silent downgrade to an
-      // unwitnessed second agent. This is a FORMAT check only (did the agent emit the contract at
-      // all) — it runs unconditionally and does not retry, unlike the content-verification gate
-      // below, which only applies to `gated` fires and checks what the `POST:` text actually says.
+      // completely ungrounded agent invocation, so it is a hard stop, not a silent downgrade. So
+      // the gate here is NOT `needsGroundingSources` (that only decides whether to fetch a SOURCES
+      // block); it's "every social-media fire except a TIMELINE REPLY ROUND" — no `POST:` line on
+      // any of those is now a hard stop. This is a FORMAT check only (did the agent emit the
+      // contract at all) — it runs unconditionally and does not retry, unlike the
+      // content-verification gate below, which only applies to `gated` fires and checks what the
+      // `POST:` text actually says.
+      //
+      // CORRECTED POST-MORTEM: an earlier version of this comment blamed the fabricated
+      // AWS-lockout post (live 2026-08-22T01:32:28Z) on `daily-x-shitpost-4` falling through this
+      // exact fallback hole, and PR #334 hardened this agent-lane path on the strength of that
+      // claim. That attribution was WRONG: `daily-x-shitpost-4` fired at 2026-08-22T01:34:25.691Z
+      // — two minutes AFTER the fabricated post was already live — so it never touched that post,
+      // and this function was never reached. The actual cause was `x-social-evening` (fired
+      // 2026-08-22T01:32:25.685Z), a user-created `action: "browser"` routine. A `browser`-lane
+      // routine's static task never enters `dispatchAgentLane` at all — it goes straight from
+      // `dispatchPlan` to the background browser lane (below) as a raw string, with no SOURCES
+      // block, no `POST:` contract, and no verification gate, so the browser-driving model both
+      // composed and published in one ungrounded step. That bypass — not this fallback — is what
+      // let the AWS-lockout post ship, and it is why the fix PR #334 shipped survived it: hardening
+      // an agent-lane path a `browser` routine never uses closes nothing. It is now refused
+      // structurally at dispatch for any `browser`-lane routine that targets X/social
+      // (`browserActionTargetsXSocial` in `../../routine/plan.ts`; see the refusal check in
+      // `dispatchPlan` below).
       const isTimelineReplyRound = agentInput.includes("TIMELINE REPLY ROUND");
       if (!postText && agentId === SOCIAL_MEDIA_AGENT_ID && !isTimelineReplyRound) {
         throw new Error(
@@ -779,6 +793,36 @@ export const createRoutinesExtension =
         return;
       }
       if (!plan.browserTask) throw new Error("routine dispatch produced no browser task");
+
+      // The X/social bypass (2026-08-22, see the corrected post-mortem in `dispatchAgentLane`
+      // above): an `action: "browser"` routine's task lands HERE as a raw, self-contained string
+      // that never passed through an agent — no SOURCES block, no `POST:` contract, no
+      // verification gate. `buildDispatchPlan` (`../../routine/plan.ts`) already refused any such
+      // plan whose task/creds target X/social (`browserActionTargetsXSocial`); honor that refusal
+      // HERE, the one place a browser-lane routine actually reaches the privileged browser agent,
+      // so nothing that calls `dispatchPlan` can route around it.
+      if (plan.refusalReason) {
+        ctx.logger.warn("browser-lane routine refused at dispatch: targets X/social", {
+          routineId: plan.routineId,
+          task: plan.browserTask,
+        });
+        const notify =
+          deps.notifyOrigin ??
+          ((cid: string, text: string) =>
+            callBus(join(ctx.paths.beckettDir, "control.sock"), "discord.reply", { channelId: cid, text }, 30_000).then(
+              () => undefined,
+            ));
+        await notify(
+          channelId,
+          [
+            `routine "${plan.routineId}" refused — an "action: browser" routine may not target X/social.`,
+            plan.refusalReason,
+          ].join("\n"),
+        ).catch((err) => {
+          ctx.logger.warn("could not report the browser-lane refusal to the origin channel", { error: String(err) });
+        });
+        return;
+      }
 
       // Post via the PRIVILEGED in-process browser lane — the routine holds the channel/requester
       // authorization, so a headless run can post without a Discord mention token. Credential
@@ -1057,6 +1101,18 @@ export const createRoutinesExtension =
         if (!task.trim() && !selfPrompt.trim()) {
           fail('a routine needs a --task "<self-contained browser task>" or a --self "<prompt>"');
         }
+        const credsEntryFlag = flags.creds ? String(flags.creds) : null;
+        // Fail fast (issue: close the browser-action grounding bypass): a `browser` routine whose
+        // task/creds target X/social would only ever be refused at fire time, forever — reject it
+        // here so the operator hears about the grounded alternative immediately, not after a
+        // silent no-op every window. Dispatch itself refuses too (`dispatchPlan` /
+        // `browserActionTargetsXSocial`) — this is fail-fast, not the enforcement point.
+        if (task.trim() && browserActionTargetsXSocial(task, credsEntryFlag)) {
+          fail(
+            'a "browser" routine may not target X/social (no SOURCES block, no POST: contract, no ' +
+              'verification gate on that lane) — add an "agent" routine on the social-media agent instead',
+          );
+        }
         // No --weekly → daily, exactly as before. A typo'd weekday fails HERE, at add time, for
         // the same reason a bad --tz does: a cadence that can't resolve must never reach the store.
         let cadence: Cadence;
@@ -1328,6 +1384,20 @@ export const createRoutinesExtension =
               const requestedChannelId = a.channelId?.trim();
               if (requestedChannelId && call.origin.channelId && requestedChannelId !== call.origin.channelId) {
                 return { ok: false, error: "routines must report to the channel where the authorized request began" };
+              }
+              // Fail fast, same rule and reason as `beckett routine add` (issue: close the
+              // browser-action grounding bypass): `routines.add` only ever builds `kind: "browser"`
+              // actions — this is exactly the seam a natural-language "post to X every morning"
+              // request reaches (it's how `x-social-morning`/`x-social-evening` were created). A
+              // task/creds pair that targets X/social is refused here so the concierge can say why,
+              // instead of silently creating a routine that will refuse itself every fire.
+              if (browserActionTargetsXSocial(a.task, a.credsEntry ?? null)) {
+                return {
+                  ok: false,
+                  error:
+                    'a "browser" routine may not target X/social (no SOURCES block, no POST: contract, no ' +
+                    "verification gate on that lane) — social posts must go through the grounded social-media agent instead",
+                };
               }
               const m = a.window.match(/^(\d{2}:\d{2})-(\d{2}:\d{2})$/)!;
               const routine = await requireStore().add({
