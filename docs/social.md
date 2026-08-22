@@ -106,6 +106,10 @@ exactly what you saw instead of guessing.
 
 ## Not in scope here
 
-No new posting windows or cadence changes: `daily-x-shitpost` stays once a day, `model-news-watch`
-stays rate-limited to 1/hour and 3/24h non-overridable, and morning/evening keep whatever windows
-they already have on prod. This page only refreshes what the two user routines *say*.
+Morning/evening (`x-social-morning`/`x-social-evening`) keep whatever windows they already have on
+prod — this page only refreshes what those two user routines *say*, not when they fire.
+
+As of the crank-the-frequency ticket (2026-08-21), `daily-x-shitpost` and `x-timeline-replies` are
+no longer single daily fires — see `DAILY_SHITPOST_IDS`/`TIMELINE_REPLY_IDS` in
+`src/routine/builtins.ts` for the four/three-fires-a-day schedule and the ceilings that bound it.
+`model-news-watch` is unaffected: still rate-limited to 1/hour and 3/24h, non-overridable.

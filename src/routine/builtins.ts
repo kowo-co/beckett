@@ -4,8 +4,12 @@
  * Engine-seeded routines that exist on a fresh install. The store seeds these on load unless
  * the user explicitly removed them (tracked in `removedBuiltins`). Among them:
  *
- *   - `daily-x-shitpost` (issue #62) — once a day at a random minute in 12:00–13:00 PT, post a
- *     dumb in-voice shitpost to X @beckposting. The acceptance vehicle for humanized timing.
+ *   - `daily-x-shitpost` (issue #62; cranked per ro's 2026-08-21 "boost the frequency" ask) — FOUR
+ *     fuzzed fires a day (`DAILY_SHITPOST_IDS`), each its own routine with its own non-overlapping
+ *     fuzz window, spread across the waking day so a human sees several dumb in-voice shitposts to
+ *     X @beckposting, never on a predictable clock. Multiple SIBLING routines, not a new cadence
+ *     kind — see the doc comment on `DAILY_SHITPOST_IDS` below for why. Still the acceptance
+ *     vehicle for humanized timing; there are just several windows now instead of one.
  *   - `weekly-deps-update` (issue #85) — Sunday mornings PT, update in-range dependencies in an
  *     isolated clone and open a PR. The acceptance vehicle for the `weekly` cadence, and the one
  *     built-in that never touches the browser.
@@ -33,8 +37,11 @@
  */
 
 import type { Cadence, FuzzWindow, Routine, Weekday } from "./types.ts";
-import { SOCIAL_MEDIA_AGENT_ID } from "../agent/builtins.ts";
+import { SOCIAL_MEDIA_AGENT_ID, TIMELINE_REPLY_CAP } from "../agent/builtins.ts";
 import { MODEL_NEWS_FEED_URL } from "./model-news.ts";
+
+/** America/Los_Angeles, shared by every builtin below that fires on PT wall-clock. */
+const PT_TZ = "America/Los_Angeles";
 
 /** jingle keychain entry that holds the X login (username/password/TOTP). A NAME, never a secret. */
 export const X_CREDS_ENTRY = "x-account";
@@ -47,14 +54,57 @@ export const X_CREDS_ENTRY = "x-account";
 export const MODEL_NEWS_WATCH_ID = "model-news-watch";
 
 /**
- * Id of the timeline-reply routine (real-sources ticket, Half 2): ro's ask — be "relevant and
- * active in ... replying to people on the home page ... not like everything but cool posts." Runs
- * the SAME `social-media` agent path as `daily-x-shitpost`, but the agent's job for this fire is
- * to author a browser task that reads the live home timeline and replies selectively, instead of
- * composing a fresh post — see `TIMELINE_REPLY_INPUT` and the TIMELINE REPLY ROUND section of the
- * agent's prompt (`../agent/builtins.ts`).
+ * Id of the FIRST timeline-reply routine (real-sources ticket, Half 2): ro's ask — be "relevant
+ * and active in ... replying to people on the home page ... not like everything but cool posts."
+ * Runs the SAME `social-media` agent path as `daily-x-shitpost`, but the agent's job for this fire
+ * is to author a browser task that reads the live For You feed and replies to everything it
+ * genuinely has a line for, instead of composing a fresh post — see `TIMELINE_REPLY_INPUT` and the
+ * TIMELINE REPLY ROUND section of the agent's prompt (`../agent/builtins.ts`). See
+ * `TIMELINE_REPLY_IDS` below for the other two rounds this fires alongside.
  */
 export const TIMELINE_REPLY_ID = "x-timeline-replies";
+
+/**
+ * Ids of all THREE timeline-reply rounds a day (crank-the-frequency ticket, 2026-08-21): sibling
+ * routines sharing one `TIMELINE_REPLY_INPUT`/agent, each with its own non-overlapping fuzz
+ * window, exactly like `DAILY_SHITPOST_IDS` below — see that constant's doc comment for why
+ * sibling routines were picked over a new cadence kind or the `watch` poll-loop precedent.
+ */
+export const TIMELINE_REPLY_IDS = [TIMELINE_REPLY_ID, "x-timeline-replies-2", "x-timeline-replies-3"] as const;
+
+/**
+ * Id of the FIRST daily-shitpost fire. See `DAILY_SHITPOST_IDS` below for the other three.
+ */
+export const DAILY_SHITPOST_ID = "daily-x-shitpost";
+
+/**
+ * Ids of all FOUR daily-shitpost fires a day (crank-the-frequency ticket, 2026-08-21: ro asked,
+ * verbatim, to "boost the frequency of posting to be more frequent"). The routine engine's
+ * `schedule` is one `cadence` + ONE fuzz window fired once per period (`./types.ts`) — there is no
+ * "N fires a day" cadence kind. Three ways to get several fires a day out of that shape:
+ *
+ *   1. extend `Cadence`/`Schedule` with a multi-window/N-per-day kind, touching the shared
+ *      schedule math (`./schedule.ts`) and every consumer of it;
+ *   2. seed several SIBLING routines, each a plain `daily` cadence with its own non-overlapping
+ *      fuzz window — no engine change at all, every existing per-routine idempotency/restart/fuzz
+ *      guarantee applies unmodified to each sibling;
+ *   3. follow the `watch` action's precedent (`./watch.ts`) — a `pollIntervalMinutes` loop instead
+ *      of a fuzz window.
+ *
+ * (2) is what ships here: it needed zero changes to `./types.ts`/`./schedule.ts`/`./scheduler.ts`,
+ * each fire keeps the exact fuzz/restart-safety/once-per-period guarantees the single routine
+ * already had, and disjoint windows make a same-day collision between two fires structurally
+ * impossible rather than something a scheduler has to avoid at runtime. (3) was rejected because
+ * `watch` polls on a genuine external trigger (a new model release) — there is no equivalent
+ * "new event" to poll for here, so a poll loop would just be a fuzz window with extra state. (1)
+ * was rejected as more engine surface than four cron-shaped routines justify.
+ */
+export const DAILY_SHITPOST_IDS = [
+  DAILY_SHITPOST_ID,
+  "daily-x-shitpost-2",
+  "daily-x-shitpost-3",
+  "daily-x-shitpost-4",
+] as const;
 
 /**
  * The instruction handed to the social-media agent each fire. Deliberately terse — the agent's
@@ -72,12 +122,23 @@ export const DAILY_SHITPOST_INPUT =
  * hands that straight to the background browser lane. The literal phrase "TIMELINE REPLY ROUND" is
  * what `./social-grounding.ts#needsGroundingSources` reads to skip the compose-time SOURCES block
  * — a reply's grounding is the live page the browsing agent actually reads, not a fetched feed.
+ *
+ * FOR YOU ONLY (ro, 2026-08-21, verbatim: "don't reply to random people outside of your For You
+ * Page"): every candidate reply must come from a post the browsing agent actually scrolled past on
+ * its OWN For You feed — never X's search, never a hashtag/trends page, never a profile opened to
+ * go hunting for something to reply to. `TIMELINE_REPLY_CAP` (`../agent/builtins.ts`) is the
+ * shared per-round cap, restated here so the routine's own instruction carries the same number the
+ * agent's prompt enforces, not a second, driftable copy of it.
  */
 export const TIMELINE_REPLY_INPUT =
-  "TIMELINE REPLY ROUND: open the home timeline as @beckposting, read what is genuinely there " +
-  "right now, and author the self-contained browser task that reads it and replies to a SMALL " +
-  "number of genuinely good posts — a handful at most, and zero is a normal, often correct " +
-  "outcome. Do not use the POST: contract for this job; write out the full browser task instead.";
+  "TIMELINE REPLY ROUND: open the FOR YOU tab of the home timeline (x.com/home, For You — never " +
+  "Following) as @beckposting, scroll it, and read what is genuinely there right now. Only react " +
+  "to a post you actually scrolled past on that feed — never use X's search, never open a hashtag " +
+  "or trends page, never open a stranger's profile hunting for something to reply to. Author the " +
+  `self-contained browser task that reads the For You feed and replies to up to ${TIMELINE_REPLY_CAP} ` +
+  "posts you genuinely have a real line for this round — replying is the default outcome now, not " +
+  "the exception, and zero replies is only correct when the feed truly has nothing worth reacting " +
+  "to. Do not use the POST: contract for this job; write out the full browser task instead.";
 
 /**
  * Id of the weekly dependency-update routine (issue #85) — ro's ask: stop hand-bumping deps forever.
@@ -136,6 +197,44 @@ const FREE_TIME_DEFAULT_SCHEDULE: { cadence: Cadence; window: FuzzWindow } = {
 };
 
 /**
+ * Every window below, shitpost and timeline-reply alike, laid out on the same PT wall-clock —
+ * together with the pre-existing `proactive-sweep` window (09:00–10:30 PT, unchanged) — so the gap
+ * between ANY two is visible at a glance. Every gap is exactly 30 minutes, so no two fires can ever
+ * land at the same minute regardless of what each one's independent fuzz roll picks:
+ *
+ *   09:00–10:30  proactive-sweep       (pre-existing, unrelated to this ticket — left in place)
+ *   11:00–11:30  daily-x-shitpost-2
+ *   12:00–13:00  daily-x-shitpost      (the original window, unmoved — pinned by existing tests)
+ *   13:30–14:15  x-timeline-replies-2
+ *   14:45–15:30  daily-x-shitpost-3
+ *   16:00–16:45  x-timeline-replies    (was 16:00–17:00; still the original START time)
+ *   17:15–18:00  x-timeline-replies-3
+ *   18:30–19:15  daily-x-shitpost-4
+ *
+ * Four shitpost fires + three reply rounds spread across an 09:00–19:15 PT waking day. Ceilings
+ * (stated here, not just in the PR body, so a reader hits them next to the schedule that makes
+ * them true): up to 4 fresh posts/day (hard — each of `DAILY_SHITPOST_IDS` fires at most once/day,
+ * the same idempotency guarantee every daily routine already has) and up to 3 ×
+ * `TIMELINE_REPLY_CAP` replies/day (a prompt-enforced ceiling per round, since a browsing agent's
+ * own judgment — not a code path — is what actually stops at the cap). Both are well inside what a
+ * human-paced, non-bursty account can do across a 10-hour window without tripping X's automation
+ * heuristics; model-news-watch's independent 1/hour + 3/24h event-post cap is untouched by any of
+ * this.
+ */
+const DAILY_SHITPOST_WINDOWS: Record<(typeof DAILY_SHITPOST_IDS)[number], FuzzWindow> = {
+  [DAILY_SHITPOST_ID]: { start: "12:00", end: "13:00", tz: PT_TZ },
+  "daily-x-shitpost-2": { start: "11:00", end: "11:30", tz: PT_TZ },
+  "daily-x-shitpost-3": { start: "14:45", end: "15:30", tz: PT_TZ },
+  "daily-x-shitpost-4": { start: "18:30", end: "19:15", tz: PT_TZ },
+};
+
+const TIMELINE_REPLY_WINDOWS: Record<(typeof TIMELINE_REPLY_IDS)[number], FuzzWindow> = {
+  [TIMELINE_REPLY_ID]: { start: "16:00", end: "16:45", tz: PT_TZ },
+  "x-timeline-replies-2": { start: "13:30", end: "14:15", tz: PT_TZ },
+  "x-timeline-replies-3": { start: "17:15", end: "18:00", tz: PT_TZ },
+};
+
+/**
  * The definitions (sans timestamps/state — the store stamps those on seed). Kept as a factory
  * so the seeder gets fresh objects and can't accidentally share mutable state.
  */
@@ -146,22 +245,22 @@ export function builtinRoutineDefs(
     ? { cadence: { kind: "weekly" as const, weekday: overrides.freeTime.weekday }, window: overrides.freeTime.window }
     : FREE_TIME_DEFAULT_SCHEDULE;
   return [
-    {
-      id: "daily-x-shitpost",
-      name: "daily X shitpost",
+    ...DAILY_SHITPOST_IDS.map((id) => ({
+      id,
+      name: id === DAILY_SHITPOST_ID ? "daily X shitpost" : `daily X shitpost (${DAILY_SHITPOST_WINDOWS[id].start} PT)`,
       builtin: true,
       enabled: true,
       action: {
-        kind: "agent",
+        kind: "agent" as const,
         agentId: SOCIAL_MEDIA_AGENT_ID,
         input: DAILY_SHITPOST_INPUT,
         credsEntry: X_CREDS_ENTRY,
       },
       schedule: {
-        cadence: { kind: "daily" },
-        window: { start: "12:00", end: "13:00", tz: "America/Los_Angeles" },
+        cadence: { kind: "daily" as const },
+        window: DAILY_SHITPOST_WINDOWS[id],
       },
-    },
+    })),
     {
       id: WEEKLY_DEPS_UPDATE_ID,
       name: "weekly dependency update",
@@ -194,27 +293,28 @@ export function builtinRoutineDefs(
         dryRun: false,
       },
     },
-    {
-      id: TIMELINE_REPLY_ID,
-      name: "X timeline replies",
+    ...TIMELINE_REPLY_IDS.map((id) => ({
+      id,
+      name: id === TIMELINE_REPLY_ID ? "X timeline replies" : `X timeline replies (${TIMELINE_REPLY_WINDOWS[id].start} PT)`,
       builtin: true,
       enabled: true,
       action: {
-        kind: "agent",
+        kind: "agent" as const,
         agentId: SOCIAL_MEDIA_AGENT_ID,
         input: TIMELINE_REPLY_INPUT,
         credsEntry: X_CREDS_ENTRY,
       },
-      // Once a day, a few hours off the shitpost window so the two fires never collide. Daily —
-      // not hourly — is the conservative choice: this job reads a live timeline and decides on its
-      // own who to reply to, so a small daily blast radius (and a human able to see one round's
-      // worth of replies at a glance) beats a chattier cadence, especially before the selectivity
-      // bar has a track record.
+      // THREE rounds a day now (crank-the-frequency ticket, 2026-08-21) — the "before the
+      // selectivity bar has a track record" caveat that justified a single conservative daily
+      // round is spent: ro explicitly asked to raise the frequency of replies, including to posts
+      // Beckett isn't mentioned in. Each round keeps its own non-overlapping fuzz window (see the
+      // schedule laid out above `DAILY_SHITPOST_WINDOWS`), so three rounds is three independent
+      // once-per-day fires, not a new cadence kind.
       schedule: {
-        cadence: { kind: "daily" },
-        window: { start: "16:00", end: "17:00", tz: "America/Los_Angeles" },
+        cadence: { kind: "daily" as const },
+        window: TIMELINE_REPLY_WINDOWS[id],
       },
-    },
+    })),
     {
       id: PROACTIVE_SWEEP_ID,
       name: "proactive rot sweep",
