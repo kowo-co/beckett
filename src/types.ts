@@ -1044,6 +1044,11 @@ export interface Config {
      */
     cards: boolean;
     /**
+     * The live-progress-with-terminal card (`src/progress/live-card.ts`) — its own switch,
+     * independent of {@link cards}. Default ON.
+     */
+    live_progress_card: boolean;
+    /**
      * The live activity blurb on a run card (`src/run/activity.ts`): what the worker is doing
      * right now, refreshed off its journal while the run is live.
      */

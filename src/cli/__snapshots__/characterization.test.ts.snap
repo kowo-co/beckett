@@ -2048,6 +2048,7 @@ question_wait_s = 1800
 proof_recheck_max = 20
 budget_usd_per_run = 0
 cards = true
+live_progress_card = true
 
 [runs.activity]
 enabled = true

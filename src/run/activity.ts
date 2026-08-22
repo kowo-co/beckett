@@ -55,7 +55,7 @@ export const MAX_PHRASE_CHARS = 40;
  * Parsing the marker POSITIONALLY (rather than searching for it anywhere in the line) is what
  * keeps a `~` inside a sed expression from being read as a file-change row.
  */
-const STAMP_PREFIX = /^\s*\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s*/;
+export const STAMP_PREFIX = /^\s*\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s*/;
 
 /** `<Tool>  <hint>` — the journal joins the two with exactly two spaces, hint optional. */
 const TOOL_BODY = /^(\S+)(?:\s{2,}([\s\S]*))?$/;

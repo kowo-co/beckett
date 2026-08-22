@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { branchCardButtons, renderBranchEmbed, renderTaskCard } from "./cards.ts";
+import { branchCardButtons, renderBranchEmbed, renderLiveProgressCard, renderTaskCard } from "./cards.ts";
 import type { DiscordCard, DiscordCardBlock } from "../types.ts";
 import type { BranchCardSnapshot, TaskCardBranchSnapshot, TaskCardSnapshot } from "../task/status.ts";
 import type { TaskBranchStatus, TaskStatus } from "../task/store.ts";
@@ -328,4 +328,37 @@ test("a gallery narrows the section budget rather than exceeding the container c
   const card = renderTaskCard({ ...taskCard(), branches });
   expect(card.blocks.length).toBeLessThanOrEqual(10);
   expect(blocksOfKind(card, "gallery")[0]?.images.length).toBeLessThanOrEqual(10);
+});
+
+// ── live progress card ──────────────────────────────────────────────────────────────────────
+
+test("a live progress card is four fixed blocks: header, separator, terminal window, footer", () => {
+  const card = renderLiveProgressCard({
+    headerText: "▸ **run-1** · implementing · 3m",
+    terminalWindow: "```\n· Bash  bun test\n```",
+    alert: false,
+    terminal: false,
+  });
+  expect(card.blocks).toEqual([
+    { kind: "text", text: "▸ **run-1** · implementing · 3m" },
+    { kind: "separator" },
+    { kind: "text", text: "```\n· Bash  bun test\n```" },
+    { kind: "text", text: "-# Live progress card · terminal window updates in place" },
+  ]);
+});
+
+test("a live progress card says the window stopped once the run goes terminal", () => {
+  const card = renderLiveProgressCard({
+    headerText: "✓ **run-1** · shipped · 12m",
+    terminalWindow: "```\n✓ implement passed\n```",
+    alert: false,
+    terminal: true,
+  });
+  expect(cardText(card)).toContain("stopped");
+});
+
+test("a live progress card goes red on alert regardless of terminal-ness", () => {
+  const active = renderLiveProgressCard({ headerText: "h", terminalWindow: "t", alert: true, terminal: false });
+  const finished = renderLiveProgressCard({ headerText: "h", terminalWindow: "t", alert: true, terminal: true });
+  expect(active.color).toBe(finished.color);
 });

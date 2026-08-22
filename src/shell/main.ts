@@ -34,11 +34,19 @@ import type { CiVerdict, RunState } from "../run/types.ts";
 import { createRunSupervisor, runProjectSlug, runSpecReader, type RunSupervisor } from "../run/supervisor.ts";
 import { createStagesExtension, stageViewOf } from "../dispatch/stages.ts";
 import { createProgressCardService, shouldObserveRunCard, type ProgressCardService } from "../progress/cards.ts";
+import { createLiveProgressCardService, type LiveProgressCardService } from "../progress/live-card.ts";
+import { readJournalLines } from "../progress/journal.ts";
 import { createGitHubPrPoller, type GitHubPrPoller } from "../github/poll.ts";
 import { createGitHubActivityPoller, type GitHubActivityPoller } from "../github/activity.ts";
 import { parsePrUrl } from "../github/types.ts";
 import { preflightFor } from "../drivers/index.ts";
-import { cardsChannelId, createConcierge, currentGitCommit, type Concierge } from "../concierge/index.ts";
+import {
+  cardsChannelId,
+  createConcierge,
+  currentGitCommit,
+  liveProgressChannelId,
+  type Concierge,
+} from "../concierge/index.ts";
 import { createDiscordGateway, DiscordJsGateway } from "../discord/gateway.ts";
 import { PresenceController, type PresenceInputs } from "../discord/presence.ts";
 import { isDeployActive } from "./deploy-activity.ts";
@@ -326,6 +334,23 @@ async function boot(): Promise<BootedSystem> {
       })
     : null;
 
+  // The live-progress-with-terminal card (`../progress/live-card.ts`, ro's ask): a SIBLING of
+  // `progressCards` above, gated by its own `runs.live_progress_card` flag so turning this off
+  // never touches the task/branch cards or the deploy-receipt progress cards. One card per run,
+  // in its own dedicated channel — folding it into `progressCards`' channel would bury the
+  // quieter task/branch cards under a terminal window scrolling every 5 seconds.
+  const liveProgressCardEnabled = config.runs?.live_progress_card ?? true;
+  const liveProgressCard: LiveProgressCardService | null = liveProgressCardEnabled
+    ? createLiveProgressCardService({
+        gateway,
+        statePath: join(beckettDir, "live-progress-cards.json"),
+        resolveChannel: () => liveProgressChannelId(),
+        readJournalLines: (runId, tail) => readJournalLines(paths.journalDir, runId, tail),
+        specReader: runSpecReader(runStore),
+        logger: logger.child("live-progress-card"),
+      })
+    : null;
+
   // The task registry ↔ run engine bridge (`../task/run-sync.ts`): what keeps `beckett task list`,
   // the #104 task card, the branch card and the Merge button moving as a run works. Without it a
   // started branch sits at "ready" forever — see that module's header for the whole rationale.
@@ -393,6 +418,9 @@ async function boot(): Promise<BootedSystem> {
       // `runs.cards` (default ON) is this lane's own switch — the deploy receipt posts
       // independently of the ticket dispatcher's `progress.cards_as_code` above.
       if (shouldObserveRunCard(progressCards, runCardsEnabled)) void progressCards?.observe(event);
+      // `runs.live_progress_card` (default ON) is its OWN switch, independent of `runs.cards` —
+      // see the construction site above for why the two never share a gate.
+      if (shouldObserveRunCard(liveProgressCard, liveProgressCardEnabled)) void liveProgressCard?.observe(event);
       return concierge.postDispatchEvent(event);
     },
     publishOutboxPath: join(beckettDir, "run-publish-outbox.jsonl"),
