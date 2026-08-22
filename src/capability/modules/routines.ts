@@ -504,6 +504,12 @@ export const createRoutinesExtension =
       // x-shitpost shape) gets a SOURCES block appended to its input BEFORE the agent ever writes
       // a word. A `watch` event fire or a TIMELINE REPLY ROUND is already grounded some other way
       // (the specific feed item; the live page) and skips this — see `needsGroundingSources`.
+      // A feed failure/empty pool degrading to {@link GROUNDING_UNAVAILABLE_NOTE} is NOT routed
+      // into the hard stop below — that note is itself real, honest grounding content (it tells
+      // the agent plainly that nothing is available and to pick a sourceless lane instead of
+      // inventing), so a compose fire that reads it and still emits a valid `POST:` line is
+      // allowed to post. The hard stop below exists for the OTHER failure mode: an agent that
+      // skips the OUTPUT CONTRACT entirely, whether or not the SOURCES it saw were real.
       let input = agentInput;
       if (agentId === SOCIAL_MEDIA_AGENT_ID && needsGroundingSources(agentInput)) {
         const sources = deps.gatherGrounding
@@ -525,8 +531,34 @@ export const createRoutinesExtension =
       // The social-media agent's OUTPUT CONTRACT (src/agent/builtins.ts) is `POST: <text>` —
       // it authors ONLY the post text; CODE builds the actual browser task from it below, routed
       // through chilltext's tone pass first (W4A tune). An agent that hasn't adopted the
-      // contract (no `POST:` line) falls back to the legacy shape: its whole output IS the task.
+      // contract (no `POST:` line) falls back to the legacy shape: its whole output IS the task —
+      // but ONLY for a job that is exempt from the OUTPUT CONTRACT itself (a TIMELINE REPLY ROUND,
+      // grounded by the live page it reads, and explicitly told in the prompt not to use `POST:`).
+      // Every OTHER social-media fire — a plain compose, the legacy x-shitpost shape, AND an EVENT
+      // TRIGGER (the `watch` lane, src/routine/watch.ts's `buildAgentSubject`) — is expected to
+      // emit `POST:` regardless of whether it needed a fetched SOURCES block: an EVENT TRIGGER
+      // skips the SOURCES fetch above (`needsGroundingSources` returns false for it — it's already
+      // grounded in the specific feed item named in its own input) but still goes through this same
+      // agent call and the same OUTPUT CONTRACT, so it has the identical fallback hole a plain
+      // compose fire does. Falling back here would ship this agent's raw, self-authored, freeform
+      // output straight to the background browser lane's own model as its task — a second,
+      // completely ungrounded agent invocation — which is exactly how `daily-x-shitpost-4`
+      // fabricated the AWS-lockout post on 2026-08-22T01:32:28Z: the compose-time agent never
+      // emitted `POST:`, so its whole (ungrounded-looking) output became the browser task verbatim,
+      // and the browser-driving model — which never saw SOURCES or the GROUNDING RULE — invented an
+      // incident to satisfy it. So the gate here is NOT `needsGroundingSources` (that only decides
+      // whether to fetch a SOURCES block); it's "every social-media fire except a TIMELINE REPLY
+      // ROUND" — no `POST:` line on any of those is now a hard stop, not a silent downgrade to an
+      // unwitnessed second agent.
       const postText = extractPostText(outcome.output);
+      const isTimelineReplyRound = agentInput.includes("TIMELINE REPLY ROUND");
+      if (!postText && agentId === SOCIAL_MEDIA_AGENT_ID && !isTimelineReplyRound) {
+        throw new Error(
+          `agent ${agentId} did not follow the POST: output contract on a compose fire — ` +
+            "refusing to hand its raw output to the browser lane as an ungrounded freeform task " +
+            `(output started: ${JSON.stringify(outcome.output.slice(0, 200))})`,
+        );
+      }
       const doChillTransform = deps.chillTransform ?? chillTransform;
       const browserTask = postText
         ? await composeXPostBrowserTask(postText, X_SOCIAL_ACCOUNT, ctx.config.social.chill, {

@@ -77,6 +77,22 @@ test("the prompt forbids inventing an event and requires the SOURCES block to ba
   expect(flat).toContain("journal");
 });
 
+test("a first-person incident claim must trace to a specific own-history entry, no entry no post (fabricated-posts ticket)", () => {
+  const prompt = builtinAgentDefs().find((a) => a.id === SOCIAL_MEDIA_AGENT_ID)!.systemPrompt;
+  const flat = prompt.toLowerCase().replace(/\s+/g, " ");
+
+  expect(flat).toContain("first-person incidents specifically");
+  // Must trace to a SPECIFIC own-history entry — not a vibe, not something merely plausible.
+  expect(flat).toContain("must trace to a specific entry");
+  expect(flat).toContain("not to a vibe");
+  expect(flat).toContain("not to something similar that could plausibly happen");
+  // No entry ⇒ no first-person incident post; drop the framing and pick a different lane.
+  expect(flat).toContain("if you cannot point to the entry, you do not have the post");
+  expect(flat).toContain("drop the first-person framing entirely");
+  // The SPECIFIC AND PERSONAL lane itself cross-references the rule, not just the general section.
+  expect(flat).toContain("it must trace to an actual own-history entry in sources");
+});
+
 test("the STUPID ON PURPOSE / BAD OPINION lanes still need no source for the opinion itself", () => {
   const prompt = builtinAgentDefs().find((a) => a.id === SOCIAL_MEDIA_AGENT_ID)!.systemPrompt;
   expect(prompt).toContain("BAD OPINION, FULL CONFIDENCE");
