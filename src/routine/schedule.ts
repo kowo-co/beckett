@@ -47,8 +47,12 @@ export function isValidTimeZone(tz: string): boolean {
   }
 }
 
-/** The wall-clock the named zone shows at instant `at`, as calendar fields (h23). */
-function zonedFields(
+/**
+ * The wall-clock the named zone shows at instant `at`, as calendar fields (h23). Exported for
+ * reuse by {@link ../reminder/schedule.ts}'s fixed-wall-clock recurrence math, which needs the
+ * same DST-safe zoned⇄UTC conversion this module already built for the fuzz-window cadence.
+ */
+export function zonedFields(
   tz: string,
   at: Date,
 ): { year: number; month: number; day: number; hour: number; minute: number; second: number } {

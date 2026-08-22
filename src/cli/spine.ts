@@ -134,6 +134,13 @@ export const SPINE: SpineEntry[] = [
       { name: "routine", load: ext(async (d) => (await import("../capability/modules/routines.ts")).createRoutinesExtension({})(d), "routine") },
     ],
   },
+  {
+    id: "reminders",
+    cliHelp: "remind list|create|remove|fire",
+    verbs: [
+      { name: "remind", load: ext(async (d) => (await import("../capability/modules/reminders.ts")).createRemindersExtension({})(d), "remind") },
+    ],
+  },
   { id: "agent", cliHelp: "agent ls|show|add|new|invoke|rm", verbs: [{ name: "agent", load: core((m) => m.runAgent) }] },
   {
     id: "image",

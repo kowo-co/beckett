@@ -61,6 +61,11 @@ export type { QuickExtension, QuickExtensionDeps } from "./quick.ts";
 // never had one (its spine slot was an inline literal in cli/beckett.ts).
 export { createRoutinesExtension } from "./routines.ts";
 export type { RoutinesExtension, RoutinesExtensionDeps } from "./routines.ts";
+// V6 Phase 3b (reminders, ro's ask): same shape as routines — the tick loop is a BACKGROUND
+// LOOP (startPhase "late"); the CLI verb is carried and projected into its spine slot. Not in
+// the v5 FACTORIES table: like routine, reminders never had one.
+export { createRemindersExtension } from "./reminders.ts";
+export type { RemindersExtension, RemindersExtensionDeps } from "./reminders.ts";
 
 /** The capability-id → factory table (the analog of `drivers/index.ts::FACTORIES`). */
 const FACTORIES: Record<string, CapabilityFactory> = {
