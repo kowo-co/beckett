@@ -3102,6 +3102,14 @@ export class Concierge {
     ): Promise<{ routineId: string; preview: string; credsEntry: string | null }>;
   } | null = null;
   /**
+   * Reminder lever wired by `src/shell/main.ts`: serves `beckett remind fire <id>` from the
+   * control bus — a real, live fire through the reminder scheduler (see
+   * `src/capability/modules/reminders.ts`). Null until wired.
+   */
+  private remindOps: {
+    fire(id: string, opts?: { dryRun?: boolean }): Promise<{ reminderId: string; preview: string }>;
+  } | null = null;
+  /**
    * The live agent registry wired in by v4-main (issue #66): the runtime enumeration surface the
    * concierge/dispatcher use to discover which agents exist (agents.json, read live every call).
    * Null until wired — {@link listKnownAgents} then answers empty.
@@ -3544,6 +3552,11 @@ export class Concierge {
   /** Wire the routine levers (v4-main, issue #62). See {@link routineOps}. */
   setRoutineOps(ops: NonNullable<Concierge["routineOps"]>): void {
     this.routineOps = ops;
+  }
+
+  /** Wire the reminder scheduler's fire lever. See {@link remindOps}. */
+  setRemindOps(ops: NonNullable<Concierge["remindOps"]>): void {
+    this.remindOps = ops;
   }
 
   /** Wire the live agent registry (issue #66). See {@link agentRegistry}. */
@@ -4984,6 +4997,33 @@ export class Concierge {
         ],
       },
       {
+        id: "remind",
+        summary: "internal/external self-clearing reminders: fire one now, or wake the concierge when an internal one fires",
+        actionClass: ActionClass.FREE,
+        cliVerbs: [],
+        busCommands: [
+          {
+            name: "remind.fire",
+            summary: "fire a reminder now through the live scheduler (dry-run stays CLI-local)",
+            handle: async (req) => {
+              if (!this.remindOps) {
+                return { ok: false, error: "remind fire unavailable — the scheduler is not wired (v3 daemon only)" };
+              }
+              const id = typeof req.args.id === "string" ? req.args.id.trim() : "";
+              if (!id) return { ok: false, error: "usage: beckett remind fire <id>" };
+              try {
+                const plan = await this.remindOps.fire(id, {});
+                return { ok: true, data: { fired: id, preview: plan.preview } };
+              } catch (err) {
+                return { ok: false, error: (err as Error).message };
+              }
+            },
+          },
+          // `reminder.internal` (the internal-kind delivery lane) is registered beside
+          // `routine.self` below, not here — see that command for the handler.
+        ],
+      },
+      {
         id: "agent",
         summary: "live agent registry: enumerate the worker personas the running daemon knows (issue #66)",
         actionClass: ActionClass.FREE,
@@ -5831,6 +5871,41 @@ export class Concierge {
               // caller must not block on a full concierge turn, and askUpdate already logs + retries once.
               void this.askUpdate(framed, `self:${routineId}`).catch(() => undefined);
               return { ok: true, data: { woke: routineId } };
+            },
+          },
+          {
+            name: "reminder.internal",
+            summary: "surface a fired internal reminder to the concierge on its own turn, never to a channel",
+            handle: async (req) => {
+              // Internal reminders (the ticket's "things you need to come back to" case): the ONLY
+              // reminder delivery that never posts to Discord — it wakes Beckett itself, the exact
+              // same `askUpdate`/SYSTEM_SCOPE lane `routine.self` uses above. The note is Beckett's
+              // OWN text from a reminder it set on itself, so it needs no untrusted-input quoting,
+              // but is still framed as SYSTEM, never as if a person typed it. `channelId` (when the
+              // reminder carries one — the channel it was created FROM, not a delivery target) is
+              // offered only as an optional reporting surface if the model decides this is worth
+              // telling a human; the reminder itself never posts there.
+              const reminderId = typeof req.args.reminderId === "string" ? req.args.reminderId.trim() : "";
+              const note = typeof req.args.note === "string" ? req.args.note.trim() : "";
+              const channelId = typeof req.args.channelId === "string" ? req.args.channelId.trim() : "";
+              if (!reminderId || !note) {
+                return { ok: false, error: "reminder.internal needs reminderId and note" };
+              }
+              const delivery = channelId
+                ? `If this is worth telling a human, report IN YOUR VOICE by running from your Bash tool:\n` +
+                  `  beckett discord reply --channel ${channelId} "<your message>"\n` +
+                  `Otherwise do nothing.`
+                : "This never posts anywhere on its own — fold anything worth keeping into your own context.";
+              const framed =
+                `SYSTEM (an internal reminder you set on yourself just fired — issue's "things you need to ` +
+                `come back to" case; NOT a message from a user, do not reply to this turn as if a person typed it):\n` +
+                `Reminder "${reminderId}":\n\n${note}\n\n` +
+                `This is ONE turn: act on it now if it needs action — you have your doctrine, your memory, your ` +
+                `Bash tool, and the ability to file tickets. ${delivery}`;
+              // Fire-and-forget onto the system session, exactly like routine.self: the bus caller
+              // must not block on a full concierge turn, and askUpdate already logs + retries once.
+              void this.askUpdate(framed, `reminder:${reminderId}`).catch(() => undefined);
+              return { ok: true, data: { woke: reminderId } };
             },
           },
         ],

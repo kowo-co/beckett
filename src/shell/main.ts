@@ -87,6 +87,9 @@ import {
 import { createQuickExtension } from "../capability/modules/quick.ts";
 // Phase 3b routines wiring: same additive-import posture.
 import { createRoutinesExtension } from "../capability/modules/routines.ts";
+// Reminders (issue: internal + external, self-clearing) — the routines organ's closest sibling:
+// same startPhase:"late" background scheduler shape, same additive-import posture.
+import { createRemindersExtension } from "../capability/modules/reminders.ts";
 // The social-media agent's mandatory grounding step (real-sources ticket, Half 1).
 import { createDefaultGrounding } from "../routine/social-grounding.ts";
 import { createGroundingVerifier } from "../routine/social-verify.ts";
@@ -605,6 +608,11 @@ async function boot(): Promise<BootedSystem> {
     conciergeQuiet: () => concierge.queueDepth() === 0,
   })({ config, paths, logger });
   extensions.register(routinesExtension);
+  // Reminders (internal + external, self-clearing): the routines organ's closest sibling — a
+  // startPhase:"late" scheduler that dispatches into the live system (discord.reply / the
+  // concierge's own SYSTEM_SCOPE lane), so it arms at the same late position for the same reason.
+  const remindersExtension = createRemindersExtension({})({ config, paths, logger });
+  extensions.register(remindersExtension);
   // Phase 6 — the memory organ, the LAST organ (docs/v6-architecture.md §6-§7): init builds the
   // ONE daemon-owned warm MemoryStore (warm graph + Moss handle survive each short-lived
   // `beckett recall` process); the nightly maintain loop arms in the LATE startAll sweep below
@@ -893,6 +901,12 @@ async function boot(): Promise<BootedSystem> {
   // the dry-run path is CLI-local (build the plan, no daemon) so it can prove wiring with no post.
   concierge.setRoutineOps({
     fire: (id, opts) => routinesExtension.scheduler().fireNow(id, opts),
+  });
+  // Reminders (issue: internal + external, self-clearing): same indirection as routine.fire — a
+  // late-phase extension's live scheduler can only be reached from a bus command declared before
+  // the extension exists via this accessor.
+  concierge.setRemindOps({
+    fire: (id, opts) => remindersExtension.scheduler().fireNow(id, opts),
   });
 
   // LATE extension background loops start here — the whole live system (pollers, mail, agent
