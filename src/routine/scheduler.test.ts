@@ -46,21 +46,22 @@ test("fires exactly once per period (idempotent) and delegates dispatch off-proc
   await scheduler.tick();
   await scheduler.tick();
 
-  // Three dispatches total across three ticks — the ORIGINAL shitpost fire (with rng 0 its 12:00
-  // PT roll is already due at 12:30 PT), its 11:00–11:30 PT sibling `daily-x-shitpost-2` (also
-  // past by 12:30 PT — crank-the-frequency ticket, 2026-08-21), AND the proactive rot sweep
-  // (issue #79; its 09:00–10:30 PT window is past by 12:30 PT), each exactly once per period. The
-  // other siblings (`daily-x-shitpost-3`/`-4`, all three timeline-reply rounds) roll to windows
-  // still in the future at 12:30 PT, so they do not fire this tick.
-  expect(calls.length).toBe(3);
-  expect(calls.map((c) => c.routineId).sort()).toEqual([
-    "daily-x-shitpost",
-    "daily-x-shitpost-2",
-    "proactive-sweep",
-  ]);
+  // Two dispatches this tick — the ORIGINAL shitpost fire (with rng 0 its 12:00 PT roll is
+  // already due at 12:30 PT, and its window hasn't elapsed yet, so it's ON TIME, not a catch-up)
+  // and its 11:00–11:30 PT sibling `daily-x-shitpost-2` (LATE — its window already elapsed by
+  // 12:30 PT), which claims this tick's one late-catch-up slot (boot-storm guard,
+  // `LATE_CATCH_UP_BUDGET_PER_TICK`). The proactive rot sweep (issue #79; its 09:00–10:30 PT
+  // window is ALSO past by 12:30 PT) is late too but loses the race — evaluated after
+  // `daily-x-shitpost-2` exhausts the budget, it rolls straight to its next period instead of
+  // storming in alongside it (the 2026-08-22T00:57 restart bug this guard fixes). The other
+  // siblings (`daily-x-shitpost-3`/`-4`, all three timeline-reply rounds) roll to windows still in
+  // the future at 12:30 PT, so they do not fire this tick either.
+  expect(calls.length).toBe(2);
+  expect(calls.map((c) => c.routineId).sort()).toEqual(["daily-x-shitpost", "daily-x-shitpost-2"]);
   const shitpost = calls.find((c) => c.routineId === "daily-x-shitpost")!;
   expect(shitpost.credsEntry).toBe("x-account");
-  // The period is claimed on disk, for both.
+  // The period is claimed on disk, for both — INCLUDING the sweep, which rolled to tomorrow
+  // without ever dispatching (its period is spent either way, so it won't retry today).
   const state = (await store.get("daily-x-shitpost"))!.state;
   expect(state.lastFiredPeriodKey).toBe("2026-07-20");
   expect((await store.get("proactive-sweep"))!.state.lastFiredPeriodKey).toBe("2026-07-20");
@@ -160,10 +161,61 @@ test("does not fire before the chosen time", async () => {
   });
   stoppers.push(scheduler.stop);
   await scheduler.tick();
-  // The pre-rolled 12:45 PT shitpost must NOT fire at 12:30 — only the seeded proactive sweep and
-  // its 11:00–11:30 PT sibling `daily-x-shitpost-2`, both already past, dispatch this tick.
+  // The pre-rolled 12:45 PT shitpost must NOT fire at 12:30 — only its 11:00–11:30 PT sibling
+  // `daily-x-shitpost-2` (already past by 12:30 PT) dispatches this tick, claiming the tick's one
+  // late-catch-up slot. The seeded proactive sweep (also past its 09:00–10:30 PT window) is late
+  // too but is evaluated after the budget is spent, so it rolls to its next period instead of
+  // storming in alongside it — same boot-storm guard as the test above.
   expect(calls.filter((c) => c.routineId === "daily-x-shitpost").length).toBe(0);
-  expect(calls.map((c) => c.routineId).sort()).toEqual(["daily-x-shitpost-2", "proactive-sweep"]);
+  expect(calls.map((c) => c.routineId).sort()).toEqual(["daily-x-shitpost-2"]);
+  expect((await store.get("proactive-sweep"))!.state.lastFiredPeriodKey).toBe("2026-07-20");
+});
+
+// ── boot catch-up storm (2026-08-22T00:57 restart: three sibling lanes fired within one second) ─
+
+test("a restart after every window elapsed catches up AT MOST ONE routine per tick — the rest roll to tomorrow, not a storm", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-routine-sched-storm-"));
+  dirs.push(dir);
+  const store = new RoutineStore(join(dir, "routines.json"), { seedBuiltins: false });
+
+  // Three independent daily lanes, each with a NON-overlapping window that has fully elapsed by
+  // the time the daemon comes back up — exactly the shape of daily-x-shitpost-2/-3/-4 all firing
+  // together after the 2026-08-22T00:57 restart, minus the builtins so the scenario is explicit.
+  for (const id of ["lane-a", "lane-b", "lane-c"]) {
+    await store.add({
+      id,
+      name: id,
+      enabled: true,
+      action: { kind: "agent", agentId: "social-media", input: `compose ${id}` },
+      schedule: { cadence: { kind: "daily" }, window: { start: "09:00", end: "10:00", tz: "America/Los_Angeles" } },
+    });
+  }
+
+  // 2026-07-20 20:00 PT = way past every lane's 09:00-10:00 PT window that day.
+  const LATE = new Date("2026-07-21T03:00:00.000Z");
+  const { dispatcher, calls } = recorder();
+  const scheduler = startRoutineScheduler({
+    store, dispatcher, logger: quietLogger, now: () => LATE, rng: () => 0, intervalMs: 10_000_000,
+  });
+  stoppers.push(scheduler.stop);
+
+  await scheduler.tick();
+  // Exactly one of the three fires this tick — not a storm.
+  expect(calls.length).toBe(1);
+  const [fired] = calls.map((c) => c.routineId);
+
+  // The two that lost the race are marked spent for today (so they don't retry every 30s for the
+  // rest of the day) but were never dispatched.
+  for (const id of ["lane-a", "lane-b", "lane-c"]) {
+    const state = (await store.get(id))!.state;
+    expect(state.lastFiredPeriodKey).toBe("2026-07-20");
+    if (id !== fired) expect(state.lastFiredAt).toBeNull(); // marked spent, never actually fired
+  }
+
+  // A second tick the same day does not retroactively fire the skipped ones either — they rolled
+  // to tomorrow, not "later today".
+  await scheduler.tick();
+  expect(calls.length).toBe(1);
 });
 
 test("fireNow dry-run returns the plan WITHOUT dispatching (no live post)", async () => {

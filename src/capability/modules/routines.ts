@@ -69,6 +69,7 @@ import type { AgentDefinition, AgentRunner } from "../../agent/index.ts";
 import { extractPostText, composeXPostBrowserTask } from "../../agent/invoke.ts";
 import { X_SOCIAL_ACCOUNT, SOCIAL_MEDIA_AGENT_ID } from "../../agent/builtins.ts";
 import { needsGroundingSources, GROUNDING_UNAVAILABLE_NOTE } from "../../routine/social-grounding.ts";
+import type { GroundingVerdict, GroundingVerifier } from "../../routine/social-verify.ts";
 import {
   chillTransform,
   type ChilltextConfig,
@@ -160,6 +161,27 @@ export interface RoutinesExtensionDeps {
    * wires the real implementation (`createDefaultGrounding`).
    */
   gatherGrounding?: () => Promise<string>;
+  /**
+   * The code-enforced verification gate (real-sources ticket, Half 2 — enforce grounding, not ask
+   * for it): a separate, cheap model call that checks the COMPOSED post text against the exact
+   * SOURCES block this fire was handed, independent of the agent that wrote it. Run right after
+   * `dispatchAgentLane` extracts the post text and BEFORE it ever becomes a browser task — a
+   * refused post is never dispatched (`../../routine/social-verify.ts`). Deliberately NOT
+   * defaulted to the real `claude -p` spawn here — same discipline as `gatherGrounding`: an
+   * unwired test harness must never spawn a live process by accident. `shell/main.ts` always
+   * wires the real implementation (`createGroundingVerifier`); an unwired caller here degrades to
+   * an inert pass (never refuses) rather than a live call, so only the intentionally-injected test
+   * cases exercise refusal.
+   */
+  verifyGrounding?: GroundingVerifier;
+  /**
+   * How a refusal (or other fire-level notice on the compose path) reaches the origin channel
+   * WITHOUT going through the browser lane — default posts over the daemon's own control bus
+   * (`discord.reply`), exactly like the deps-update/proactive-sweep/spend-report lanes already do
+   * (see `runRoutineDepsUpdate` etc. below). Injected so a test can assert the exact refusal text
+   * without a live control socket.
+   */
+  notifyOrigin?: (channelId: string, text: string) => Promise<void>;
   /** Test seams — the scheduler's injectable clock/RNG/cadence (see {@link RoutineSchedulerDeps}). */
   now?: () => Date;
   rng?: () => number;
@@ -503,16 +525,18 @@ export const createRoutinesExtension =
       // The mandatory grounding step (Half 1): a plain compose fire (daily-x-shitpost, the legacy
       // x-shitpost shape) gets a SOURCES block appended to its input BEFORE the agent ever writes
       // a word. A `watch` event fire or a TIMELINE REPLY ROUND is already grounded some other way
-      // (the specific feed item; the live page) and skips this — see `needsGroundingSources`.
-      // A feed failure/empty pool degrading to {@link GROUNDING_UNAVAILABLE_NOTE} is NOT routed
-      // into the hard stop below — that note is itself real, honest grounding content (it tells
-      // the agent plainly that nothing is available and to pick a sourceless lane instead of
-      // inventing), so a compose fire that reads it and still emits a valid `POST:` line is
-      // allowed to post. The hard stop below exists for the OTHER failure mode: an agent that
-      // skips the OUTPUT CONTRACT entirely, whether or not the SOURCES it saw were real.
+      // (the specific feed item; the live page) and skips this — see `needsGroundingSources`. The
+      // SAME condition gates the content-verification gate below (Half 2): neither fetches nor
+      // checks against a SOURCES block that was never built for this fire. A feed failure/empty
+      // pool degrading to {@link GROUNDING_UNAVAILABLE_NOTE} is NOT routed into the format hard
+      // stop below — that note is itself real, honest grounding content (it tells the agent
+      // plainly that nothing is available and to pick a sourceless lane instead of inventing), so
+      // a compose fire that reads it and still emits a valid `POST:` line is allowed to post.
+      const gated = agentId === SOCIAL_MEDIA_AGENT_ID && needsGroundingSources(agentInput);
+      let sources: string | null = null;
       let input = agentInput;
-      if (agentId === SOCIAL_MEDIA_AGENT_ID && needsGroundingSources(agentInput)) {
-        const sources = deps.gatherGrounding
+      if (gated) {
+        sources = deps.gatherGrounding
           ? await deps.gatherGrounding().catch((err) => {
               ctx.logger.warn("social-media grounding fetch failed; composing with no fetched sources", {
                 error: String(err),
@@ -522,19 +546,30 @@ export const createRoutinesExtension =
           : GROUNDING_UNAVAILABLE_NOTE;
         input = `${agentInput}\n\n${sources}`;
       }
-      const outcome = await deps
-        .agentRunner()
-        .run(def, input, { channelId: origin.channelId, requesterId: origin.requesterId });
-      if (outcome.state !== "done" || !outcome.output.trim()) {
-        throw new Error(`agent ${agentId} did not author a post: ${outcome.error ?? outcome.state}`);
+
+      // Author a draft: run the agent, extract its `POST: <text>` contract. Shared by the first
+      // attempt and the one allowed retry below.
+      const runAgent = deps.agentRunner;
+      async function author(withInput: string): Promise<{ postText: string | null; rawOutput: string }> {
+        const outcome = await runAgent().run(def!, withInput, {
+          channelId: origin.channelId,
+          requesterId: origin.requesterId,
+        });
+        if (outcome.state !== "done" || !outcome.output.trim()) {
+          throw new Error(`agent ${agentId} did not author a post: ${outcome.error ?? outcome.state}`);
+        }
+        return { postText: extractPostText(outcome.output), rawOutput: outcome.output };
       }
-      // The social-media agent's OUTPUT CONTRACT (src/agent/builtins.ts) is `POST: <text>` —
-      // it authors ONLY the post text; CODE builds the actual browser task from it below, routed
-      // through chilltext's tone pass first (W4A tune). An agent that hasn't adopted the
-      // contract (no `POST:` line) falls back to the legacy shape: its whole output IS the task —
-      // but ONLY for a job that is exempt from the OUTPUT CONTRACT itself (a TIMELINE REPLY ROUND,
-      // grounded by the live page it reads, and explicitly told in the prompt not to use `POST:`).
-      // Every OTHER social-media fire — a plain compose, the legacy x-shitpost shape, AND an EVENT
+
+      let { postText, rawOutput } = await author(input);
+
+      // The social-media agent's OUTPUT CONTRACT (src/agent/builtins.ts) is `POST: <text>` — it
+      // authors ONLY the post text; CODE builds the actual browser task from it below, routed
+      // through chilltext's tone pass first (W4A tune). An agent that hasn't adopted the contract
+      // (no `POST:` line) falls back to the legacy shape: its whole output IS the task — but ONLY
+      // for a job that is exempt from the OUTPUT CONTRACT itself (a TIMELINE REPLY ROUND, grounded
+      // by the live page it reads, and explicitly told in the prompt not to use `POST:`). Every
+      // OTHER social-media fire — a plain compose, the legacy x-shitpost shape, AND an EVENT
       // TRIGGER (the `watch` lane, src/routine/watch.ts's `buildAgentSubject`) — is expected to
       // emit `POST:` regardless of whether it needed a fetched SOURCES block: an EVENT TRIGGER
       // skips the SOURCES fetch above (`needsGroundingSources` returns false for it — it's already
@@ -549,16 +584,76 @@ export const createRoutinesExtension =
       // incident to satisfy it. So the gate here is NOT `needsGroundingSources` (that only decides
       // whether to fetch a SOURCES block); it's "every social-media fire except a TIMELINE REPLY
       // ROUND" — no `POST:` line on any of those is now a hard stop, not a silent downgrade to an
-      // unwitnessed second agent.
-      const postText = extractPostText(outcome.output);
+      // unwitnessed second agent. This is a FORMAT check only (did the agent emit the contract at
+      // all) — it runs unconditionally and does not retry, unlike the content-verification gate
+      // below, which only applies to `gated` fires and checks what the `POST:` text actually says.
       const isTimelineReplyRound = agentInput.includes("TIMELINE REPLY ROUND");
       if (!postText && agentId === SOCIAL_MEDIA_AGENT_ID && !isTimelineReplyRound) {
         throw new Error(
           `agent ${agentId} did not follow the POST: output contract on a compose fire — ` +
             "refusing to hand its raw output to the browser lane as an ungrounded freeform task " +
-            `(output started: ${JSON.stringify(outcome.output.slice(0, 200))})`,
+            `(output started: ${JSON.stringify(rawOutput.slice(0, 200))})`,
         );
       }
+
+      // The code-enforced verification gate (real-sources ticket, Half 2 — enforce grounding, not
+      // ask for it): the format check above only proves the agent EMITTED a `POST:` line — it says
+      // nothing about whether that text's claims are true. A self-graded prompt rule already failed
+      // once on content (the AWS-lockout fabrication, 2026-08-22), so a SEPARATE model call checks
+      // the composed text against the EXACT sources block this fire was handed, independent of the
+      // agent that wrote it. One retry, with the refusal reason fed back, is allowed; a second
+      // refusal means no post this round — logged, reported to the origin channel, and NEVER
+      // dispatched to the browser lane.
+      if (gated && postText) {
+        const verify = deps.verifyGrounding ?? (async () => ({ claims: [], reason: "verifier unwired", grounded: true }) as GroundingVerdict);
+        let verdict = await verify(postText, sources!);
+        if (!verdict.grounded) {
+          ctx.logger.warn("social post refused by the grounding gate; retrying once", {
+            postText,
+            reason: verdict.reason,
+          });
+          const retryInput = [
+            input,
+            "",
+            "Your previous draft was REFUSED by the grounding-verification gate — it will NOT be",
+            `published: "${postText}"`,
+            `Refusal reason: ${verdict.reason}`,
+            "Write a DIFFERENT post whose factual claims all trace to the SOURCES block above, or pick",
+            "a lane that asserts no fact at all (BAD OPINION, STUPID ON PURPOSE, PING SOMEONE, OVERLY",
+            "INVESTED) instead of inventing one.",
+          ].join("\n");
+          const retry = await author(retryInput);
+          postText = retry.postText;
+          rawOutput = retry.rawOutput;
+          verdict = postText
+            ? await verify(postText, sources!)
+            : { claims: [], reason: "retry authored no POST: text", grounded: false };
+          if (!verdict.grounded) {
+            ctx.logger.warn("social post refused by the grounding gate twice; skipping this round", {
+              postText,
+              reason: verdict.reason,
+            });
+            const notify =
+              deps.notifyOrigin ??
+              ((channelId: string, text: string) =>
+                callBus(join(ctx.paths.beckettDir, "control.sock"), "discord.reply", { channelId, text }, 30_000).then(
+                  () => undefined,
+                ));
+            await notify(
+              origin.channelId,
+              [
+                "social post refused (grounding check failed twice this round — nothing published).",
+                `reason: ${verdict.reason}`,
+                `last attempt: "${postText ?? rawOutput.trim()}"`,
+              ].join("\n"),
+            ).catch((err) => {
+              ctx.logger.warn("could not report the grounding refusal to the origin channel", { error: String(err) });
+            });
+            return;
+          }
+        }
+      }
+
       const doChillTransform = deps.chillTransform ?? chillTransform;
       const browserTask = postText
         ? await composeXPostBrowserTask(postText, X_SOCIAL_ACCOUNT, ctx.config.social.chill, {
@@ -567,7 +662,7 @@ export const createRoutinesExtension =
             // `[social].chill`, checked by composeXPostBrowserTask, not `chilltext.enabled`.
             chillTransform: (req) => doChillTransform(ctx.config.concierge.chilltext, req),
           })
-        : outcome.output.trim();
+        : rawOutput.trim();
       // Credential injection (from the jingle entry NAMED by credsEntry), the X verification
       // pause/resume, and the confirmation back to the origin channel are all the browser agent's
       // job (issue #50) — including the one-line "posted, here's the URL" report a qualifying
