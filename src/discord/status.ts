@@ -1,6 +1,7 @@
 /** Pure Discord status-dashboard renderer: snapshot in, embed out. */
 import type { DiscordEmbed } from "../types.ts";
 import type { CcusageSpend, CoreOperationHealth, StatusDashboardSnapshot, SubscriptionLimits } from "../status/types.ts";
+import { formatDisplayDate } from "../time-display.ts";
 
 const GREEN = 0x2ea043;
 const AMBER = 0xd29922;
@@ -150,5 +151,5 @@ function formatDuration(ms: number | null): string {
 
 function formatDate(value: string): string {
   const date = new Date(value);
-  return Number.isNaN(date.valueOf()) ? value : date.toISOString().slice(0, 10);
+  return Number.isNaN(date.valueOf()) ? value : formatDisplayDate(date);
 }

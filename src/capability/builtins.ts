@@ -385,6 +385,13 @@ export const configFragments = {
       gmail_address: z.string().default(""),
     })
     .default({}),
+  display: z
+    .object({
+      // Wall-clock zone for concierge context stamps and other human-facing dates.
+      // Not validated as IANA here: a typo must fall back at format time, not refuse boot.
+      timezone: z.string().default("America/Los_Angeles"),
+    })
+    .default({}),
   // RUNS — the execution unit (`beckett task deploy`). The RunSupervisor
   // (`src/run/supervisor.ts`) is the engine; these are its only knobs. There is deliberately no
   // `claude_bin` here: worker harness config stays in `[harness.claude]`, one source of truth.
@@ -795,6 +802,7 @@ const BUILTIN_CAPABILITY_INFO: {
   harness: { id: "harness", summary: "Coding-agent harnesses (claude/codex/pi): binaries, models, fallback order." },
   paths: { id: "paths", summary: "Filesystem layout: beckett dir, db, logs, events, socket." },
   identity: { id: "identity", summary: "Beckett's external identities (GitHub user, Gmail address)." },
+  display: { id: "display", summary: "Human-facing clock timezone (concierge context, status dates)." },
   runs: { id: "runs", summary: "v7 runs: live cap, rework cap, per-run budget." },
   proactive_sweep: { id: "proactive-sweep", summary: "Proactive rot sweep: the explicit repo opt-in list." },
   github: { id: "github", summary: "GitHub sense: PR review/CI/merge poller + external-activity relay." },

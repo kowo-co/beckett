@@ -1010,6 +1010,15 @@ export interface Config {
     github_user: string;
     gmail_address: string;
   };
+  /**
+   * Human-facing / concierge-context clocks. Persistence stays ISO/UTC; only rendered
+   * strings go through this zone. Invalid values fall back to America/Los_Angeles at
+   * format time rather than refusing to boot.
+   */
+  display: {
+    /** IANA timezone id. Default America/Los_Angeles. */
+    timezone: string;
+  };
   /** Runs — the execution unit driven by `src/run/supervisor.ts`. */
   runs: {
     /** Concurrent live runs; over-cap admissions queue FIFO. Default 3. */

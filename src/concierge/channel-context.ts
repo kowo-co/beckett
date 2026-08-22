@@ -43,6 +43,7 @@ import {
   type MossDocument,
 } from "./channel-moss.ts";
 import { STOP_WORDS } from "../moss-local/index.ts";
+import { formatDisplayDateTime, formatDisplayTime } from "../time-display.ts";
 import type { IncomingMentionTarget, IncomingMessageSnapshot, Logger } from "../types.ts";
 
 /** One captured message in a channel's shared window. */
@@ -904,8 +905,7 @@ export function createChannelContextStore(opts: ChannelContextStoreOptions): Cha
  * recall/search output, where a bare "14:03" could be days old.
  */
 export function renderEntryLine(e: ChannelEntry, opts?: { withDate?: boolean }): string {
-  const iso = new Date(e.ts).toISOString();
-  const stamp = opts?.withDate ? `${iso.slice(0, 10)} ${iso.slice(11, 16)}` : iso.slice(11, 16);
+  const stamp = opts?.withDate ? formatDisplayDateTime(e.ts) : formatDisplayTime(e.ts);
   const who = e.kind === "beckett" ? "beckett" : `${e.authorName} (user:${e.authorId})`;
   return `  [${stamp}] ${who}: ${e.content.replace(/\r?\n/g, "\n    ")}`;
 }

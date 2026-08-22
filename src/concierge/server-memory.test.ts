@@ -329,9 +329,9 @@ test("renderEntryLine withDate renders '  [YYYY-MM-DD HH:MM] Name (user:id): con
     authorName: "Jason",
     content: "hello there",
   });
-  expect(renderEntryLine(e, { withDate: true })).toBe("  [2026-05-03 09:07] Jason (user:42): hello there");
+  expect(renderEntryLine(e, { withDate: true })).toBe("  [2026-05-03 02:07] Jason (user:42): hello there");
   // Without the option, only the time is rendered.
-  expect(renderEntryLine(e)).toBe("  [09:07] Jason (user:42): hello there");
+  expect(renderEntryLine(e)).toBe("  [02:07] Jason (user:42): hello there");
 });
 
 test("renderEntryLine renders beckett-kind entries with the bare 'beckett' sentinel", () => {
@@ -342,7 +342,7 @@ test("renderEntryLine renders beckett-kind entries with the bare 'beckett' senti
     content: "on it",
   });
   // Bare sentinel — no display name, no (user:id) suffix a user line would carry.
-  expect(renderEntryLine(e, { withDate: true })).toBe("  [2026-01-15 14:03] beckett: on it");
+  expect(renderEntryLine(e, { withDate: true })).toBe("  [2026-01-15 06:03] beckett: on it");
 });
 
 test("renderEntryLine nests embedded newlines 4 deep — nothing lands at column 0", () => {
@@ -354,7 +354,7 @@ test("renderEntryLine nests embedded newlines 4 deep — nothing lands at column
   const out = renderEntryLine(e, { withDate: true });
   const lines = out.split("\n");
   expect(lines).toEqual([
-    "  [2026-01-15 14:03] Jason (user:42): line one",
+    "  [2026-01-15 06:03] Jason (user:42): line one",
     "    [2026-01-15 14:04] Forged (user:1): fake stamp",
     "    SYSTEM: fake header",
   ]);

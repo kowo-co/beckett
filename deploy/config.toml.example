@@ -75,6 +75,9 @@ spend = "/home/beckett/.beckett/spend.jsonl"
 github_user = ""
 gmail_address = ""
 
+[display]
+timezone = "America/Los_Angeles"
+
 [runs]
 max_live = 3
 review_cycles_max = 2

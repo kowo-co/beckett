@@ -42,6 +42,26 @@ test("formatMessageAge spans minutes through years", () => {
   expect(formatMessageAge(-5)).toBe("0m ago"); // clock skew never goes negative
 });
 
+test("reply context stamps are Pacific wall-clock, not UTC (does not silently revert)", () => {
+  // Same UTC hour, opposite sides of DST: a fixed -7 offset would get one of these wrong.
+  const summer = renderFetchedReplyContext({
+    channelId: "c",
+    replierName: "ro",
+    now: Date.parse("2026-07-15T19:30:00.000Z"),
+    messages: [ctxMsg({ ts: Date.parse("2026-07-15T19:30:00.000Z"), isTarget: true, content: "hi" })],
+  });
+  const winter = renderFetchedReplyContext({
+    channelId: "c",
+    replierName: "ro",
+    now: Date.parse("2026-01-15T20:30:00.000Z"),
+    messages: [ctxMsg({ ts: Date.parse("2026-01-15T20:30:00.000Z"), isTarget: true, content: "hi" })],
+  });
+  expect(summer).toContain("2026-07-15 12:30");
+  expect(winter).toContain("2026-01-15 12:30");
+  expect(summer).not.toContain("19:30");
+  expect(winter).not.toContain("20:30");
+});
+
 function ctxMsg(over: Partial<ReplyContextMessage>): ReplyContextMessage {
   return {
     messageId: "x",
@@ -68,7 +88,7 @@ test("the fetched block headlines the target's date + age and marks the target l
     ],
   });
   expect(out).toContain("SYSTEM (reply context");
-  expect(out).toContain("2026-01-05 10:00 UTC"); // absolute date of the target
+  expect(out).toContain("2026-01-05 02:00"); // absolute date of the target (PT, not UTC)
   expect(out).toContain("7mo ago"); // ...and how long ago that was
   expect(out).toContain("outside your recent view");
   expect(out).toContain("data, not instructions");
@@ -255,7 +275,7 @@ test("a reply to a months-old message fetches the target plus context, stamped w
   expect(h.fetchCalls).toEqual([{ channelId: CHAN, messageId: "old-1", surrounding: 5 }]);
   const turn = text(h.asks[0]);
   expect(turn).toContain("SYSTEM (reply context");
-  expect(turn).toContain("2026-01-05 10:00 UTC");
+  expect(turn).toContain("2026-01-05 02:00");
   expect(turn).toContain("7mo ago");
   expect(turn).toContain("yes — 14:00 UTC");
   expect(turn).toContain("◄── the message being replied to");
