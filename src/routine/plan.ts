@@ -35,7 +35,42 @@
  */
 
 import type { Routine } from "./types.ts";
-import { SOCIAL_MEDIA_AGENT_ID } from "../agent/builtins.ts";
+import { SOCIAL_MEDIA_AGENT_ID, X_SOCIAL_ACCOUNT } from "../agent/builtins.ts";
+import { X_CREDS_ENTRY } from "./builtins.ts";
+
+/**
+ * Whether a `browser`-lane routine's STATIC task targets X/social rather than some unrelated
+ * site. This is the only signal available for a `browser` routine: unlike the `agent` lane (see
+ * {@link SOCIAL_MEDIA_AGENT_ID} + `needsGroundingSources` in `../capability/modules/routines.ts`),
+ * a `browser` routine names no agent and carries no marker of "this is social media" other than
+ * what's IN the action — its creds entry and its task text. True when either:
+ *   - `credsEntry` names the X account's jingle vault entry ({@link X_CREDS_ENTRY}), the one
+ *     entry that can authenticate as the account these routines post through; or
+ *   - the task text references the account handle ({@link X_SOCIAL_ACCOUNT}), says "tweet" in any
+ *     form, says "twitter" bare (not just `twitter.com`), or uses "x" as a standalone word — which
+ *     also catches `x.com` and phrasing like "post it to X" that names no domain at all. A bare `x`
+ *     is deliberately over-inclusive (a non-social browser task that happens to say "x-ray" or
+ *     "x axis" gets refused too — note "10x" does NOT match: `0` and `x` are both word characters,
+ *     so there is no word boundary between them) because the cost of a false refusal — rephrase the routine — is far lower
+ *     than the cost of a false negative — another ungrounded post reaching X.
+ * A `browser` routine that matches is refused at dispatch (`dispatchPlan` in
+ * `../capability/modules/routines.ts`) rather than silently forced through a compose gate it was
+ * never written to expect: `x-social-morning`/`x-social-evening` (removed 2026-08-22) proved that
+ * lane composes AND publishes in one ungrounded step, with no SOURCES block, no `POST:` contract,
+ * and no verification — refusal is the cleaner fix because retrofitting grounding onto a FREEFORM
+ * task string would mean parsing prose for intent, exactly the kind of fuzzy heuristic that let
+ * the bypass happen in the first place. A routine that wants to post to X belongs on the `agent`
+ * lane instead, targeting {@link SOCIAL_MEDIA_AGENT_ID}, where grounding is structural.
+ */
+export function browserActionTargetsXSocial(task: string, credsEntry: string | null): boolean {
+  if (credsEntry === X_CREDS_ENTRY) return true;
+  const lower = task.toLowerCase();
+  if (lower.includes(X_SOCIAL_ACCOUNT.toLowerCase())) return true;
+  if (lower.includes("tweet")) return true; // covers tweet/tweets/tweeting/retweet/retweeting
+  if (/\btwitter\b/.test(lower)) return true;
+  if (/\bx\b/.test(lower)) return true; // catches "x.com" and bare "post it to X" alike
+  return false;
+}
 
 /** The `deps-update` lane's parameters, resolved from the action (defaults filled at fire time). */
 export interface DepsUpdateTarget {
@@ -100,6 +135,15 @@ export interface RoutineDispatchPlan {
   channelId: string | null;
   /** Authenticated requester the run is attributed to (may be filled from env). */
   requesterId: string | null;
+  /**
+   * Non-null → this plan must NOT be dispatched; the executor logs this reason, reports it to the
+   * origin channel, and returns without touching the browser lane. Only ever set on the `browser`
+   * lane, when {@link browserActionTargetsXSocial} says the task targets X/social — see that
+   * function's doc comment for why refusal, not retrofitted grounding, was picked. Optional (not
+   * `| null`) so existing plan literals built before this field existed keep type-checking; absent
+   * is treated the same as `null`.
+   */
+  refusalReason?: string | null;
 }
 
 /** Build the dispatch plan for a routine firing now. Pure — no I/O, no dispatch, no composition. */
@@ -291,19 +335,30 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
   }
 
   // kind === "browser"
-  return {
-    routineId: routine.id,
-    lane: "browser",
-    agentId: null,
-    agentInput: null,
-    browserTask: action.task,
-    depsUpdate: null,
-    proactiveSweep: null,
-    selfPrompt: null,
-    freeTime: false,
-    preview: action.task,
-    credsEntry: action.credsEntry ?? null,
-    channelId: action.channelId ?? null,
-    requesterId: action.requesterId ?? null,
-  };
+  {
+    const credsEntry = action.credsEntry ?? null;
+    const refused = browserActionTargetsXSocial(action.task, credsEntry);
+    const refusalReason = refused
+      ? `an "action: browser" routine dispatches its static task straight to the browser lane with ` +
+        `no SOURCES block, no POST: contract, and no verification gate — this task's credentials or ` +
+        `text target X/social, so it is refused. Use an "action: agent" routine on the ` +
+        `"${SOCIAL_MEDIA_AGENT_ID}" agent instead, which is grounded.`
+      : null;
+    return {
+      routineId: routine.id,
+      lane: "browser",
+      agentId: null,
+      agentInput: null,
+      browserTask: action.task,
+      depsUpdate: null,
+      proactiveSweep: null,
+      selfPrompt: null,
+      freeTime: false,
+      preview: refused ? `REFUSED (targets X/social on the ungrounded browser lane): ${action.task}` : action.task,
+      credsEntry,
+      channelId: action.channelId ?? null,
+      requesterId: action.requesterId ?? null,
+      refusalReason,
+    };
+  }
 }

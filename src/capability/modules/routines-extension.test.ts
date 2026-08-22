@@ -19,6 +19,8 @@ import { CapabilityRegistry } from "../index.ts";
 import { createRoutinesExtension, type RoutinesExtension, type RoutinesExtensionDeps } from "./routines.ts";
 import { RoutineStore } from "../../routine/store.ts";
 import type { RoutineScheduler, RoutineSchedulerDeps } from "../../routine/scheduler.ts";
+import { buildDispatchPlan } from "../../routine/plan.ts";
+import type { Routine } from "../../routine/types.ts";
 import { validateConfig } from "../../config.ts";
 import { buildPaths } from "../../paths.ts";
 import type { Config, Logger } from "../../types.ts";
@@ -476,6 +478,85 @@ test("the browser lane still goes to the browser — the fork is on the lane, no
   });
   await dispatcher.dispatch(planFor("browser") as never, {} as never);
   expect(posted).toEqual(["go do the thing"]);
+});
+
+// ── close the browser-action grounding bypass (2026-08-22) ──────────────────────────────────
+// `x-social-morning`/`x-social-evening` were `action: "browser"` routines: their static task
+// went straight from `dispatchPlan` to `deps.browserAgent().run(...)` with no SOURCES block, no
+// `POST:` contract, and no verification gate — the browser-driving model composed AND published
+// in one ungrounded step. `x-social-evening` fired 2026-08-22T01:32:25.685Z; its fabricated post
+// was live by 01:32:28Z. This test reproduces that exact shape end to end (a real `buildDispatchPlan`
+// over a `browser` routine authenticated as the X account) and proves the browser lane is never
+// reached. BEFORE this fix it FAILED: `RoutineDispatchPlan` carried no `refusalReason`, so
+// `dispatchPlan` fell straight through to `deps.browserAgent().run(plan.browserTask, ...)` and
+// `posted` came back `["Compose one fresh post in voice about recent tech news and post it to X."]`
+// instead of `[]`.
+function xSocialBrowserRoutine(): Routine {
+  return {
+    id: "x-social-evening",
+    name: "x-social-evening",
+    builtin: false,
+    enabled: true,
+    action: {
+      kind: "browser",
+      task: "Compose one fresh post in voice about recent tech news and post it to X.",
+      credsEntry: "x-account",
+    },
+    schedule: { cadence: { kind: "daily" }, window: { start: "18:00", end: "19:00", tz: "America/Los_Angeles" } },
+    state: { periodKey: null, chosenFireAt: null, lastFiredPeriodKey: null, lastFiredAt: null },
+    createdAt: "2026-08-05T00:00:00.000Z",
+    updatedAt: "2026-08-05T00:00:00.000Z",
+  };
+}
+
+test("a browser-lane routine that targets X/social is refused at dispatch — never reaches the browser lane ungrounded (REGRESSION)", async () => {
+  const posted: string[] = [];
+  const notified: Array<{ channelId: string; text: string }> = [];
+  const dispatcher = await dispatcherOf({
+    browserAgent: () => ({ async run(task: string) { posted.push(task); return undefined as never; } }) as never,
+    agentRegistry: () => ({ get: () => null }),
+    agentRunner: () => ({ run: async () => ({ state: "done", output: "x" }) }) as never,
+    notifyOrigin: async (channelId, text) => {
+      notified.push({ channelId, text });
+    },
+  });
+
+  const routine = xSocialBrowserRoutine();
+  const plan = buildDispatchPlan(routine);
+  expect(plan.refusalReason).toBeTruthy(); // buildDispatchPlan itself already refuses this shape
+
+  await dispatcher.dispatch(plan, routine);
+
+  expect(posted).toEqual([]); // never reached the privileged browser lane
+  expect(notified.length).toBe(1);
+  expect(notified[0]!.channelId).toBe("chan");
+  expect(notified[0]!.text.toLowerCase()).toContain("refused");
+});
+
+test("a browser-lane routine with no X markers still dispatches normally — the general lane is unaffected", async () => {
+  const posted: string[] = [];
+  const dispatcher = await dispatcherOf({
+    browserAgent: () => ({ async run(task: string) { posted.push(task); return undefined as never; } }) as never,
+    agentRegistry: () => ({ get: () => null }),
+    agentRunner: () => ({ run: async () => ({ state: "done", output: "x" }) }) as never,
+  });
+
+  const routine: Routine = {
+    id: "hourly-check",
+    name: "hourly-check",
+    builtin: false,
+    enabled: true,
+    action: { kind: "browser", task: "check the status page and post a summary" },
+    schedule: { cadence: { kind: "daily" }, window: { start: "09:00", end: "10:00", tz: "America/Los_Angeles" } },
+    state: { periodKey: null, chosenFireAt: null, lastFiredPeriodKey: null, lastFiredAt: null },
+    createdAt: "2026-08-05T00:00:00.000Z",
+    updatedAt: "2026-08-05T00:00:00.000Z",
+  };
+  const plan = buildDispatchPlan(routine);
+  expect(plan.refusalReason).toBeFalsy();
+
+  await dispatcher.dispatch(plan, routine);
+  expect(posted).toEqual(["check the status page and post a summary"]);
 });
 
 // ── the agent lane's POST: contract routes through chilltext before the browser (W4A) ────
