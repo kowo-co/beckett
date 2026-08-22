@@ -11,6 +11,7 @@ import { join } from "node:path";
 import {
   defaultConfigToml,
   dropRetiredChilltextSystem,
+  dropRetiredRunProgressCards,
   dropRetiredSections,
   loadConfig,
   validateConfig,
@@ -141,6 +142,32 @@ describe("retired sections", () => {
     seen.length = 0;
     const clean = { concierge: { chilltext: { enabled: true } } };
     expect(dropRetiredChilltextSystem(clean, warn)).toBe(clean); // untouched object, not a clone
+    expect(seen).toHaveLength(0);
+  });
+
+  test("[runs] live progress card keys are stripped so a pre-removal config.toml still boots", () => {
+    const config = loadToml(
+      `[runs]\nmax_live = 1\ncards = false\nlive_progress_card = true\n\n[runs.activity]\nenabled = false\n`,
+    );
+    expect(config.runs).not.toHaveProperty("cards");
+    expect(config.runs).not.toHaveProperty("live_progress_card");
+    expect(config.runs).not.toHaveProperty("activity");
+    expect(config.runs.max_live).toBe(1);
+  });
+
+  test("the retired run-card keys are announced once, and untouched configs are left alone", () => {
+    const seen: string[] = [];
+    const warn = (message: string) => void seen.push(message);
+    const stripped = dropRetiredRunProgressCards(
+      { runs: { max_live: 1, cards: false, live_progress_card: true, activity: { enabled: false } } },
+      warn,
+    );
+    expect(stripped).toEqual({ runs: { max_live: 1 } });
+    expect(seen).toHaveLength(3);
+
+    seen.length = 0;
+    const clean = { runs: { max_live: 3 } };
+    expect(dropRetiredRunProgressCards(clean, warn)).toBe(clean);
     expect(seen).toHaveLength(0);
   });
 });

@@ -124,7 +124,7 @@ mock.module("../dispatch/spawn.ts", () => ({
   spawnWorker: fakeSpawn,
 }));
 
-const { RunSupervisor, runProjectSlug, runSpecReader, PUBLISH_STALL_MS } = await import("./supervisor.ts");
+const { RunSupervisor, runProjectSlug, PUBLISH_STALL_MS } = await import("./supervisor.ts");
 const { resolveSelfProjectOwner } = await import("../github/owner.ts");
 
 // ── injected git fakes ──────────────────────────────────────────────────────────────────────
@@ -274,8 +274,6 @@ function newSupervisor(
     spendLedgerPath?: string;
     publishOutboxPath?: string;
     store?: RunStore;
-    /** The activity-blurb POLISH seam — a fake here is what keeps this suite off the network. */
-    summarizeActivity?: (lines: string[], opts: { provider?: string }) => Promise<string | null>;
     now?: () => number;
     preflight?: (harness: HarnessName) => Promise<{ ok: boolean; problems: string[] }>;
     capabilityPreflight?: (target: CapabilityTarget) => Promise<CapabilityInventory>;
@@ -290,9 +288,7 @@ function newSupervisor(
   const repos = join(dir, "repos");
   const store = opts.store ?? new RunStore(join(dir, "runs.json"));
   const publishCalls: Harness["publishCalls"] = [];
-  // The card service's `specReader`/deploy-receipt tests read the run's own dispatch trace, the
-  // SAME bus `progress/cards.ts` observes in production — captured here rather than through a
-  // real DispatchEventBus so a torn events.jsonl can never make these tests flaky.
+  // Captured dispatch events — a torn events.jsonl can never make these tests flaky.
   const events: DispatchEvent[] = [];
   const supervisor = new RunSupervisor({
     store,
@@ -314,12 +310,6 @@ function newSupervisor(
           },
         }
       : {}),
-    // Default the blurb POLISH to a hard failure: any test that DOESN'T opt in must never be able
-    // to reach a real model, and the run must survive the polish throwing. (With the shipped
-    // default `provider = "off"` it is never called at all.)
-    summarizeActivity: opts.summarizeActivity ?? (async () => {
-      throw new Error("activity polish must be injected in tests");
-    }),
     ...(opts.now ? { now: opts.now } : {}),
     ...(opts.runtimeStatePath ? { runtimeStatePath: opts.runtimeStatePath } : {}),
     ...(opts.spendLedgerPath ? { spendLedgerPath: opts.spendLedgerPath } : {}),
@@ -3442,219 +3432,6 @@ describe("steering", () => {
     await settle();
     // Already delivered live — the next stage's brief must not repeat it.
     expect(spawnCalls[1]!.steering ?? []).not.toContain(note);
-  });
-});
-
-// `progress/cards.ts`'s `specReader` adapter — the checklist line on a run's deploy receipt.
-describe("runSpecReader", () => {
-  test("reads a run's live spec.md checklist progress off its workspace", () => {
-    const dir = scratch();
-    const store = new RunStore(join(dir, "runs.json"));
-    const run = seedRun(store, makeRun({ workspace: join(dir, "ws") }));
-    mkdirSync(join(run.workspace!, ".beckett"), { recursive: true });
-    writeFileSync(
-      join(run.workspace!, SPEC_FILE_REL),
-      "# t\n\n## Checklist\n- [x] one\n- [x] two\n- [ ] three\n",
-    );
-    expect(runSpecReader(store)(run.id)).toEqual({ done: 2, total: 3 });
-  });
-
-  test("no workspace yet (the deploy-instant card's case) reads as null, not zero", () => {
-    const dir = scratch();
-    const store = new RunStore(join(dir, "runs.json"));
-    const run = seedRun(store, makeRun({ workspace: null }));
-    expect(runSpecReader(store)(run.id)).toBeNull();
-  });
-
-  test("a workspace with no spec.md yet reads as null", () => {
-    const dir = scratch();
-    const store = new RunStore(join(dir, "runs.json"));
-    const run = seedRun(store, makeRun({ workspace: join(dir, "ws") }));
-    mkdirSync(run.workspace!, { recursive: true });
-    expect(runSpecReader(store)(run.id)).toBeNull();
-  });
-
-  test("an id that isn't a run at all (a ticket-dispatcher event) reads as null", () => {
-    const dir = scratch();
-    const store = new RunStore(join(dir, "runs.json"));
-    expect(runSpecReader(store)("ticket-1")).toBeNull();
-  });
-});
-
-// ── the live activity blurb (./activity.ts) ─────────────────────────────────────────────
-
-describe("the live activity blurb", () => {
-  /** One worker tool call, exactly as the driver hands it to `onProgress`. */
-  const toolCall = (tool: string, input: Record<string, unknown>) =>
-    ({ kind: "tool_call", tool, toolId: `t${Math.random()}`, input }) as never;
-
-  /** Drive a run to a live implement worker and hand back its `onProgress` callback. */
-  async function liveWorker(opts: Parameters<typeof newSupervisor>[0] = {}) {
-    const h = newSupervisor(opts);
-    const run = seedRun(h.store, makeRun());
-    await h.supervisor.admit(run.id);
-    await tick();
-    const onProgress = spawnCalls.at(-1)!.onProgress!;
-    const blurbs = () => h.events.filter((e) => e.stage === "activity");
-    return { ...h, run, onProgress, blurbs };
-  }
-
-  test("a tool call puts a derived phrase on the card, with no model in the path", async () => {
-    const { onProgress, blurbs } = await liveWorker();
-    onProgress(toolCall("Edit", { file_path: "/ws/web/public/index.html" }), {
-      stage: "implement",
-      workerId: "wk_1",
-    });
-    await tick();
-    expect(blurbs().map((e) => e.message)).toEqual(["editing index.html"]);
-    expect(blurbs()[0]).toMatchObject({ outcome: "info", stage: "activity" });
-  });
-
-  test("refreshes are throttled to one per 15s per run (fake clock)", async () => {
-    let now = 1_000_000;
-    const { onProgress, blurbs } = await liveWorker({ now: () => now });
-    const ctx = { stage: "implement", workerId: "wk_1" };
-    onProgress(toolCall("Edit", { file_path: "/ws/a.ts" }), ctx);
-    onProgress(toolCall("Edit", { file_path: "/ws/b.ts" }), ctx); // same instant — throttled
-    now += 14_999;
-    onProgress(toolCall("Edit", { file_path: "/ws/c.ts" }), ctx); // still inside the floor
-    now += 1;
-    onProgress(toolCall("Edit", { file_path: "/ws/d.ts" }), ctx); // clears it
-    await tick();
-    expect(blurbs().map((e) => e.message)).toEqual(["editing a.ts", "editing d.ts"]);
-  });
-
-  test("a line that derives NOTHING does not spend the first-refresh allowance", async () => {
-    // Every real worker opens with `session_started`, whose `▸ … worker started` line the rules
-    // have nothing to say about. If that consumed the run's one never-waits refresh, the FIRST
-    // real tool call of every run would sit behind the 15s floor — the exact moment the feature
-    // exists for.
-    let now = 1_000_000;
-    const { onProgress, blurbs } = await liveWorker({ now: () => now });
-    const ctx = { stage: "implement", workerId: "wk_1" };
-    onProgress({ kind: "session_started", model: "claude" } as never, ctx);
-    now += 2_000;
-    onProgress(toolCall("Edit", { file_path: "/ws/web/public/index.html" }), ctx);
-    await tick();
-    expect(blurbs().map((e) => e.message)).toEqual(["editing index.html"]);
-  });
-
-  test("an unchanged phrase is not republished every cycle", async () => {
-    let now = 1_000_000;
-    const { onProgress, blurbs } = await liveWorker({ now: () => now });
-    const ctx = { stage: "implement", workerId: "wk_1" };
-    for (let i = 0; i < 4; i++) {
-      onProgress(toolCall("Bash", { command: "bun test" }), ctx);
-      now += 16_000;
-    }
-    await tick();
-    // 4 refreshes, one phrase: the card is repainted only often enough to stay fresh.
-    expect(blurbs().map((e) => e.message)).toEqual(["running tests"]);
-    now += 60_000;
-    onProgress(toolCall("Bash", { command: "bun test" }), ctx);
-    await tick();
-    expect(blurbs()).toHaveLength(2);
-  });
-
-  test("blurbs are EPHEMERAL — they never reach the durable dispatch ledger", async () => {
-    const dir = scratch();
-    const path = join(dir, "dispatch.jsonl");
-    const h = newSupervisor();
-    // A supervisor whose bus actually writes: the blurb must not appear in the file.
-    const supervisor = new RunSupervisor({
-      store: h.store,
-      config: cfg(),
-      gitOps: gitFakes,
-      resolveRepoRoot: (run) => join(h.repos, runProjectSlug(run)),
-      dispatchEventsPath: path,
-      summarizeActivity: async () => null,
-    });
-    const run = seedRun(h.store, makeRun());
-    await supervisor.admit(run.id);
-    await tick();
-    spawnCalls[0]!.onProgress!(toolCall("Edit", { file_path: "/ws/index.html" }), {
-      stage: "implement",
-      workerId: "wk_1",
-    });
-    await tick();
-    const rows = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
-    expect(rows.length).toBeGreaterThan(0);
-    expect(rows.some((r) => r.stage === "activity")).toBe(false);
-  });
-
-  test("`enabled = false` reverts the card to the phase word entirely", async () => {
-    const config = cfg({
-      runs: { max_live: 3, review_cycles_max: 2, budget_usd_per_run: 0, activity: { enabled: false } },
-    });
-    const { onProgress, blurbs } = await liveWorker({ config });
-    onProgress(toolCall("Edit", { file_path: "/ws/index.html" }), { stage: "implement", workerId: "wk_1" });
-    await tick();
-    expect(blurbs()).toHaveLength(0);
-  });
-
-  test("the polish is OFF by default — a throwing polish seam is never even called", async () => {
-    // `newSupervisor`'s default polish throws; with `provider = "off"` (the shipped default) the
-    // run still gets its derived phrase and nothing rejects.
-    const { onProgress, blurbs } = await liveWorker();
-    onProgress(toolCall("Bash", { command: "bun x tsc --noEmit" }), { stage: "implement", workerId: "wk_1" });
-    await settle();
-    expect(blurbs().map((e) => e.message)).toEqual(["typechecking"]);
-  });
-
-  test("a flagged-on polish overwrites the derived phrase, and a failing one doesn't", async () => {
-    const config = cfg({
-      runs: {
-        max_live: 3,
-        review_cycles_max: 2,
-        budget_usd_per_run: 0,
-        activity: { provider: "cerebras" },
-      },
-    });
-    const good = await liveWorker({ config, summarizeActivity: async () => "polishing the hero styles" });
-    good.onProgress(toolCall("Bash", { command: "bun test" }), { stage: "implement", workerId: "wk_1" });
-    await settle();
-    expect(good.blurbs().map((e) => e.message)).toEqual(["running tests", "polishing the hero styles"]);
-
-    const bad = await liveWorker({
-      config,
-      summarizeActivity: async () => {
-        throw new Error("cerebras is down");
-      },
-    });
-    bad.onProgress(toolCall("Bash", { command: "bun test" }), { stage: "implement", workerId: "wk_1" });
-    await settle();
-    expect(bad.blurbs().map((e) => e.message)).toEqual(["running tests"]);
-  });
-
-  test("a polish that lands after its worker is gone never decorates the next stage's card", async () => {
-    const config = cfg({
-      runs: { max_live: 3, review_cycles_max: 2, budget_usd_per_run: 0, activity: { provider: "cerebras" } },
-    });
-    let release!: (phrase: string | null) => void;
-    const inFlight = new Promise<string | null>((resolve) => {
-      release = resolve;
-    });
-    const { onProgress, blurbs } = await liveWorker({ config, summarizeActivity: () => inFlight });
-    onProgress(toolCall("Edit", { file_path: "/ws/index.html" }), { stage: "implement", workerId: "wk_1" });
-    await tick();
-    expect(blurbs().map((e) => e.message)).toEqual(["editing index.html"]);
-
-    // The implement worker finishes while the model is still thinking. Its phrase describes a
-    // stage that is over by the time it arrives, so it must be dropped rather than stamped onto
-    // the card the run has moved on to.
-    created[0]!.finish("success", "implemented", doneSignal(true));
-    await settle();
-    release("polishing the hero styles");
-    await settle();
-    expect(blurbs().map((e) => e.message)).toEqual(["editing index.html"]);
-  });
-
-  test("a tool call the journal drops produces no blurb, and neither does a non-worker stage", async () => {
-    const { onProgress, blurbs } = await liveWorker();
-    onProgress({ kind: "turn_complete" } as never, { stage: "implement", workerId: "wk_1" });
-    onProgress(toolCall("Edit", { file_path: "/ws/a.ts" }), { stage: "design", workerId: "wk_1" });
-    await tick();
-    expect(blurbs()).toHaveLength(0);
   });
 });
 

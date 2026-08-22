@@ -19,7 +19,6 @@
  * ../dispatch/digest-feed.ts DispatchDigestFeed} owns the post/edit mechanics.
  */
 import type { DispatchEvent } from "./events.ts";
-import { ACTIVITY_STAGE } from "../run/activity.ts";
 
 /** What the caller should render after an event. `null` from `observe` means "say nothing". */
 export interface DigestUpdate {
@@ -220,11 +219,6 @@ export function describeDispatchEvent(event: DispatchEvent): DigestNote | null {
   const error = clip(event.error);
   const detail = error || message;
   const stageWord = STAGE_WORDS[base] ?? base.replace(/[-_]/g, " ");
-
-  // The live activity blurb (`../run/activity.ts`) repaints a progress card every ~20s while a
-  // worker runs. It is card decoration, not news: it says nothing a person reading the digest
-  // wants a sentence about, and relaying it would post a Discord message per tool burst.
-  if (base === ACTIVITY_STAGE) return null;
 
   // A restart is not a failure — the single loudest thing this digest exists to fix.
   if (event.outcome === "interrupted") {

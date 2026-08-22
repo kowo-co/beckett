@@ -118,8 +118,7 @@ export class TicketJournal implements ProgressSink {
 
   /**
    * The last `tail` raw journal lines for a ticket, oldest first — no "N elided" banner (that's
-   * {@link read}'s own, meant for a human/model consumer). This is the live-progress card's read
-   * path (`./live-card.ts`): it wants exactly the scrollback, nothing narrated about it.
+   * {@link read}'s own, meant for a human/model consumer).
    */
   readLines(ticketIdent: string, tail: number): string[] | null {
     if (!this.dir) return null;
@@ -149,11 +148,6 @@ function safeIdent(ident: string): string {
 /** Read one ticket's journal tail without a daemon — the `beckett journal` CLI path. */
 export function readJournal(dir: string, ticketIdent: string, tail: number = DEFAULT_TAIL_LINES): string | null {
   return new TicketJournal({ dir }).read(ticketIdent, tail);
-}
-
-/** {@link TicketJournal.readLines} without a daemon instance — `./live-card.ts`'s boot-time seam. */
-export function readJournalLines(dir: string, ticketIdent: string, tail: number): string[] | null {
-  return new TicketJournal({ dir }).readLines(ticketIdent, tail);
 }
 
 /** Factory matching the repo's `createX` convention. */
@@ -255,8 +249,7 @@ function toolHint(tool: string, input: unknown): string {
     "";
   if (!raw) return "";
   const flat = raw.replace(/\s+/g, " ").trim();
-  // A path hint truncated head-first loses the ONE segment a reader (and `../run/activity.ts`'s
-  // blurb) wants — the filename — because worktree paths are long and the interesting end is the
+  // A path hint truncated head-first loses the ONE segment a reader wants — the filename — because worktree paths are long and the interesting end is the
   // far end. Keep the same ceiling and the same head truncation, but always retain the basename.
   return command === null && path !== null ? truncatePath(flat, HINT_MAX) : truncate(flat, HINT_MAX);
 }

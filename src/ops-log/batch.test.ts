@@ -3,7 +3,7 @@ import { buildBatchMessage, createOpsLogBatcher, DEFAULT_MAX_QUEUED } from "./ba
 
 const quiet = { debug() {}, info() {}, warn() {}, error() {}, child() { return quiet; } } as never;
 
-/** A manual scheduler: nothing fires until the test says so — same shape as progress/cards.test.ts. */
+/** A manual scheduler: nothing fires until the test says so. */
 function manualScheduler() {
   const timers: { fn: () => void; ms: number; cancelled: boolean }[] = [];
   return {

@@ -1038,28 +1038,6 @@ export interface Config {
     proof_recheck_max: number;
     /** Per-run USD ceiling; 0 falls back to `[budget] per_task_usd_cap`. Default 0. */
     budget_usd_per_run: number;
-    /**
-     * The deploy receipt: one progress card per run (`src/progress/cards.ts`), edited off the
-     * dispatch event bus. Default ON.
-     */
-    cards: boolean;
-    /**
-     * The live-progress-with-terminal card (`src/progress/live-card.ts`) — its own switch,
-     * independent of {@link cards}. Default ON.
-     */
-    live_progress_card: boolean;
-    /**
-     * The live activity blurb on a run card (`src/run/activity.ts`): what the worker is doing
-     * right now, refreshed off its journal while the run is live.
-     */
-    activity: {
-      /** Off entirely → cards render exactly as they did before blurbs existed. Default ON. */
-      enabled: boolean;
-      /** OPTIONAL micro-model polish; `off` (the default) keeps the derived phrase, free. */
-      provider: "cerebras" | "claude" | "off";
-      /** Floor between blurb refreshes for one run, seconds (clamped to ≥5). Default 15. */
-      throttle_secs: number;
-    };
   };
   /**
    * Proactive rot sweep: the EXPLICIT repo opt-in list, `owner/name`. Empty (the default) sweeps

@@ -97,9 +97,8 @@ export class DispatchEventBus {
 
   /**
    * A live-ONLY row: notify the sink, append nothing. For repaints of a live surface that carry no
-   * transition — the run engine's activity blurb (`../run/activity.ts`) repaints a progress card
-   * every ~20s, and a forensic ledger whose whole point is that nothing rewrites it must not fill
-   * up with a hundred "still editing index.html" rows per run.
+   * transition. A forensic ledger whose whole point is that nothing rewrites it must not fill
+   * up with decoration rows per run.
    *
    * Everything a person or a tool reconstructs a run from still goes through {@link emit}.
    */
