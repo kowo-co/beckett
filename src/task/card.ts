@@ -186,10 +186,6 @@ export class TaskCardService {
   }
 }
 
-export function createTaskCardService(opts: TaskCardServiceOptions): TaskCardService {
-  return new TaskCardService(opts);
-}
-
 /**
  * A rejection the identical render will hit forever — a payload-shape or authorization 4xx —
  * rather than offline / 429 rate limit / 403 permission, which a later tick may clear. The edit

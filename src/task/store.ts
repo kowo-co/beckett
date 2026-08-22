@@ -784,7 +784,3 @@ function aggregateTaskStatus(branches: TaskBranch[], current: TaskStatus): TaskS
   if (current === "paused") return current;
   return "active";
 }
-
-export function createTaskStore(path: string, opts?: TaskStoreOptions): TaskStore {
-  return new TaskStore(path, opts);
-}

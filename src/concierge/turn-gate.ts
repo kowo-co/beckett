@@ -64,7 +64,3 @@ export class TurnGate {
     return { limit: this.limit, active: this.active, waiting: this.waiters.length };
   }
 }
-
-export function createTurnGate(limit: number): TurnGate {
-  return new TurnGate(limit);
-}

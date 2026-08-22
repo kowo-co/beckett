@@ -9053,29 +9053,6 @@ function describePrEvent(event: PrPollEvent): string {
   }
 }
 
-/**
- * Pull the artifact/PR link out of a dispatcher done comment (issue #21). The comment says
- * "Shipped: <url>" or "PR opened (needs your merge): <url>"; prefer a GitHub URL over any other
- * (a public site URL may also appear), else take the first URL. Null when the comment has none.
- */
-export function artifactLinkFrom(body: string): string | null {
-  const urls = body.match(/https?:\/\/[^\s)>\]]+/g) ?? [];
-  if (urls.length === 0) return null;
-  return urls.find((u) => u.includes("github.com")) ?? urls[0]!;
-}
-
-/**
- * Routine machine narration that never needs a person's attention (issue #25): a node starting
- * because its blockers cleared, and bounded retry heartbeats. The interesting outcomes (verdicts,
- * parks, errors, stalls, done) still surface.
- */
-export function isRoutineNoiseComment(body: string): boolean {
-  return (
-    /all blockers done.*starting now/i.test(body) ||
-    /retrying\s*(?:in \d+\w*\s*)?\(attempt \d+\/\d+\)/i.test(body)
-  );
-}
-
 // Run standalone: `bun src/concierge/index.ts` brings the Concierge online.
 if (import.meta.main) {
   const concierge = createConcierge();

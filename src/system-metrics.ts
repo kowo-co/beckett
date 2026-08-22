@@ -196,8 +196,3 @@ export function createSystemMetricsReader(options: SystemMetricsOptions = {}) {
   };
   return { read };
 }
-
-/** One-off convenience read; long-lived dashboard consumers should use the cached reader above. */
-export async function readSystemMetrics(options: SystemMetricsOptions = {}): Promise<SystemMetrics> {
-  return createSystemMetricsReader(options).read();
-}
