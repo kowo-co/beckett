@@ -716,6 +716,22 @@ export class GitHubCli implements GitHubClient, GitHubPrReader, GitHubBranchCard
   }
 
   /**
+   * Read a remote branch's current commit sha via authenticated `git ls-remote`, without mutating
+   * anything. `beckett gh push` uses this to read the remote back after pushing and confirm it
+   * actually landed on the intended commit — the exit-code-only check let a push move nothing
+   * (wrong `--dir`/`--ref`) while still reporting `pushed: true`. Returns `null` when the branch
+   * doesn't exist on the remote.
+   */
+  async remoteBranchSha(repo: string, branch: string): Promise<string | null> {
+    await this.ensureCreds("read remote branch", { repo });
+    const url = `${this.gitHost()}/${repo}.git`;
+    const r = await this.runner(["git", "ls-remote", url, `refs/heads/${branch}`], { env: this.gitEnv() });
+    if (r.code !== 0) throw new Error(`git ls-remote failed (${r.code}): ${r.stderr.trim() || r.stdout.trim()}`);
+    const sha = r.stdout.trim().split(/\s+/)[0];
+    return sha && /^[0-9a-f]{40}$/i.test(sha) ? sha.toLowerCase() : null;
+  }
+
+  /**
    * Prove a usable credential exists for `repo` WITHOUT writing anything — the fail-fast preflight
    * `deploy/deploy-prod.sh` runs before it commits a version bump it would then be unable to land.
    * Under App auth this actually mints the installation token for the target (so "the app isn't
