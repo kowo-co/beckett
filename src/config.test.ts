@@ -57,6 +57,12 @@ test("benign extra_flags load fine", () => {
   expect(config.harness.claude.extra_flags).toEqual(["--include-hook-events"]);
 });
 
+test("display.timezone defaults to America/Los_Angeles and an invalid value still boots", () => {
+  expect(validateConfig({}).display.timezone).toBe("America/Los_Angeles");
+  const invalid = loadToml(`[display]\ntimezone = "Not/AZone"\n`);
+  expect(invalid.display.timezone).toBe("Not/AZone");
+});
+
 test("per-harness default efforts land where they should", () => {
   const config = loadToml(
     `[harness.codex]\ndefault_effort = "low"\n\n[harness.pi]\nthinking = "medium"\n`,

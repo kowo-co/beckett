@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { childEnv } from "../env.ts";
+import { formatDisplayTime } from "../time-display.ts";
 import type { Logger } from "../types.ts";
 
 const TriageKindSchema = z.enum(["feature-wish", "bug-report", "question", "task-request", "social", "none"]);
@@ -127,7 +128,7 @@ const CLOSED: TriageVerdict = {
 };
 
 function fmtTime(ts: number): string {
-  return new Date(ts).toISOString().slice(11, 16);
+  return formatDisplayTime(ts);
 }
 
 function isBeckettMessage(message: TriageMessage): boolean {

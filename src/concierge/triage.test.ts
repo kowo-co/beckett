@@ -133,7 +133,7 @@ describe("buildTriagePrompt", () => {
     expect(rendered.interjectionThreshold).toBeUndefined();
     expect(rendered.burstToClassify).toEqual([
       {
-        time: "00:00",
+        time: "16:00",
         speaker: { role: "human", name: "ro", id: "u-ro" },
         replyTo: { role: "human", name: "ssh", id: "u-ssh", excerpt: "yo" },
         text: "can you check the deploy?",
@@ -145,9 +145,9 @@ describe("buildTriagePrompt", () => {
     const rendered = data();
     expect((rendered.humanParticipants as { role: string }[]).every((person) => person.role === "human")).toBe(true);
     expect(rendered.recentTranscript).toEqual([
-      { time: "00:00", speaker: { role: "beckett" }, text: "I can inspect it" },
-      { time: "00:00", speaker: { role: "human", name: "ro", id: "u-ro" }, text: "hey ssh" },
-      { time: "00:00", speaker: { role: "human", name: "ssh", id: "u-ssh" }, text: "yo" },
+      { time: "16:00", speaker: { role: "beckett" }, text: "I can inspect it" },
+      { time: "16:00", speaker: { role: "human", name: "ro", id: "u-ro" }, text: "hey ssh" },
+      { time: "16:00", speaker: { role: "human", name: "ssh", id: "u-ssh" }, text: "yo" },
     ]);
     expect(JSON.stringify(rendered).split("can you check the deploy?")).toHaveLength(2);
   });
@@ -230,7 +230,7 @@ describe("issue #232 — the classifier is told who is talking to whom", () => {
     );
     expect(rendered.burstToClassify).toEqual([
       {
-        time: "00:01",
+        time: "16:01",
         speaker: { role: "human", name: "ro", id: "u-ro" },
         replyTo: {
           role: "human",
@@ -277,7 +277,7 @@ describe("issue #232 — the classifier is told who is talking to whom", () => {
   test("a message that mentions nobody and replies to nothing keeps its old shape exactly", () => {
     const rendered = data([{ messageId: "m1", authorId: "u-ro", authorDisplayName: "ro", content: "hey", ts: 0 }], []);
     expect(rendered.burstToClassify).toEqual([
-      { time: "00:00", speaker: { role: "human", name: "ro", id: "u-ro" }, text: "hey" },
+      { time: "16:00", speaker: { role: "human", name: "ro", id: "u-ro" }, text: "hey" },
     ]);
   });
 

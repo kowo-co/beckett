@@ -23,6 +23,7 @@ import { resolveBeckettDir, bootFiles, type PathEnv } from "./paths.ts";
 import { isForbiddenEnvKey } from "./env.ts";
 import { builtinCapabilityRegistry, cloneRecord, isRecord } from "./capability/builtins.ts";
 import type { CapabilityRegistry } from "./capability/index.ts";
+import { applyDisplayTimeZoneFromConfig } from "./time-display.ts";
 
 export type { Config } from "./types.ts";
 
@@ -263,7 +264,9 @@ export function loadConfig(opts: LoadConfigOptions = {}): Config {
       `beckett: invalid config at ${configPath} — refusing to start:\n${issues}`,
     );
   }
-  return result.data as Config;
+  const config = result.data as Config;
+  applyDisplayTimeZoneFromConfig(config.display.timezone);
+  return config;
 }
 
 /** Parse a config object directly (tests / in-memory). Same validation as loadConfig. */

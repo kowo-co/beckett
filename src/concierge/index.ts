@@ -48,6 +48,7 @@ import type { GitHubActivityEvent } from "../github/activity.ts";
 import { resolveGitHubOwner } from "../github/owner.ts";
 import { log as rootLog } from "../log.ts";
 import { loadConfig } from "../config.ts";
+import { formatDisplayTime } from "../time-display.ts";
 import { buildPaths } from "../paths.ts";
 import { pauseTurnNote, readPause } from "../pause.ts";
 import { renderClaudeSettings } from "../hooks/registry.ts";
@@ -8704,9 +8705,9 @@ function formatInjectedMessage(
   );
 }
 
-/** `HH:MM` (UTC) for an ambient transcript stamp — matches the triage classifier's time format. */
+/** `HH:MM` in the daemon display timezone — matches the triage classifier's time format. */
 function hhmm(ts: number): string {
-  return new Date(ts).toISOString().slice(11, 16);
+  return formatDisplayTime(ts);
 }
 
 function ambientReplySuffix(

@@ -468,7 +468,7 @@ test("flag off restores the legacy frame shape: old header, unattributed lines, 
   expect(turn).toContain(OLD_HEADER);
   expect(turn).not.toContain(NEW_HEADER);
   // Old line shape exactly: indented [HH:MM] Name: text — no per-line id attribution.
-  expect(turn).toContain("\n  [00:00] Jason: legacy path line");
+  expect(turn).toContain("\n  [16:00] Jason: legacy path line");
   expect(turn).not.toContain("(user:");
   expect(turn).not.toContain("participants:");
 });
