@@ -8,6 +8,8 @@ import {
   formatAttachmentManifest,
   buildAttachmentContent,
   imageMediaType,
+  inlineImageAttachments,
+  attachmentPlaceholder,
   MAX_INLINE_IMAGE_BYTES,
   type DownloadedAttachment,
 } from "./attachments.ts";
@@ -230,4 +232,121 @@ test("buildAttachmentContent keeps a failed download as a manifest miss", async 
   expect(images).toHaveLength(0);
   expect(manifest).toContain("gone.png");
   expect(manifest).toContain("fetch 404");
+});
+
+test("buildAttachmentContent caps inlining at 3 images per message — the rest degrade to the manifest", async () => {
+  globalThis.fetch = (async () => new Response(PNG, { status: 200 })) as unknown as typeof fetch;
+  const dir = tmp();
+  const downloaded = await downloadAttachments(
+    [1, 2, 3, 4].map((i) =>
+      att({ id: String(i), name: `shot${i}.png`, url: `https://cdn.test/shot${i}.png`, contentType: "image/png", size: PNG.length }),
+    ),
+    { attachmentsDir: dir, messageId: "m-cap" },
+  );
+  const { images, manifest } = await buildAttachmentContent(downloaded);
+  expect(images).toHaveLength(3);
+  expect(manifest).toContain("shot4.png");
+});
+
+// ── inlineImageAttachments (fetches straight into memory, never writes to disk) ──
+
+test("a png attachment produces a real base64 image content block, not a placeholder string", async () => {
+  globalThis.fetch = (async () => new Response(PNG, { status: 200 })) as unknown as typeof fetch;
+  const { images, placeholders } = await inlineImageAttachments([
+    { name: "shot.png", url: "https://cdn.test/shot.png", contentType: "image/png", size: PNG.length },
+  ]);
+  expect(images).toHaveLength(1);
+  expect(images[0]!.type).toBe("image");
+  expect(images[0]!.source.type).toBe("base64");
+  expect(images[0]!.source.media_type).toBe("image/png");
+  expect(images[0]!.source.data).toBe(Buffer.from(PNG).toString("base64"));
+  expect(placeholders).toHaveLength(0);
+});
+
+test("a non-image attachment still produces the [file: name] placeholder, never a fetch", async () => {
+  let fetchCalled = false;
+  globalThis.fetch = (async () => {
+    fetchCalled = true;
+    return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+  }) as unknown as typeof fetch;
+  const { images, placeholders } = await inlineImageAttachments([
+    { name: "notes.pdf", url: "https://cdn.test/notes.pdf", contentType: "application/pdf", size: 4 },
+  ]);
+  expect(images).toHaveLength(0);
+  expect(placeholders).toEqual(["[file: notes.pdf]"]);
+  expect(fetchCalled).toBe(false); // never spends a CDN round-trip on a type it can't inline
+});
+
+test("a failed fetch degrades to the placeholder instead of throwing", async () => {
+  globalThis.fetch = (async () => {
+    throw new Error("ECONNRESET");
+  }) as unknown as typeof fetch;
+  const { images, placeholders } = await inlineImageAttachments([
+    { name: "shot.png", url: "https://cdn.test/shot.png", contentType: "image/png", size: 4 },
+  ]);
+  expect(images).toHaveLength(0);
+  expect(placeholders).toEqual(["[file: shot.png]"]);
+});
+
+test("a non-ok response degrades to the placeholder instead of throwing", async () => {
+  globalThis.fetch = (async () => new Response(null, { status: 404 })) as unknown as typeof fetch;
+  const { images, placeholders } = await inlineImageAttachments([
+    { name: "gone.png", url: "https://cdn.test/gone.png", contentType: "image/png", size: 4 },
+  ]);
+  expect(images).toHaveLength(0);
+  expect(placeholders).toEqual(["[file: gone.png]"]);
+});
+
+test("an oversized image is never fetched — it degrades straight to a placeholder with a note", async () => {
+  let fetchCalled = false;
+  globalThis.fetch = (async () => {
+    fetchCalled = true;
+    return new Response(PNG, { status: 200 });
+  }) as unknown as typeof fetch;
+  const { images, placeholders } = await inlineImageAttachments([
+    { name: "huge.png", url: "https://cdn.test/huge.png", contentType: "image/png", size: MAX_INLINE_IMAGE_BYTES + 1 },
+  ]);
+  expect(images).toHaveLength(0);
+  expect(placeholders).toEqual(["[file: huge.png (image too large to show)]"]);
+  expect(fetchCalled).toBe(false);
+});
+
+test("only the first 3 images in a message are inlined — a screenshot dump can't blow up the turn", async () => {
+  globalThis.fetch = (async () => new Response(PNG, { status: 200 })) as unknown as typeof fetch;
+  const refs = [1, 2, 3, 4, 5].map((i) => ({
+    name: `shot${i}.png`,
+    url: `https://cdn.test/shot${i}.png`,
+    contentType: "image/png",
+    size: PNG.length,
+  }));
+  const { images, placeholders } = await inlineImageAttachments(refs);
+  expect(images).toHaveLength(3);
+  expect(placeholders).toEqual(["[file: shot4.png]", "[file: shot5.png]"]);
+});
+
+test("a mixed message inlines the image and placeholders the rest, never dropping either", async () => {
+  globalThis.fetch = (async (url: string) =>
+    url.endsWith(".png")
+      ? new Response(PNG, { status: 200 })
+      : new Response(new Uint8Array([1]), { status: 200 })) as unknown as typeof fetch;
+  const { images, placeholders } = await inlineImageAttachments([
+    { name: "shot.png", url: "https://cdn.test/shot.png", contentType: "image/png", size: PNG.length },
+    { name: "notes.txt", url: "https://cdn.test/notes.txt", contentType: "text/plain", size: 1 },
+  ]);
+  expect(images).toHaveLength(1);
+  expect(placeholders).toEqual(["[file: notes.txt]"]);
+});
+
+// ── attachmentPlaceholder (metadata-only, no network) ────────────────────────────
+
+test("attachmentPlaceholder is a bare [file: name] for a non-image", () => {
+  expect(attachmentPlaceholder({ name: "notes.pdf", url: "x", contentType: "application/pdf", size: 4 })).toBe(
+    "[file: notes.pdf]",
+  );
+});
+
+test("attachmentPlaceholder flags an oversized image without ever fetching it", () => {
+  expect(
+    attachmentPlaceholder({ name: "huge.png", url: "x", contentType: "image/png", size: MAX_INLINE_IMAGE_BYTES + 1 }),
+  ).toBe("[file: huge.png (image too large to show)]");
 });

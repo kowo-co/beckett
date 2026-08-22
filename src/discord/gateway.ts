@@ -86,6 +86,7 @@ import { loadObservedBots } from "./observed-bots.ts";
 import { buildPaths } from "../paths.ts";
 import { chunkReply, delaySchedule, TOTAL_DELAY_BUDGET_MS } from "./chunk.ts";
 import { contentWithForwardedSnapshots } from "../concierge/forwarded-message.ts";
+import { inlineImageAttachments, attachmentPlaceholder } from "./attachments.ts";
 import {
   BROWSER_QUESTION_ATTACHMENT_NAME,
   isBrowserQuestionMessage,
@@ -489,12 +490,22 @@ export class DiscordJsGateway implements DiscordGateway {
       const rows = [...page.values()].sort((a, b) => a.createdTimestamp - b.createdTimestamp);
       if (!rows.some((row) => row.id === messageId)) return null;
       const botId = client.user?.id;
-      return rows.map((row) => {
-        // Attachments fold in as placeholders, same convention as the shared-context store —
-        // a bare "look at this" with the image silently dropped would mislead the turn.
-        const content = [row.content, ...row.attachments.values().map((a) => `[file: ${a.name}]`)]
-          .filter(Boolean)
-          .join(" ");
+      return await Promise.all(rows.map(async (row) => {
+        const refs = [...row.attachments.values()].map((a) => ({
+          name: a.name,
+          url: a.url,
+          contentType: a.contentType ?? null,
+          size: a.size,
+        }));
+        // Only the reply TARGET is worth a CDN round-trip: that's the message the person is
+        // actually pointing at (issue: Discord image attachments reach the concierge). The
+        // neighbours around it are cheap orientation, not the thing being asked about, so they
+        // keep the plain placeholder rather than each spending their own fetch.
+        const isTarget = row.id === messageId;
+        const { images, placeholders } = isTarget
+          ? await inlineImageAttachments(refs, this.logger)
+          : { images: [], placeholders: refs.map((a) => attachmentPlaceholder(a)) };
+        const content = [row.content, ...placeholders].filter(Boolean).join(" ");
         // A native reply can target a forward-only message (empty `content`, the original
         // parked in `messageSnapshots`). Without folding it in, the injected frame shows an
         // empty line for the target — fold it the same way captureInbound does (#111/#113),
@@ -523,9 +534,10 @@ export class DiscordJsGateway implements DiscordGateway {
             row.member?.displayName || row.author.globalName || row.author.username || row.author.id,
           content: contentWithForwardedSnapshots(content, snapshots),
           isBeckett: botId !== undefined && row.author.id === botId,
-          isTarget: row.id === messageId,
+          isTarget,
+          ...(images.length > 0 ? { images } : {}),
         };
-      });
+      }));
     } catch (err) {
       this.logger.warn("discord reply-context fetch failed", {
         channelId,

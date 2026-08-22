@@ -1420,6 +1420,21 @@ export interface SpawnResult {
 }
 
 
+/** A base64 image content block — the shape claude's stream-json passes through to the model turn. */
+export interface ImageContentBlock {
+  type: "image";
+  source: { type: "base64"; media_type: string; data: string };
+}
+
+/** A plain text content block (the framed message + any non-image manifest). */
+export interface TextContentBlock {
+  type: "text";
+  text: string;
+}
+
+/** One block of a structured model turn: text or an inlined image. */
+export type TurnContentBlock = TextContentBlock | ImageContentBlock;
+
 /** One message in a fetched reply-context window (see DiscordGateway.fetchMessageContext). */
 export interface ReplyContextMessage {
   messageId: string;
@@ -1433,6 +1448,13 @@ export interface ReplyContextMessage {
   isBeckett: boolean;
   /** True on the single message the live turn is replying to. */
   isTarget: boolean;
+  /**
+   * Real base64 image blocks inlined from this message's attachments (issue: Discord image
+   * attachments reach the concierge). Only ever populated for the reply target — the gateway
+   * doesn't spend a CDN fetch on every surrounding message, just the one actually being replied
+   * to. Undefined/empty on every message with no inlinable image.
+   */
+  images?: ImageContentBlock[];
 }
 
 /** Holds the discord.js connection; ambient in→same-channel out (Spec 05). */

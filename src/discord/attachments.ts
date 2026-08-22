@@ -20,7 +20,12 @@
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, basename, extname } from "node:path";
-import type { IncomingAttachment, Logger } from "../types.ts";
+import type { IncomingAttachment, Logger, ImageContentBlock, TurnContentBlock } from "../types.ts";
+
+// Re-exported for existing callers/tests — the canonical definitions live in `../types.ts` (the
+// frozen contract every module imports FROM, never the reverse) since ReplyContextMessage there
+// needs to reference ImageContentBlock too.
+export type { ImageContentBlock, TurnContentBlock };
 
 /** Per-file ceiling. Discord's own default upload cap is 25 MiB; we allow a little headroom. */
 export const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
@@ -34,6 +39,14 @@ export const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
  */
 export const MAX_INLINE_IMAGE_BYTES = 5 * 1024 * 1024;
 
+/**
+ * Per-message ceiling on how many images get inlined as base64 blocks. A person dumping 20
+ * screenshots into one message must not blow up the turn — the rest degrade to the manifest
+ * (or a plain placeholder, for callers that don't have a Read-able local path) same as any
+ * other non-inlinable attachment.
+ */
+const MAX_INLINE_IMAGES_PER_MESSAGE = 3;
+
 /** The base64 image media types the Anthropic Messages API accepts as `image` content blocks. */
 export const SUPPORTED_IMAGE_MEDIA_TYPES = [
   "image/jpeg",
@@ -41,21 +54,6 @@ export const SUPPORTED_IMAGE_MEDIA_TYPES = [
   "image/gif",
   "image/webp",
 ] as const;
-
-/** A base64 image content block — the shape claude's stream-json passes through to the model turn. */
-export interface ImageContentBlock {
-  type: "image";
-  source: { type: "base64"; media_type: string; data: string };
-}
-
-/** A plain text content block (the framed message + any non-image manifest). */
-export interface TextContentBlock {
-  type: "text";
-  text: string;
-}
-
-/** One block of a structured model turn: text or an inlined image. */
-export type TurnContentBlock = TextContentBlock | ImageContentBlock;
 
 /** How long to wait on a single CDN fetch before giving up (best-effort, never hangs). */
 const FETCH_TIMEOUT_MS = 30_000;
@@ -232,8 +230,9 @@ export async function buildAttachmentContent(
       continue;
     }
     const media = imageMediaType(r);
-    if (!media || r.size > MAX_INLINE_IMAGE_BYTES) {
-      // Not an inlinable image (wrong type, or too big for the vision API) — let the Read tool have it.
+    if (!media || r.size > MAX_INLINE_IMAGE_BYTES || images.length >= MAX_INLINE_IMAGES_PER_MESSAGE) {
+      // Not an inlinable image (wrong type, too big for the vision API, or this message already
+      // hit its inline cap) — let the Read tool have it.
       forManifest.push(r);
       continue;
     }
@@ -257,6 +256,87 @@ export async function buildAttachmentContent(
     }
   }
   return { images, manifest: formatAttachmentManifest(forManifest) };
+}
+
+/** The minimal attachment shape {@link inlineImageAttachments}/{@link attachmentPlaceholder} need. */
+interface AttachmentRef {
+  name: string;
+  url: string;
+  contentType: string | null;
+  size: number;
+}
+
+/**
+ * The `[file: name]` placeholder for one attachment, from declared metadata alone (no network).
+ * Flags an oversized-but-otherwise-inlinable image with a short note so the person can tell
+ * "this was too big to show" apart from "this isn't a picture at all".
+ */
+export function attachmentPlaceholder(a: AttachmentRef): string {
+  if (imageMediaType(a) && a.size > MAX_INLINE_IMAGE_BYTES) {
+    return `[file: ${a.name} (image too large to show)]`;
+  }
+  return `[file: ${a.name}]`;
+}
+
+/**
+ * Shared conversion used by the gateway's reply-context fetch and the concierge's own
+ * message-building path (the two places that used to flatten every attachment to a bare
+ * `[file: name]` placeholder): fetch each eligible image straight into memory and hand back a
+ * real base64 {@link ImageContentBlock}, never touching disk. Everything else — wrong media
+ * type, over the size cap, over the per-message image count, or a failed/timed-out fetch —
+ * degrades to the same placeholder text. Best-effort throughout: a bad CDN url must never
+ * throw or drop the rest of the message.
+ */
+export async function inlineImageAttachments(
+  attachments: AttachmentRef[],
+  logger?: Logger,
+): Promise<{ images: ImageContentBlock[]; placeholders: string[] }> {
+  const images: ImageContentBlock[] = [];
+  const placeholders: string[] = [];
+  for (const a of attachments) {
+    const media = imageMediaType(a);
+    if (!media || a.size > MAX_INLINE_IMAGE_BYTES || images.length >= MAX_INLINE_IMAGES_PER_MESSAGE) {
+      placeholders.push(attachmentPlaceholder(a));
+      continue;
+    }
+    const block = await fetchImageBlock(a, media, logger);
+    if (block) {
+      images.push(block);
+    } else {
+      placeholders.push(`[file: ${a.name}]`);
+    }
+  }
+  return { images, placeholders };
+}
+
+/** Fetch one attachment's bytes straight into memory and encode it — never writes to disk. */
+async function fetchImageBlock(
+  a: AttachmentRef,
+  mediaType: string,
+  logger?: Logger,
+): Promise<ImageContentBlock | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(a.url, { signal: controller.signal });
+    if (!res.ok) return null;
+    const declared = Number(res.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > MAX_INLINE_IMAGE_BYTES) return null;
+    const buf = new Uint8Array(await res.arrayBuffer());
+    if (buf.byteLength > MAX_INLINE_IMAGE_BYTES) return null;
+    return {
+      type: "image",
+      source: { type: "base64", media_type: mediaType, data: Buffer.from(buf).toString("base64") },
+    };
+  } catch (err) {
+    logger?.warn("image attachment fetch failed; falling back to placeholder", {
+      name: a.name,
+      err: String((err as Error).message ?? err),
+    });
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Compact human bytes for logs/manifest (e.g. "240 KB", "1.2 MB"). */
