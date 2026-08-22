@@ -46,7 +46,12 @@ import { X_CREDS_ENTRY } from "./builtins.ts";
  * what's IN the action — its creds entry and its task text. True when either:
  *   - `credsEntry` names the X account's jingle vault entry ({@link X_CREDS_ENTRY}), the one
  *     entry that can authenticate as the account these routines post through; or
- *   - the task text references the X domain or the account handle ({@link X_SOCIAL_ACCOUNT}).
+ *   - the task text references the account handle ({@link X_SOCIAL_ACCOUNT}), says "tweet" in any
+ *     form, says "twitter" bare (not just `twitter.com`), or uses "x" as a standalone word — which
+ *     also catches `x.com` and phrasing like "post it to X" that names no domain at all. A bare `x`
+ *     is deliberately over-inclusive (a non-social browser task that happens to say "x-ray" or "10x"
+ *     gets refused too) because the cost of a false refusal — rephrase the routine — is far lower
+ *     than the cost of a false negative — another ungrounded post reaching X.
  * A `browser` routine that matches is refused at dispatch (`dispatchPlan` in
  * `../capability/modules/routines.ts`) rather than silently forced through a compose gate it was
  * never written to expect: `x-social-morning`/`x-social-evening` (removed 2026-08-22) proved that
