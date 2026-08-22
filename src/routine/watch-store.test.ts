@@ -23,7 +23,10 @@ test("an unpolled routine reads as the empty default", async () => {
 });
 
 test("update() persists and is readable back from a NEW store instance (restart safety)", async () => {
-  const { path, store } = makeStore();
+  // Fixed clock: `update()` prunes seenIds older than WATCH_SEEN_MAX_AGE_MS against `now()`, so a
+  // real wall clock would eventually age the fixture's firstSeenAt out from under this test.
+  const NOW = () => new Date("2026-07-25T00:00:00.000Z");
+  const { path, store } = makeStore(NOW);
   await store.update("model-news-watch", (s) => ({
     ...s,
     seeded: true,
@@ -31,7 +34,7 @@ test("update() persists and is readable back from a NEW store instance (restart 
     lastPolledAt: "2026-07-25T00:00:00.000Z",
   }));
 
-  const restarted = new WatchStateStore(path);
+  const restarted = new WatchStateStore(path, { now: NOW });
   const state = await restarted.get("model-news-watch");
   expect(state.seeded).toBe(true);
   expect(state.seenIds).toEqual([{ id: "a", firstSeenAt: "2026-07-25T00:00:00.000Z" }]);
