@@ -265,6 +265,54 @@ function truncate(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
 
+// ── live progress card (`../progress/live-card.ts`): one self-editing card per RUN, a state
+// line above a scrolling monospace terminal window ─────────────────────────────────────────────
+//
+// Deliberately takes pre-rendered STRINGS, not run state: the header line is
+// `../progress/cards.ts#renderProgressCard`'s own render (so the two cards read identically) and
+// the terminal pane is `../progress/terminal-window.ts#renderTerminalWindow`'s. This keeps the
+// renderer here exactly as pure and state-free as every other block builder in this file — it
+// never needs to know what a `DispatchEvent` or a journal line looks like.
+
+/** Everything {@link renderLiveProgressCard} needs — two pre-rendered text blocks, two flags. */
+export interface LiveProgressCardSnapshot {
+  /** The run's one-line status (marker, ref, phase/activity, elapsed, checklist, detail). */
+  headerText: string;
+  /** The fixed-height monospace pane, already fenced as a code block. */
+  terminalWindow: string;
+  /** A stall or failure is the headline; the card goes red regardless of terminal-ness. */
+  alert: boolean;
+  /** The run finished/failed/was cancelled — the window has stopped updating. */
+  terminal: boolean;
+}
+
+/**
+ * The live-progress-with-terminal card: a state line, a separator, the terminal window, and a
+ * footer noting whether the window is still live. Four fixed blocks — well inside Discord's
+ * 10-child container cap, with no per-run variable content (no branch list, no gallery) to budget
+ * around.
+ */
+export function renderLiveProgressCard(snapshot: LiveProgressCardSnapshot): DiscordCard {
+  const blocks: DiscordCardBlock[] = [
+    { kind: "text", text: snapshot.headerText },
+    { kind: "separator" },
+    { kind: "text", text: snapshot.terminalWindow },
+    {
+      kind: "text",
+      text: snapshot.terminal
+        ? "-# Live progress card · terminal window stopped — showing the run's final lines"
+        : "-# Live progress card · terminal window updates in place",
+    },
+  ];
+  return { color: liveProgressCardColor(snapshot), blocks };
+}
+
+function liveProgressCardColor(snapshot: Pick<LiveProgressCardSnapshot, "alert" | "terminal">): number {
+  if (snapshot.alert) return RED;
+  if (snapshot.terminal) return GREEN;
+  return BLUE;
+}
+
 function branchColor(card: BranchCardSnapshot): number {
   if (card.checks?.failed || card.review?.decision === "CHANGES_REQUESTED") return RED;
   if (card.pullRequest) {

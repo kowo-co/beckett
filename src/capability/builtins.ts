@@ -427,6 +427,10 @@ export const configFragments = {
       budget_usd_per_run: z.number().min(0).default(0),
       // The deploy receipt (progress cards, `src/progress/cards.ts`). Default ON.
       cards: z.boolean().default(true),
+      // The live-progress-with-terminal card (`src/progress/live-card.ts`): a SIBLING of `cards`,
+      // its own switch so a boot with no live-progress channel configured (or that wants the
+      // quieter task/branch cards only) can turn it off without touching `cards`. Default ON.
+      live_progress_card: z.boolean().default(true),
       // The live activity blurb on that card (`src/run/activity.ts`): "editing index.html" in
       // place of the phase word while a worker runs. DERIVED from the run's own journal — no
       // model, no network — and absent or stale it renders the card that shipped without it.

@@ -60,6 +60,7 @@ import { serveBus, type BusRequest, type BusResponse } from "../shell/control-bu
 import { ActionClass, CapabilityRegistry, type Capability } from "../capability/index.ts";
 import { effectiveActionClass, renderCatalogBlock, type ExtensionContext, type ExtensionRegistry, type InvocationOrigin } from "../ext/index.ts";
 import { createDiscordGateway, type DiscordGateway } from "../discord/gateway.ts";
+import { redactSecrets as redactBrowserSecrets } from "../discord/redact.ts";
 import { deliverChilled } from "./chill-gate.ts";
 import { contentWithForwardedSnapshots } from "./forwarded-message.ts";
 import { contentWithLinkEmbeds } from "./link-embeds.ts";
@@ -230,6 +231,22 @@ export function cardsChannelId(): string | null {
   return configured || CARDS_CHANNEL_ID;
 }
 
+/**
+ * Home for the live-progress-with-terminal card (`../progress/live-card.ts`) — ro's ask (issue:
+ * "a component v2 card that shows the active progress with a 'window' into the terminal"). A
+ * dedicated channel rather than {@link CARDS_CHANNEL_ID}: that channel's cards are per-task and
+ * per-branch; this one is per-RUN and edits far more often (a terminal window scrolling), so
+ * mixing the two would bury the quieter task/branch cards in noise.
+ */
+export const LIVE_PROGRESS_CHANNEL_ID = "1525690195234521179";
+
+/** Live-progress channel, overridable via `BECKETT_LIVE_PROGRESS_CHANNEL_ID`, same `disabled` seam as {@link cardsChannelId}. */
+export function liveProgressChannelId(): string | null {
+  const configured = process.env.BECKETT_LIVE_PROGRESS_CHANNEL_ID?.trim();
+  if (configured?.toLowerCase() === "disabled") return null;
+  return configured || LIVE_PROGRESS_CHANNEL_ID;
+}
+
 /** Discord shows "typing…" for ~10s; re-trigger inside this window while a turn runs. */
 const TYPING_INTERVAL_MS = 8_000;
 
@@ -288,52 +305,12 @@ const DISCORD_SINGLE_MESSAGE_CHARS = 2_000;
 const ACCESS_DENY_TEXT =
   "This is invite-only and you're not on the list yet — ask the owner to add you.";
 
-export function redactBrowserSecrets(text: string): string {
-  const label = "password|passcode|one[- ]time code|otp|recovery code|backup code|api key|access token|secret|token|credentials?|login details";
-  const withoutUrlCredentials = text
-    .replace(/\b(https?:\/\/)[^\s/@:]+:[^@\s]+@/gi, "$1[redacted]@")
-    .replace(/([?&](?:password|passcode|otp|token|secret|api[_-]?key)=)[^&#\s]*/gi, "$1[redacted]");
-  const jsonValues = withoutUrlCredentials.replace(
-    new RegExp(`(["'](?:${label})["']\\s*:\\s*)(["'])(?:\\\\.|(?!\\2).)*\\2`, "gi"),
-    "$1\"[redacted]\"",
-  );
-  const lines = jsonValues.split("\n");
-  const labelOnly = new RegExp(`^(?:generated\\s+)?(?:${label})\\b\\s*(?:(?:is|was)|[:=])?\\s*$`, "i");
-  const labelledValue = new RegExp(`\\b((?:${label}))\\b(\\s*(?:(?:is|was)|[:=])\\s*).*$`, "i");
-  const generatedValue = new RegExp(`\\b(generated\\s+(?:${label}))\\b(\\s+).*$`, "i");
-  const createdCredentials = /\b(credentials?\s+created)\b(\s*:\s*).*$/i;
-  let redactNextValue = false;
-  return lines.map((line) => {
-    if (redactNextValue) {
-      if (!line.trim()) return line;
-      redactNextValue = false;
-      return `${line.match(/^\s*/)?.[0] ?? ""}[redacted]`;
-    }
-    const normalizedLabel = line
-      .trim()
-      .replace(/^(?:(?:[-+*]|\d+[.)])\s+|[>#]+\s*)+/, "")
-      .replace(/^[*_~`]+|[*_~`]+$/g, "")
-      .trim();
-    if (labelOnly.test(normalizedLabel)) {
-      redactNextValue = true;
-      return `${line.trimEnd()} [redacted]`;
-    }
-    const explicit = line.replace(
-      labelledValue,
-      (_match, credentialLabel: string, separator: string) => `${credentialLabel}${separator}[redacted]`,
-    );
-    if (explicit !== line) return explicit;
-    const generated = line.replace(
-      generatedValue,
-      (_match, credentialLabel: string, separator: string) => `${credentialLabel}${separator}[redacted]`,
-    );
-    if (generated !== line) return generated;
-    return line.replace(
-      createdCredentials,
-      (_match, credentialLabel: string, separator: string) => `${credentialLabel}${separator}[redacted]`,
-    );
-  }).join("\n");
-}
+/**
+ * The generic pass now lives in `../discord/redact.ts` (the live-progress terminal window needed
+ * it too, for raw shell/journal text rather than browser prose) — re-exported under its original
+ * name so existing callers/tests are untouched.
+ */
+export { redactBrowserSecrets };
 
 function boundedBrowserQuestion(question: string): string {
   const marker = "\n...[question truncated]";

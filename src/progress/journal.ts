@@ -116,6 +116,24 @@ export class TicketJournal implements ProgressSink {
     }
   }
 
+  /**
+   * The last `tail` raw journal lines for a ticket, oldest first — no "N elided" banner (that's
+   * {@link read}'s own, meant for a human/model consumer). This is the live-progress card's read
+   * path (`./live-card.ts`): it wants exactly the scrollback, nothing narrated about it.
+   */
+  readLines(ticketIdent: string, tail: number): string[] | null {
+    if (!this.dir) return null;
+    const file = this.file(this.dir, ticketIdent);
+    if (!existsSync(file)) return null;
+    try {
+      const lines = readFileSync(file, "utf8").split("\n").filter((l) => l.length > 0);
+      return tail > 0 ? lines.slice(-tail) : lines;
+    } catch (err) {
+      this.log.warn("journal readLines failed", { ticket: ticketIdent, error: String(err) });
+      return null;
+    }
+  }
+
   /** The journal path for a ticket, with the identifier sanitized so it can't escape the dir. */
   private file(dir: string, ticketIdent: string): string {
     return join(dir, `${safeIdent(ticketIdent)}.log`);
@@ -131,6 +149,11 @@ function safeIdent(ident: string): string {
 /** Read one ticket's journal tail without a daemon — the `beckett journal` CLI path. */
 export function readJournal(dir: string, ticketIdent: string, tail: number = DEFAULT_TAIL_LINES): string | null {
   return new TicketJournal({ dir }).read(ticketIdent, tail);
+}
+
+/** {@link TicketJournal.readLines} without a daemon instance — `./live-card.ts`'s boot-time seam. */
+export function readJournalLines(dir: string, ticketIdent: string, tail: number): string[] | null {
+  return new TicketJournal({ dir }).readLines(ticketIdent, tail);
 }
 
 /** Factory matching the repo's `createX` convention. */
