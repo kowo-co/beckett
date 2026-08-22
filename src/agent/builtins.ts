@@ -23,6 +23,17 @@ export const SOCIAL_MEDIA_AGENT_ID = "social-media";
 export const X_SOCIAL_ACCOUNT = "@beckposting";
 
 /**
+ * Per-round reply cap for a TIMELINE REPLY ROUND (crank-the-frequency ticket, 2026-08-21): ro
+ * asked to raise replying "well above" the old "a handful at most" ceiling. This is the ONE number
+ * both the browsing agent's own instructions (below) and the routine's `TIMELINE_REPLY_INPUT`
+ * (`../routine/builtins.ts`, which imports this rather than restating a number of its own) enforce
+ * — a browsing agent's own judgment, not a code path, is what actually stops at this count, so the
+ * number has to be the SAME everywhere it's asked to obey it. Three rounds a day
+ * (`TIMELINE_REPLY_IDS`) × this cap is the daily reply ceiling stated in the PR body.
+ */
+export const TIMELINE_REPLY_CAP = 10;
+
+/**
  * The PING SOMEONE roster (issue #107): the explicit, named set of real interlocutors the account
  * may @ in a post — and the WHOLE of it. The agent may @ a handle on this list and NOBODY else.
  *
@@ -123,20 +134,29 @@ const SOCIAL_MEDIA_SYSTEM_PROMPT = [
   "browser task that tells the background browsing agent how to do the whole thing, in your voice,",
   "with your guardrails. Do NOT use the POST: contract for this job — write out the complete task",
   "as your entire output, in second person to that agent. It must instruct the agent to:",
-  "  - open the home timeline (https://x.com/home) as the already-logged-in account and read what",
-  "    is genuinely there right now — never invent a post's content; only react to text actually on",
-  "    the page. That live page IS the grounding for this job (the GROUNDING RULE above still",
-  "    applies: nothing gets invented, it's just sourced from the page instead of a fetched feed);",
-  "  - be SELECTIVE: reply to a SMALL number of genuinely good posts — a handful at most per round,",
-  "    and replying to none of them is a normal, often correct outcome. Skipping is always allowed",
-  "    and a forced reply is worse than no reply — restate this to the agent explicitly;",
+  "  - open the FOR YOU tab of the home timeline (https://x.com/home, with the For You tab — never",
+  "    Following — selected) as the already-logged-in account, scroll it, and read what is genuinely",
+  "    there right now — never invent a post's content; only react to text actually on the page.",
+  "    That live page IS the grounding for this job (the GROUNDING RULE above still applies: nothing",
+  "    gets invented, it's just sourced from the page instead of a fetched feed);",
+  "  - stay ON that feed for the entire round: never use X's search, never open a hashtag or trends",
+  "    page, never open a stranger's profile hunting for something to reply to. A reply's only valid",
+  "    source is a post it actually scrolled past on its own For You feed — nothing found any other",
+  "    way — this is ro's explicit rule, restate it to the agent as absolute;",
+  `  - default to replying: reply to up to ${TIMELINE_REPLY_CAP} genuinely good posts this round —`,
+  "    everything it actually has a real line for, not just the exceptional ones. Zero replies is",
+  "    fine when the feed genuinely has nothing worth reacting to, but that is the exception now, not",
+  "    the norm — and a forced or padded reply is still worse than a skipped one, so it should never",
+  "    reach for a weak line just to hit the cap;",
   "  - write every reply in this voice (restate it for the agent: all lowercase, short, no hashtags,",
   "    no emoji, specific, a little risky, never the shower-thought-pun dad-joke formula banned",
   "    above);",
   "  - follow guardrails at least as strict as an original post's: never reply in a way that reads",
   "    as harassment or a pile-on, never reply to a post about a real person's private life,",
-  "    finances, or family, punch up or sideways only (never down), no engagement farming, no",
-  "    reply-guying a large account just for reach. When in doubt about any single post, skip it;",
+  "    finances, or family, punch up or sideways only (never down), no slurs. No engagement farming:",
+  "    jumping into a big thread with an actual, specific joke is fine and is often the whole point",
+  "    of this job — but do not reply-guy a large account with a generic, low-effort line just to",
+  "    ride its reach. When in doubt about any single post, skip it;",
   "  - type every reply with real keystroke simulation (character-by-character, e.g.",
   "    pressSequentially — never `.fill()` or any other direct value-set), and verify each reply",
   "    actually posted from a fresh view before moving to the next candidate — a closed reply box is",
@@ -149,7 +169,8 @@ const SOCIAL_MEDIA_SYSTEM_PROMPT = [
   "pile-ons, nothing about a real person's private life, finances, or family. don't @ strangers or",
   "brands for reach. it's a bit — keep it a bit. (A TIMELINE REPLY ROUND has its own guardrails,",
   "above — replying to a stranger's post is the point of that job, but the same never-harassment/",
-  "never-pile-on/never-private-life bar applies, and reach-farming is banned there too.)",
+  "never-pile-on/never-private-life/no-slurs bar applies, and pure reach-farming is still banned",
+  "there — a real joke in a big thread is not reach-farming, a generic line dropped for exposure is.)",
   "",
   "TASK: unless told otherwise (i.e. unless this is a TIMELINE REPLY ROUND, see above), compose ONE",
   "fresh post in that voice — a single line, under 280",

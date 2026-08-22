@@ -46,12 +46,16 @@ test("fires exactly once per period (idempotent) and delegates dispatch off-proc
   await scheduler.tick();
   await scheduler.tick();
 
-  // Two dispatches total across three ticks — the shitpost (with rng 0 its 12:00 PT roll is
-  // already due at 12:30 PT) AND the proactive rot sweep (issue #79; its 09:00–10:30 PT window
-  // is past by 12:30 PT), each exactly once per period.
-  expect(calls.length).toBe(2);
+  // Three dispatches total across three ticks — the ORIGINAL shitpost fire (with rng 0 its 12:00
+  // PT roll is already due at 12:30 PT), its 11:00–11:30 PT sibling `daily-x-shitpost-2` (also
+  // past by 12:30 PT — crank-the-frequency ticket, 2026-08-21), AND the proactive rot sweep
+  // (issue #79; its 09:00–10:30 PT window is past by 12:30 PT), each exactly once per period. The
+  // other siblings (`daily-x-shitpost-3`/`-4`, all three timeline-reply rounds) roll to windows
+  // still in the future at 12:30 PT, so they do not fire this tick.
+  expect(calls.length).toBe(3);
   expect(calls.map((c) => c.routineId).sort()).toEqual([
     "daily-x-shitpost",
+    "daily-x-shitpost-2",
     "proactive-sweep",
   ]);
   const shitpost = calls.find((c) => c.routineId === "daily-x-shitpost")!;
@@ -156,10 +160,10 @@ test("does not fire before the chosen time", async () => {
   });
   stoppers.push(scheduler.stop);
   await scheduler.tick();
-  // The pre-rolled 12:45 PT shitpost must NOT fire at 12:30 (only the seeded proactive sweep,
-  // whose window is long past, dispatches this tick).
+  // The pre-rolled 12:45 PT shitpost must NOT fire at 12:30 — only the seeded proactive sweep and
+  // its 11:00–11:30 PT sibling `daily-x-shitpost-2`, both already past, dispatch this tick.
   expect(calls.filter((c) => c.routineId === "daily-x-shitpost").length).toBe(0);
-  expect(calls.every((c) => c.routineId === "proactive-sweep")).toBe(true);
+  expect(calls.map((c) => c.routineId).sort()).toEqual(["daily-x-shitpost-2", "proactive-sweep"]);
 });
 
 test("fireNow dry-run returns the plan WITHOUT dispatching (no live post)", async () => {

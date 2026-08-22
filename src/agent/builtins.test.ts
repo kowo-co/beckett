@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentStore } from "./store.ts";
-import { builtinAgentDefs, builtinAgentIds, SOCIAL_MEDIA_AGENT_ID, X_PING_ROSTER } from "./builtins.ts";
+import { builtinAgentDefs, builtinAgentIds, SOCIAL_MEDIA_AGENT_ID, TIMELINE_REPLY_CAP, X_PING_ROSTER } from "./builtins.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -90,24 +90,65 @@ test("the prompt defines a TIMELINE REPLY ROUND job, distinct from composing, wi
   expect(flat).toContain("timeline reply round");
   // It authors a browser task instead of using the POST: contract.
   expect(flat).toContain("do not use the post: contract for this job");
-  // Selectivity is explicit and skipping is normal — mirrors ro's own words ("not like everything
-  // but cool posts") and the existing mention-REPLIES "forced reply is worse than no reply" rule.
-  expect(flat).toContain("a handful at most per round");
-  expect(flat).toContain("replying to none of them is a normal, often correct outcome");
-  expect(flat).toContain("a forced reply is worse than no reply");
-  // Guardrails at least as strict as an original post's.
+  // Guardrails at least as strict as an original post's — every one of these stays absolute
+  // (crank-the-frequency ticket, 2026-08-21: raising frequency must not touch the ethics bar).
   expect(flat).toContain("harassment");
   expect(flat).toContain("pile-on");
   expect(flat).toContain("private life");
   expect(flat).toContain("punch up or sideways only");
+  expect(flat).toContain("no slurs");
   expect(flat).toContain("no engagement farming");
-  expect(flat).toContain("reply-guying a large account");
+  expect(flat).toContain("reply-guy a large account");
   // Never invents what a post says — grounded in the live page.
   expect(flat).toContain("never invent a post's content");
   // Credential discipline carried over from the compose path.
   expect(flat).toContain("never touch a credential field");
   // The existing mention-REPLIES block is untouched, not replaced.
   expect(prompt).toContain("REPLIES: when you're checking mentions");
+});
+
+test("the timeline-reply round defaults to replying with a raised, explicit cap, not selectivity-as-default (crank-the-frequency ticket)", () => {
+  const prompt = builtinAgentDefs().find((a) => a.id === SOCIAL_MEDIA_AGENT_ID)!.systemPrompt;
+  const flat = prompt.toLowerCase().replace(/\s+/g, " ");
+
+  // The old "a handful at most" / "zero is normal" selectivity-first framing is gone.
+  expect(flat).not.toContain("a handful at most per round");
+  expect(flat).not.toContain("replying to none of them is a normal, often correct outcome");
+  // Replaced with a default-to-reply framing carrying the SAME explicit cap the routine's
+  // TIMELINE_REPLY_INPUT enforces (one number, not two that could drift).
+  expect(flat).toContain("default to replying");
+  expect(prompt).toContain(`reply to up to ${TIMELINE_REPLY_CAP} genuinely good posts`);
+  expect(flat).toContain("that is the exception now, not");
+  // Zero is still allowed, but framed as the exception rather than the norm, and padding to hit
+  // the cap is still explicitly banned — this is not "reply to literally everything."
+  expect(flat).toContain("fine when the feed genuinely has nothing worth reacting to");
+  expect(flat).toContain("should never reach for a weak line just to hit the cap");
+});
+
+test("reply-guying a large account is softened to permit a real joke in a big thread, not blanket-banned", () => {
+  const prompt = builtinAgentDefs().find((a) => a.id === SOCIAL_MEDIA_AGENT_ID)!.systemPrompt;
+  const flat = prompt.toLowerCase().replace(/\s+/g, " ");
+
+  // Jumping into a big thread with an actual joke is now explicitly sanctioned...
+  expect(flat).toContain("jumping into a big thread with an actual, specific joke is fine");
+  // ...while pure engagement farming (a generic, low-effort line riding a big account's reach)
+  // stays banned — the ethics bar did not move, only the reach-for-a-joke case did.
+  expect(flat).toContain("do not reply-guy a large account with a generic, low-effort line just to");
+  expect(flat).toContain("ride its reach");
+});
+
+test("the timeline-reply round is restricted to the For You feed — no search, no profile hunting, no hashtags/trends (ro, 2026-08-21)", () => {
+  const prompt = builtinAgentDefs().find((a) => a.id === SOCIAL_MEDIA_AGENT_ID)!.systemPrompt;
+  const flat = prompt.toLowerCase().replace(/\s+/g, " ");
+
+  // Names the For You tab specifically, not just x.com/home.
+  expect(flat).toContain("for you tab");
+  expect(flat).toContain("never following — selected");
+  // Explicit bans on the ways this could otherwise widen past the For You feed.
+  expect(flat).toContain("never use x's search");
+  expect(flat).toContain("never open a hashtag or trends");
+  expect(flat).toContain("never open a stranger's profile hunting for something to reply to");
+  expect(flat).toContain("a post it actually scrolled past on its own for you feed");
 });
 
 test("the store seeds the social-media agent into agents.json on first load", async () => {
