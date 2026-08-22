@@ -252,7 +252,10 @@ test("pendingProposals sweeps first, so what it returns is what is on disk", () 
   const dir = sandbox();
   createProposal(dir, BASE);
   const fresh = createProposal(dir, { ...BASE, claim: "a newer ask", now: new Date(NIGHT.getTime() + 13 * 86_400_000) });
-  const open = pendingProposals(dir, new Date(NIGHT.getTime() + PROPOSAL_TTL_DAYS * 86_400_000));
+  const sweepTime = new Date(NIGHT.getTime() + PROPOSAL_TTL_DAYS * 86_400_000);
+  const open = pendingProposals(dir, sweepTime);
   expect(open.map((p) => p.id)).toEqual([fresh.id]);
-  expect(listProposals(dir, { all: true }).filter((p) => p.status === "expired").length).toBe(1);
+  // Re-read at the SAME simulated clock the sweep used — the real wall clock would drift past
+  // the fixture dates as the calendar moves and make this assertion depend on when the test runs.
+  expect(listProposals(dir, { all: true, now: sweepTime }).filter((p) => p.status === "expired").length).toBe(1);
 });
