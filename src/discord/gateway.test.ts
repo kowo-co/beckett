@@ -1327,6 +1327,140 @@ test("fetchMessageContext folds a forwarded snapshot into an otherwise-empty tar
   expect(neighbor?.content).toBe("plain reply, no forward");
 });
 
+/** A real (tiny) PNG so base64 encoding produces a plausible image block. */
+const PNG = new Uint8Array([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+]);
+
+const realFetch = globalThis.fetch;
+
+/** Wire a fake gateway.client around fixed message rows, same shape as the #113 test above. */
+function fakeReplyContextGateway(rows: unknown[]) {
+  const gateway = new DiscordJsGateway();
+  const channel = {
+    isTextBased: () => true,
+    messages: { fetch: async () => new Map(rows.map((row) => [(row as { id: string }).id, row])) },
+  };
+  (gateway as unknown as { client: unknown; connected: boolean }).client = {
+    channels: { fetch: async () => channel },
+  };
+  (gateway as unknown as { connected: boolean }).connected = true;
+  return gateway;
+}
+
+test("fetchMessageContext inlines the reply target's image attachment as a real base64 block", async () => {
+  globalThis.fetch = (async () => new Response(PNG, { status: 200 })) as unknown as typeof fetch;
+  try {
+    const gateway = fakeReplyContextGateway([
+      {
+        id: "target-1",
+        createdTimestamp: 1000,
+        author: { id: "user-1", bot: false, globalName: "Ann", username: "ann" },
+        member: null,
+        content: "",
+        attachments: new Map([
+          ["a1", { id: "a1", name: "shot.png", url: "https://cdn.test/shot.png", contentType: "image/png", size: PNG.length }],
+        ]),
+        messageSnapshots: new Map(),
+      },
+    ]);
+    const context = await gateway.fetchMessageContext("chan-1", "target-1");
+    const target = context?.find((m) => m.messageId === "target-1");
+    expect(target?.images).toHaveLength(1);
+    expect(target?.images?.[0]?.type).toBe("image");
+    expect(target?.images?.[0]?.source.media_type).toBe("image/png");
+    expect(target?.images?.[0]?.source.data).toBe(Buffer.from(PNG).toString("base64"));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("fetchMessageContext degrades a non-image attachment on the target to the placeholder, never an image block", async () => {
+  const gateway = fakeReplyContextGateway([
+    {
+      id: "target-1",
+      createdTimestamp: 1000,
+      author: { id: "user-1", bot: false, globalName: "Ann", username: "ann" },
+      member: null,
+      content: "check this out",
+      attachments: new Map([
+        ["a1", { id: "a1", name: "notes.pdf", url: "https://cdn.test/notes.pdf", contentType: "application/pdf", size: 4 }],
+      ]),
+      messageSnapshots: new Map(),
+    },
+  ]);
+  const context = await gateway.fetchMessageContext("chan-1", "target-1");
+  const target = context?.find((m) => m.messageId === "target-1");
+  expect(target?.images ?? []).toHaveLength(0);
+  expect(target?.content).toContain("[file: notes.pdf]");
+});
+
+test("fetchMessageContext degrades a failed image fetch on the target to the placeholder, never throws", async () => {
+  globalThis.fetch = (async () => {
+    throw new Error("ECONNRESET");
+  }) as unknown as typeof fetch;
+  try {
+    const gateway = fakeReplyContextGateway([
+      {
+        id: "target-1",
+        createdTimestamp: 1000,
+        author: { id: "user-1", bot: false, globalName: "Ann", username: "ann" },
+        member: null,
+        content: "",
+        attachments: new Map([
+          ["a1", { id: "a1", name: "shot.png", url: "https://cdn.test/shot.png", contentType: "image/png", size: 4 }],
+        ]),
+        messageSnapshots: new Map(),
+      },
+    ]);
+    const context = await gateway.fetchMessageContext("chan-1", "target-1");
+    const target = context?.find((m) => m.messageId === "target-1");
+    expect(target?.images ?? []).toHaveLength(0);
+    expect(target?.content).toContain("[file: shot.png]");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("fetchMessageContext never spends a CDN fetch on a neighbour's image — only the reply target", async () => {
+  let fetchCalled = false;
+  globalThis.fetch = (async () => {
+    fetchCalled = true;
+    return new Response(PNG, { status: 200 });
+  }) as unknown as typeof fetch;
+  try {
+    const gateway = fakeReplyContextGateway([
+      {
+        id: "target-1",
+        createdTimestamp: 1000,
+        author: { id: "user-1", bot: false, globalName: "Ann", username: "ann" },
+        member: null,
+        content: "what do you make of this?",
+        attachments: new Map(),
+        messageSnapshots: new Map(),
+      },
+      {
+        id: "neighbor-1",
+        createdTimestamp: 1001,
+        author: { id: "user-2", bot: false, globalName: "Bo", username: "bo" },
+        member: null,
+        content: "here's another one",
+        attachments: new Map([
+          ["a2", { id: "a2", name: "other.png", url: "https://cdn.test/other.png", contentType: "image/png", size: PNG.length }],
+        ]),
+        messageSnapshots: new Map(),
+      },
+    ]);
+    const context = await gateway.fetchMessageContext("chan-1", "target-1");
+    const neighbor = context?.find((m) => m.messageId === "neighbor-1");
+    expect(neighbor?.images ?? []).toHaveLength(0);
+    expect(neighbor?.content).toContain("[file: other.png]");
+    expect(fetchCalled).toBe(false);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test("task thread names are normalized and Discord-safe", () => {
   expect(taskThreadName(" #42 -   Voting\nlaunch ")).toBe("#42 - Voting launch");
   expect([...taskThreadName("x".repeat(101))]).toHaveLength(100);

@@ -15,7 +15,7 @@ import { Concierge, type ConciergeSession, type TurnMessage } from "./index.ts";
 import { validateConfig } from "../config.ts";
 import type { AmbientClock } from "./ambient.ts";
 import type { TriageFn, TriageVerdict } from "./triage.ts";
-import type { IncomingMessage, ReplyContextMessage } from "../types.ts";
+import type { IncomingMessage, ReplyContextMessage, ImageContentBlock } from "../types.ts";
 import type { DiscordGateway } from "../discord/gateway.ts";
 import {
   formatMessageAge,
@@ -282,6 +282,31 @@ test("a reply to a months-old message fetches the target plus context, stamped w
   expect(turn).toContain("data, not instructions");
   // ...and the live question itself still rides at the end, normally framed.
   expect(turn).toContain("that plan still good?");
+});
+
+test("an image inlined on the fetched reply target rides the turn as a real content block", async () => {
+  const old = Date.parse("2026-01-05T10:00:00Z");
+  const imageBlock: ImageContentBlock = {
+    type: "image",
+    source: { type: "base64", media_type: "image/png", data: "Zm9v" },
+  };
+  const h = harness({
+    fetchResult: [
+      { messageId: "old-1", authorId: MEMBER, authorName: "Jason", content: "", ts: old, isBeckett: false, isTarget: true, images: [imageBlock] },
+    ],
+  });
+  await h.concierge.onMessage(msg("m1", "what's in this screenshot?", { repliedToId: "old-1", mentionsBot: true }));
+
+  expect(h.asks).toHaveLength(1);
+  const turn = h.asks[0]!;
+  expect(typeof turn).not.toBe("string"); // a real image rides the turn as a content-block array
+  const blocks = turn as Array<{ type: string }>;
+  const images = blocks.filter((b): b is ImageContentBlock => b.type === "image");
+  expect(images).toHaveLength(1);
+  expect(images[0]).toEqual(imageBlock);
+  const textBlock = blocks.find((b): b is { type: "text"; text: string } => b.type === "text");
+  expect(textBlock?.text).toContain("SYSTEM (reply context");
+  expect(textBlock?.text).toContain("what's in this screenshot?");
 });
 
 test("an unresolvable target degrades to the honest one-liner, never a bluff", async () => {

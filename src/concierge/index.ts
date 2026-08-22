@@ -68,7 +68,9 @@ import { splitByAddressee, type BurstAnchor } from "./reply-anchors.ts";
 import {
   downloadAttachments,
   buildAttachmentContent,
+  attachmentPlaceholder,
   type TurnContentBlock,
+  type ImageContentBlock,
 } from "../discord/attachments.ts";
 import {
   ensureSeeded,
@@ -7106,6 +7108,10 @@ export class Concierge {
     // grounding, and deleted so it never rides a second turn.
     const attachSeed = this.pendingWorkspaceSeeds.get(m.channelId) ?? "";
     if (attachSeed) this.pendingWorkspaceSeeds.delete(m.channelId);
+    // Reply-context rides last, right against the live turn it annotates. It may carry real image
+    // blocks too (the reply TARGET's own attachments) — collected separately since the prefix
+    // itself stays plain text.
+    const replyContext = await this.replyContextPrefix(m, speaker);
     const prefix =
       this.pausePrefix() +
       workspacePrefix +
@@ -7117,13 +7123,12 @@ export class Concierge {
       this.personContextPrefix(m.channelId, speaker.userId) +
       // Helpful memories relevant to what they're SAYING, right after who they ARE.
       (await this.memoryPrimerPrefix(m.channelId, content)) +
-      // Reply-context rides last, right against the live turn it annotates.
-      (await this.replyContextPrefix(m, speaker)) +
+      replyContext.text +
       // A replayed mention (issue #3) is answered LATE and the person should hear that from
       // Beckett, in voice — so the fact goes to the model rather than a canned frame bolted onto
       // whatever it says. Empty on every ordinary turn.
       (this.replayingMentions.has(m.messageId) ? REPLAYED_TURN_NOTE : "");
-    if (m.attachments.length === 0)
+    if (m.attachments.length === 0 && replyContext.images.length === 0)
       return prefix + frameUserTurn(m.channelId, speaker, m.messageId, content);
     let images: TurnContentBlock[] = [];
     let manifest = "";
@@ -7144,12 +7149,13 @@ export class Concierge {
         err: String(err),
       });
     }
+    const allImages = [...images, ...replyContext.images];
     const body = content && manifest ? `${content}\n${manifest}` : content || manifest;
     const framed = prefix + frameUserTurn(m.channelId, speaker, m.messageId, body);
     // No inlinable image → the turn is a plain string, byte-for-byte as text-only turns always were.
-    if (images.length === 0) return framed;
+    if (allImages.length === 0) return framed;
     // Otherwise: a text block (framed message + any non-image manifest) followed by the image blocks.
-    return [{ type: "text", text: framed }, ...images];
+    return [{ type: "text", text: framed }, ...allImages];
   }
 
   /**
@@ -7160,24 +7166,33 @@ export class Concierge {
    * messages before and after it from Discord and inject them with an absolute date + "how long
    * ago" header, so an answer to an ancient message is anchored to its time instead of bluffed.
    * Best-effort throughout: a fetch failure degrades to an honest one-liner, never a broken turn.
+   * The gateway inlines the reply TARGET's own image attachments as real base64 blocks (issue:
+   * Discord image attachments reach the concierge) — those ride back separately from the text so
+   * `buildTurn` can append them to the final content-block array alongside the live message's own.
    */
-  private async replyContextPrefix(m: IncomingMessage, speaker: SpeakerContext): Promise<string> {
-    if (!m.repliedToId) return "";
+  private async replyContextPrefix(
+    m: IncomingMessage,
+    speaker: SpeakerContext,
+  ): Promise<{ text: string; images: ImageContentBlock[] }> {
+    const none = { text: "", images: [] as ImageContentBlock[] };
+    if (!m.repliedToId) return none;
     const inWindow = this.windowEntryFor(m.channelId, m.repliedToId);
-    if (inWindow) return renderInWindowReplyPointer(inWindow);
+    if (inWindow) return { text: renderInWindowReplyPointer(inWindow), images: [] };
     const surrounding = Math.max(0, this.config.shared_context?.reply_context_surrounding ?? 5);
     const fetchContext = this.gateway.fetchMessageContext?.bind(this.gateway);
-    if (!fetchContext || surrounding === 0) return "";
+    if (!fetchContext || surrounding === 0) return none;
     const replierName =
       resolveAddress(speaker.identity) ?? m.authorDisplayName?.trim() ?? "the speaker";
     const fetched = await fetchContext(m.channelId, m.repliedToId, { surrounding }).catch(() => null);
-    if (!fetched || fetched.length === 0) return renderUnavailableReplyContext();
-    return renderFetchedReplyContext({
+    if (!fetched || fetched.length === 0) return { text: renderUnavailableReplyContext(), images: [] };
+    const images = fetched.flatMap((msg) => msg.images ?? []);
+    const text = renderFetchedReplyContext({
       channelId: m.channelId,
       replierName,
       messages: fetched,
       now: this.nowMs(),
     });
+    return { text, images };
   }
 
   /**
@@ -7370,7 +7385,7 @@ export class Concierge {
     // record holding the same line twice, forever. A requeued mid-flow injection is the same case
     // inside one process: its first pass captured it before folding it into the live turn.
     if (this.replayingMentions.has(m.messageId) || this.requeuedInjections.has(m.messageId)) return;
-    const files = m.attachments.map((a) => `[file: ${a.name}]`).join(" ");
+    const files = m.attachments.map((a) => attachmentPlaceholder(a)).join(" ");
     // A Discord forward stores its original in message snapshots, not `content` — fold it in
     // BEFORE the empty-content guard below, or a forward-only message (the common case: forward
     // first, comment or @mention seconds later) is dropped from the record entirely and never
