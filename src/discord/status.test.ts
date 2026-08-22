@@ -70,3 +70,25 @@ test("health yellow has the concrete stale-but-reachable meaning", () => {
   expect(healthColor({ ...current, reachable: false }, fixtureSnapshot.pollIntervalMs)).toBe("red");
   expect(healthColor({ ...current, consecutiveFailures: 3 }, fixtureSnapshot.pollIntervalMs)).toBe("red");
 });
+
+test("a fresh boot with no tick yet renders starting-up yellow, not down red", () => {
+  const startingUp = {
+    name: "Run supervisor", reachable: null, lastSuccessAt: null, lastSuccessAgeMs: null,
+    consecutiveFailures: 0, detail: "starting up — first watchdog tick pending", startingUp: true,
+  };
+  expect(healthColor(startingUp, fixtureSnapshot.pollIntervalMs)).toBe("yellow");
+  const line = renderStatusDashboardEmbed({ ...fixtureSnapshot, health: [startingUp] }).fields?.[7]?.value;
+  expect(line).toContain("🟡");
+  expect(line).toContain("starting up — first tick pending");
+});
+
+test("a null tick past the boot grace window is genuinely down, not starting up", () => {
+  const neverTicked = {
+    name: "Run supervisor", reachable: null, lastSuccessAt: null, lastSuccessAgeMs: null,
+    consecutiveFailures: 0, startingUp: false,
+  };
+  expect(healthColor(neverTicked, fixtureSnapshot.pollIntervalMs)).toBe("red");
+  const line = renderStatusDashboardEmbed({ ...fixtureSnapshot, health: [neverTicked] }).fields?.[7]?.value;
+  expect(line).toContain("🔴");
+  expect(line).toContain("never succeeded");
+});

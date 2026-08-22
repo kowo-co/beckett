@@ -62,6 +62,64 @@ test("snapshot collector degrades to unavailable ccusage spend instead of throwi
   expect(snapshot.runs).toEqual({ live: 0, queued: 0, parked: 0 });
 });
 
+test("a fresh boot with no tick yet renders starting-up, not down", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-status-snapshot-"));
+  dirs.push(dir);
+  const now = 10_000_000;
+  const lifecycle = uptimeLedgerPath(dir);
+  recordBoot(lifecycle, now - 5_000); // 5s uptime, well inside a 60s watchdog's grace window
+  const collector = createStatusSnapshotCollector({
+    version: "test", pollIntervalMs: 60_000,
+    runs: { live: () => [], lastTickAt: () => null },
+    metrics: { read: async () => ({ source: "proc", collectedAt: new Date(now).toISOString(), cpu: { loadPercent: 1 }, memory: { usedBytes: 1, totalBytes: 2 }, disk: { usedBytes: 1, totalBytes: 2 }, cpuLoad: 1, memoryUsed: 1, memoryTotal: 2, diskUsed: 1, diskTotal: 2 }) },
+    lifecycleLedgerPath: lifecycle, spendPath: join(dir, "spend.jsonl"), now: () => now,
+    ccusage: { collect: async () => ({ available: false, sessionCostUsd: null, dailyCostUsd: null, observedAt: null }) },
+  });
+
+  const snapshot = await collector.collect();
+  expect(snapshot.health[0]!.reachable).toBeNull();
+  expect(snapshot.health[0]!.startingUp).toBe(true);
+  expect(snapshot.health[0]!.detail).toContain("starting up");
+});
+
+test("a healthy recent tick renders neither starting-up nor down", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-status-snapshot-"));
+  dirs.push(dir);
+  const now = 10_000_000;
+  const lifecycle = uptimeLedgerPath(dir);
+  recordBoot(lifecycle, now - 3_600_000); // booted an hour ago, long past the grace window
+  const collector = createStatusSnapshotCollector({
+    version: "test", pollIntervalMs: 60_000,
+    runs: { live: () => [], lastTickAt: () => now - 1_000 },
+    metrics: { read: async () => ({ source: "proc", collectedAt: new Date(now).toISOString(), cpu: { loadPercent: 1 }, memory: { usedBytes: 1, totalBytes: 2 }, disk: { usedBytes: 1, totalBytes: 2 }, cpuLoad: 1, memoryUsed: 1, memoryTotal: 2, diskUsed: 1, diskTotal: 2 }) },
+    lifecycleLedgerPath: lifecycle, spendPath: join(dir, "spend.jsonl"), now: () => now,
+    ccusage: { collect: async () => ({ available: false, sessionCostUsd: null, dailyCostUsd: null, observedAt: null }) },
+  });
+
+  const snapshot = await collector.collect();
+  expect(snapshot.health[0]!.reachable).toBe(true);
+  expect(snapshot.health[0]!.startingUp).toBe(false);
+});
+
+test("a never-ticked supervisor long after boot is genuinely down, not starting up", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-status-snapshot-"));
+  dirs.push(dir);
+  const now = 10_000_000;
+  const lifecycle = uptimeLedgerPath(dir);
+  recordBoot(lifecycle, now - 3_600_000); // booted an hour ago; still no tick — a real failure
+  const collector = createStatusSnapshotCollector({
+    version: "test", pollIntervalMs: 60_000,
+    runs: { live: () => [], lastTickAt: () => null },
+    metrics: { read: async () => ({ source: "proc", collectedAt: new Date(now).toISOString(), cpu: { loadPercent: 1 }, memory: { usedBytes: 1, totalBytes: 2 }, disk: { usedBytes: 1, totalBytes: 2 }, cpuLoad: 1, memoryUsed: 1, memoryTotal: 2, diskUsed: 1, diskTotal: 2 }) },
+    lifecycleLedgerPath: lifecycle, spendPath: join(dir, "spend.jsonl"), now: () => now,
+    ccusage: { collect: async () => ({ available: false, sessionCostUsd: null, dailyCostUsd: null, observedAt: null }) },
+  });
+
+  const snapshot = await collector.collect();
+  expect(snapshot.health[0]!.reachable).toBeNull();
+  expect(snapshot.health[0]!.startingUp).toBe(false);
+});
+
 test("a run-store read failure degrades to an empty board instead of failing the whole snapshot", async () => {
   const dir = mkdtempSync(join(tmpdir(), "beckett-status-snapshot-"));
   dirs.push(dir);

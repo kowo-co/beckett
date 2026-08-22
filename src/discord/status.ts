@@ -46,19 +46,22 @@ export function renderStatusDashboardEmbed(snapshot: StatusDashboardSnapshot): D
 
 /** Deterministic operation classification, exported for direct threshold tests. */
 export function healthColor(operation: CoreOperationHealth, pollIntervalMs: number): HealthColor {
+  // Unreachable is normally red outright — EXCEPT the one honest exception: a fresh boot that
+  // hasn't had time for its first tick yet is not a failure, so `startingUp` downgrades it to
+  // yellow instead. Past the boot grace window the collector stops setting `startingUp`, and a
+  // null tick goes back to meaning what it always meant: genuinely down.
+  if (operation.reachable !== true) return operation.startingUp ? "yellow" : "red";
   const ageLimit = Math.max(1, pollIntervalMs) * HEALTH_YELLOW_STALE_AFTER_POLL_INTERVALS;
-  if (
-    operation.reachable !== true ||
-    operation.lastSuccessAgeMs === null ||
-    operation.consecutiveFailures >= HEALTH_RED_CONSECUTIVE_FAILURES
-  ) return "red";
+  if (operation.lastSuccessAgeMs === null || operation.consecutiveFailures >= HEALTH_RED_CONSECUTIVE_FAILURES) return "red";
   if (operation.lastSuccessAgeMs > ageLimit) return "yellow";
   return "green";
 }
 
 function healthLine(operation: CoreOperationHealth, color: HealthColor): string {
   const icon = color === "green" ? "🟢" : color === "yellow" ? "🟡" : "🔴";
-  const age = operation.lastSuccessAgeMs === null ? "never succeeded" : `last success ${formatDuration(operation.lastSuccessAgeMs)} ago`;
+  const age = operation.lastSuccessAgeMs === null
+    ? (operation.startingUp ? "starting up — first tick pending" : "never succeeded")
+    : `last success ${formatDuration(operation.lastSuccessAgeMs)} ago`;
   return `${icon} **${operation.name}** — ${age}${operation.detail ? ` (${operation.detail})` : ""}`;
 }
 
