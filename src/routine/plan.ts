@@ -64,7 +64,11 @@ import { X_CREDS_ENTRY } from "./builtins.ts";
 export function browserActionTargetsXSocial(task: string, credsEntry: string | null): boolean {
   if (credsEntry === X_CREDS_ENTRY) return true;
   const lower = task.toLowerCase();
-  return lower.includes("x.com") || lower.includes("twitter.com") || lower.includes(X_SOCIAL_ACCOUNT.toLowerCase());
+  if (lower.includes(X_SOCIAL_ACCOUNT.toLowerCase())) return true;
+  if (lower.includes("tweet")) return true; // covers tweet/tweets/tweeting/retweet/retweeting
+  if (/\btwitter\b/.test(lower)) return true;
+  if (/\bx\b/.test(lower)) return true; // catches "x.com" and bare "post it to X" alike
+  return false;
 }
 
 /** The `deps-update` lane's parameters, resolved from the action (defaults filled at fire time). */

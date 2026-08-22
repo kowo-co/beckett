@@ -84,6 +84,20 @@ test("browserActionTargetsXSocial: the exact detection rules, unit-tested in iso
   expect(browserActionTargetsXSocial("check the status page", "some-other-vault-entry")).toBe(false);
 });
 
+test("browserActionTargetsXSocial: widened after cycle-1 review — tweet, bare twitter, bare X, no credsEntry needed", () => {
+  // Review finding: the original rules only matched `x-account` creds, `x.com`, `twitter.com`, and
+  // `@beckposting` — a routine phrased "tweet something" or "post it to X" with no credsEntry and
+  // no domain slipped through onto the ungrounded browser lane despite the browser holding a
+  // persistent logged-in X session.
+  expect(browserActionTargetsXSocial("compose a tweet about the release", null)).toBe(true);
+  expect(browserActionTargetsXSocial("go retweet anything interesting", null)).toBe(true);
+  expect(browserActionTargetsXSocial("check twitter for replies", null)).toBe(true); // bare, no ".com"
+  expect(browserActionTargetsXSocial("Compose one fresh post in voice... Post it to X", null)).toBe(true);
+  expect(browserActionTargetsXSocial("post something fun as X", null)).toBe(true);
+  // Still permissive for text that merely contains the letter "x" as part of another word.
+  expect(browserActionTargetsXSocial("check the exchange rate and summarize it", null)).toBe(false);
+});
+
 test("legacy x-shitpost action folds onto the social-media agent lane — one runtime path", () => {
   const plan = buildDispatchPlan(
     routine({ kind: "x-shitpost", account: "@beckposting", credsEntry: "x-account" }),
