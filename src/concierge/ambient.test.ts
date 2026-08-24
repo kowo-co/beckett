@@ -684,4 +684,45 @@ describe("AmbientCoordinator", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("the same trigger flushed twice engages once (redelivered ambient message)", async () => {
+    const clock = new FakeClock();
+    let releaseTriage: () => void = () => {};
+    const triageGate = new Promise<void>((resolve) => {
+      releaseTriage = resolve;
+    });
+    let entered!: () => void;
+    const enteredTriage = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const turns: AmbientTurn[] = [];
+    const coordinator = createAmbientCoordinator({
+      config: validateConfig({
+        proactivity: { enabled: true, default_mode: "auto", burst_quiet_secs: 1, engaged_window_secs: 0 },
+      }),
+      logger: quietLogger,
+      clock,
+      triage: async () => {
+        entered();
+        await triageGate;
+        return yes;
+      },
+      engage: async (turn) => {
+        turns.push(turn);
+        return { decision: "send", message: "that's one approval, shipping it" };
+      },
+    });
+
+    coordinator.observe(msg("m-good-flower", "c1", "Good flower", 0), "member");
+    clock.advance(1_000);
+    await tick();
+    await enteredTriage;
+    coordinator.observe(msg("m-good-flower", "c1", "Good flower", 0), "member");
+    clock.advance(1_000);
+    await tick();
+    releaseTriage();
+    await tick();
+    await tick();
+    expect(turns).toHaveLength(1);
+  });
 });

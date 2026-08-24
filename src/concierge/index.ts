@@ -5696,6 +5696,7 @@ export class Concierge {
                   const messageId = await deliverChilled(channelId, text, {
                     input: active?.text,
                     postOpts: opts,
+                    deliveryId: active ? `turn:${active.messageId}` : `cli:${channelId}`,
                     gateway: this.gateway,
                     cfg: this.config.concierge.chilltext,
                     personaPath: personaFilePath(this.config),
@@ -5798,6 +5799,7 @@ export class Concierge {
                   // transient progress line, never a multi-bubble delivery) — fail-open to the call above.
                   const messageId = await deliverChilled(channelId, text, {
                     postOpts: opts,
+                    deliveryId: active ? `ack:${active.messageId}` : `ack:${channelId}`,
                     gateway: this.gateway,
                     cfg: this.config.concierge.chilltext,
                     personaPath: personaFilePath(this.config),
@@ -6627,6 +6629,7 @@ export class Concierge {
           : await deliverChilled(m.channelId, text, {
               input: turnContent || undefined,
               postOpts: { replyToMessageId: m.messageId, replyToUserId: m.userId },
+              deliveryId: `turn:${m.messageId}`,
               gateway: this.gateway,
               cfg: this.config.concierge.chilltext,
               personaPath: personaFilePath(this.config),
@@ -6763,6 +6766,7 @@ export class Concierge {
           replyToMessageId: segment.anchor.messageId,
           replyToUserId: segment.anchor.userId,
         },
+        deliveryId: `turn:${m.messageId}:${segment.anchor.messageId}`,
         gateway: this.gateway,
         cfg: this.config.concierge.chilltext,
         personaPath: personaFilePath(this.config),
@@ -7269,6 +7273,7 @@ export class Concierge {
         // recorded here (a second, full-text record on top of that was the "mega message" bug).
         postedId = await deliverChilled(turn.channelId, reply, {
           input: turn.transcript.at(-1)?.content || undefined,
+          deliveryId: `turn:${ambientAnchorId(turn)}`,
           gateway: this.gateway,
           cfg: this.config.concierge.chilltext,
           personaPath: personaFilePath(this.config),

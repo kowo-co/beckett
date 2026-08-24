@@ -1690,3 +1690,90 @@ test("normalize leaves an ordinary message's embed field an honest empty array",
   });
   expect(normalized.embeds).toEqual([]);
 });
+
+
+test("the same idempotencyKey posts once even when post() is called twice concurrently", async () => {
+  let sends = 0;
+  let resolveSend!: (value: { id: string }) => void;
+  const sent = new Promise<{ id: string }>((resolve) => {
+    resolveSend = resolve;
+  });
+  const channel = {
+    isSendable: () => true,
+    send: async () => {
+      sends++;
+      return sent;
+    },
+  };
+  const gateway = new DiscordJsGateway();
+  (gateway as unknown as { client: unknown; connected: boolean }).client = {
+    channels: { fetch: async () => channel },
+  };
+  (gateway as unknown as { connected: boolean }).connected = true;
+
+  const a = gateway.post("chan-1", "that's one approval, shipping it", {
+    singleMessage: true,
+    idempotencyKey: "turn:m1:chan-1:0",
+  });
+  const b = gateway.post("chan-1", "that's one approval, shipping it", {
+    singleMessage: true,
+    idempotencyKey: "turn:m1:chan-1:0",
+  });
+  resolveSend({ id: "posted-1" });
+  expect(await a).toBe("posted-1");
+  expect(await b).toBe("posted-1");
+  expect(sends).toBe(1);
+});
+
+test("flushOutbound does not resend a queued post after a partial send", async () => {
+  const gateway = new DiscordJsGateway();
+  let n = 0;
+  const channel = {
+    isSendable: () => true,
+    send: async () => {
+      n++;
+      if (n === 1) return { id: "posted-1" };
+      (gateway as unknown as { connected: boolean }).connected = false;
+      throw new Error("websocket closed");
+    },
+  };
+
+  const queued = gateway.post("chan-1", "hello\n\nworld");
+  (gateway as unknown as { client: unknown; connected: boolean }).client = {
+    channels: { fetch: async () => channel },
+  };
+  (gateway as unknown as { connected: boolean }).connected = true;
+  await (gateway as unknown as { flushOutbound: () => Promise<void> }).flushOutbound();
+
+  expect(await queued).toBe("posted-1");
+  expect(n).toBe(2);
+  expect((gateway as unknown as { outbound: unknown[] }).outbound.length).toBe(0);
+
+  (gateway as unknown as { connected: boolean }).connected = true;
+  await (gateway as unknown as { flushOutbound: () => Promise<void> }).flushOutbound();
+  expect(n).toBe(2);
+});
+
+test("a send that returns an id then throws is not re-queued on disconnect", async () => {
+  const gateway = new DiscordJsGateway();
+  let n = 0;
+  const channel = {
+    isSendable: () => true,
+    send: async () => {
+      n++;
+      if (n === 1) return { id: "posted-1" };
+      (gateway as unknown as { connected: boolean }).connected = false;
+      throw new Error("websocket closed");
+    },
+  };
+  (gateway as unknown as { client: unknown; connected: boolean }).client = {
+    channels: { fetch: async () => channel },
+  };
+  (gateway as unknown as { connected: boolean }).connected = true;
+
+  const id = await gateway.post("chan-1", "hello\n\nworld");
+  expect(id).toBe("posted-1");
+  expect(n).toBe(2);
+  const queued = (gateway as unknown as { outbound: unknown[] }).outbound;
+  expect(queued?.length ?? 0).toBe(0);
+});

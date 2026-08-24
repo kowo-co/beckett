@@ -480,6 +480,12 @@ export interface ReplyOptions {
    * actually notify — without this they render but never ping (Discord's default is parse: []).
    */
   pingUserIds?: string[];
+  /**
+   * Stable id for this exact outbound bubble (`turn:channel:index`). `DiscordJsGateway.post`
+   * coalesces in-flight and recent sends under this key so a retry, a second delivery path, or a
+   * mid-disconnect re-queue cannot land the same bubble twice.
+   */
+  idempotencyKey?: string;
 }
 
 export interface DiscordEmbedField {

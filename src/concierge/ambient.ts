@@ -184,6 +184,8 @@ class Coordinator implements AmbientCoordinator {
    */
   private readonly mentionEpoch = new Map<string, number>();
   private interjectionTimes: number[] = [];
+  /** Message ids already taken as an ambient burst anchor — a redelivered trigger must not engage twice. */
+  private readonly engagedBurstAnchors = new Set<string>();
 
   constructor(deps: CreateAmbientCoordinatorDeps) {
     this.config = deps.config.proactivity;
@@ -355,6 +357,22 @@ class Coordinator implements AmbientCoordinator {
       this.bursts.delete(channelId);
       if (burst.length === 0) return;
       if (this.effectiveMode(channelId) === "off") return;
+      const anchorId = burst[burst.length - 1]?.messageId;
+      if (anchorId && this.engagedBurstAnchors.has(anchorId)) {
+        this.logger.info("ambient flush skipped: trigger already engaged", {
+          channel: channelId,
+          messageId: anchorId,
+        });
+        return;
+      }
+      if (anchorId) {
+        this.engagedBurstAnchors.add(anchorId);
+        while (this.engagedBurstAnchors.size > 4_000) {
+          const oldest = this.engagedBurstAnchors.values().next().value;
+          if (oldest === undefined) break;
+          this.engagedBurstAnchors.delete(oldest);
+        }
+      }
 
       // Recent-conversation lane (OPS-87 follow-up): after Beckett speaks, skip the extra classifier
       // and cooldown so real continuations stay quick. Recency is only a hint, though; the downstream

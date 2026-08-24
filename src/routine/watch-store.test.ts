@@ -48,7 +48,8 @@ test("different routines get independent state", async () => {
 });
 
 test("seen-set is capped so a feed that never stops growing can't grow the file without limit", async () => {
-  const { store } = makeStore();
+  const NOW = () => new Date("2026-07-25T00:00:00.000Z");
+  const { store } = makeStore(NOW);
   const many = Array.from({ length: WATCH_SEEN_CAP + 50 }, (_, i) => ({
     id: `item-${i}`,
     firstSeenAt: "2026-07-25T00:00:00.000Z",
