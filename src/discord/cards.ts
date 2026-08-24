@@ -265,42 +265,6 @@ function truncate(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
 
-// ── training progress card (`../progress/training-source.ts` + `../progress/training-card.ts`):
-// one self-editing card per file-tailed external process (the throttled CPU pretrain, ro's other
-// ask), posted on a plain 60s timer rather than driven by `DispatchEvent` — this is not a Beckett
-// run. Same four-block shape (state line, separator, terminal window, footer) as other
-// Components V2 status cards, same pre-rendered-strings contract so this renderer stays
-// state-free. ──────────────────────────
-
-/** Everything {@link renderTrainingProgressCard} needs — two pre-rendered text blocks, one flag. */
-export interface TrainingProgressCardSnapshot {
-  /** The source's status line: step/loss/trend/tokens/rate/ETA, or a plain "stopped" line. */
-  headerText: string;
-  /** The fixed-height monospace pane of the console log's tail, already fenced as a code block. */
-  terminalWindow: string;
-  /** Whether the systemd unit is active right now — false renders the footer + colour as stopped. */
-  active: boolean;
-}
-
-/**
- * The training progress card: a state line, a separator, the console window, and a footer noting
- * whether the unit is live. Four fixed blocks — well inside Discord's 10-child container cap.
- */
-export function renderTrainingProgressCard(snapshot: TrainingProgressCardSnapshot): DiscordCard {
-  const blocks: DiscordCardBlock[] = [
-    { kind: "text", text: snapshot.headerText },
-    { kind: "separator" },
-    { kind: "text", text: snapshot.terminalWindow },
-    {
-      kind: "text",
-      text: snapshot.active
-        ? "-# Training progress card · updates every 60s from the unit's own logs"
-        : "-# Training progress card · unit not active — not showing live numbers",
-    },
-  ];
-  return { color: snapshot.active ? BLUE : GRAY, blocks };
-}
-
 function branchColor(card: BranchCardSnapshot): number {
   if (card.checks?.failed || card.review?.decision === "CHANGES_REQUESTED") return RED;
   if (card.pullRequest) {
