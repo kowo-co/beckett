@@ -30,7 +30,7 @@ import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } 
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { builtinRoutineDefs, fixedFireWindow, X_CREDS_ENTRY, type BuiltinRoutineOverrides } from "./builtins.ts";
-import { RoutineRegistrySchema, type Routine, type RoutineRegistry } from "./types.ts";
+import { emptyRoutineState, RoutineRegistrySchema, type Routine, type RoutineRegistry } from "./types.ts";
 import { log } from "../log.ts";
 import type { Logger } from "../types.ts";
 
@@ -151,7 +151,7 @@ export class RoutineStore {
       const routine: Routine = {
         ...def,
         builtin: false,
-        state: { periodKey: null, chosenFireAt: null, lastFiredPeriodKey: null, lastFiredAt: null },
+        state: emptyRoutineState(),
         createdAt: now,
         updatedAt: now,
       };
@@ -279,7 +279,7 @@ export class RoutineStore {
       if (reg.routines.some((r) => r.id === def.id)) continue;
       reg.routines.push({
         ...def,
-        state: { periodKey: null, chosenFireAt: null, lastFiredPeriodKey: null, lastFiredAt: null },
+        state: emptyRoutineState(),
         createdAt: now,
         updatedAt: now,
       });

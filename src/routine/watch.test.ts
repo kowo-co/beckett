@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WatchStateStore } from "./watch-store.ts";
 import { runWatchCycle, previewWatchCycle, startWatchLoop, type WatchDeps } from "./watch.ts";
+import { applyWatchCycleHealth } from "./dispatch-health.ts";
 import type { ModelNewsFetchResult, ModelNewsItem } from "./model-news.ts";
 import type { Routine } from "./types.ts";
+import { emptyRoutineState } from "./types.ts";
 import { RoutineStore } from "./store.ts";
 import { quietLogger } from "../cli/io.ts";
 
@@ -52,7 +54,7 @@ function makeRoutine(action: Partial<Extract<Routine["action"], { kind: "watch" 
       dryRun: false,
       ...action,
     },
-    state: { periodKey: null, chosenFireAt: null, lastFiredPeriodKey: null, lastFiredAt: null },
+    state: emptyRoutineState(),
     createdAt: "2026-07-01T00:00:00.000Z",
     updatedAt: "2026-07-01T00:00:00.000Z",
   };
@@ -375,4 +377,96 @@ test("enable/disable takes effect on the very next tick with no restart", async 
   h.deps.fetchFeed = feedOf([makeItem({ id: "fresh", models: ["claude-opus-5"] })]);
   await loop.tick(); // would be due, but now disabled
   expect(h.dispatchCalls).toHaveLength(0);
+});
+
+function attachHealth(h: Harness, routineStore: RoutineStore, alerts: string[]): void {
+  h.deps.reportHealth = async (event) => {
+    const routine = await routineStore.get(event.routineId);
+    if (!routine) return;
+    const update = applyWatchCycleHealth(routine.state, event.routineId, event.at, event.dispatch);
+    await routineStore.setState(event.routineId, update.state);
+    if (update.alert) alerts.push(update.alert);
+  };
+}
+
+test("a watch agent-dispatch failure alerts once, persists, and does not look like ok", async () => {
+  const routineStore = new RoutineStore(tmpPath("beckett-routines-", "routines.json"), { seedBuiltins: false });
+  await routineStore.add({ id: "model-news-watch", name: "w", enabled: true, action: makeRoutine().action });
+
+  const alerts: string[] = [];
+  const h = harness({ fetchFeed: feedOf([]) });
+  attachHealth(h, routineStore, alerts);
+  h.deps.dispatchAgent = async () => {
+    throw new Error("agent social-media is not registered\n    at dispatchAgentLane (routines.ts:1:1)");
+  };
+
+  await runWatchCycle(makeRoutine(), h.deps); // seed
+  h.deps.fetchFeed = feedOf([makeItem({ id: "fresh", models: ["claude-opus-5"] })]);
+  await expect(runWatchCycle(makeRoutine(), h.deps)).rejects.toThrow(/not registered/);
+
+  expect(alerts).toHaveLength(1);
+  expect(alerts[0]).toContain("`model-news-watch`");
+  expect(alerts[0]).toContain("not registered");
+  expect(alerts[0]).not.toContain("at dispatchAgentLane");
+  const failed = (await routineStore.get("model-news-watch"))!;
+  expect(failed.state.lastOutcome).toBe("failed");
+  expect(failed.state.consecutiveFailures).toBe(1);
+  expect(failed.state.lastFiredAt).not.toBeNull();
+  expect(failed.state.lastSucceededAt).toBeNull();
+  expect(failed.state.lastError).toBe("agent social-media is not registered");
+
+  h.deps.fetchFeed = feedOf([makeItem({ id: "fresh-2", models: ["claude-sonnet-5"] })]);
+  await expect(runWatchCycle(makeRoutine(), h.deps)).rejects.toThrow(/not registered/);
+  expect(alerts).toHaveLength(1);
+  expect((await routineStore.get("model-news-watch"))!.state.consecutiveFailures).toBe(2);
+
+  h.deps.dispatchAgent = async () => {};
+  h.deps.fetchFeed = feedOf([makeItem({ id: "fresh-3", models: ["claude-haiku-5"] })]);
+  const recovered = await runWatchCycle(makeRoutine(), h.deps);
+  expect(recovered.status).toBe("posted");
+  expect(alerts).toHaveLength(2);
+  expect(alerts[1]).toMatch(/dispatched again after 2 misses/);
+  const ok = (await routineStore.get("model-news-watch"))!;
+  expect(ok.state.lastOutcome).toBe("ok");
+  expect(ok.state.consecutiveFailures).toBe(0);
+  expect(ok.state.lastSucceededAt).not.toBeNull();
+  expect(ok.state.lastError).toBeNull();
+});
+
+test("the watch poll loop records lastFiredAt on a quiet tick and a failing dispatch on a hit", async () => {
+  const routineStore = new RoutineStore(tmpPath("beckett-routines-", "routines.json"), { seedBuiltins: false });
+  await routineStore.add({
+    id: "model-news-watch",
+    name: "w",
+    enabled: true,
+    action: makeRoutine({ pollIntervalMinutes: 1 }).action,
+  });
+  const alerts: string[] = [];
+  let now = NOW;
+  const h = harness({ fetchFeed: feedOf([]), now: () => now });
+  attachHealth(h, routineStore, alerts);
+  const loop = startWatchLoop({
+    routineStore,
+    watchDeps: h.deps,
+    now: () => now,
+    intervalMs: 10_000_000,
+  });
+  stoppers.push(loop.stop);
+
+  await loop.tick(); // seed — lastFiredAt set, lastOutcome not ok
+  const seeded = (await routineStore.get("model-news-watch"))!;
+  expect(seeded.state.lastFiredAt).toBe(NOW.toISOString());
+  expect(seeded.state.lastOutcome).toBeNull();
+
+  h.deps.dispatchAgent = async () => {
+    throw new Error("lane exploded");
+  };
+  h.deps.fetchFeed = feedOf([makeItem({ id: "fresh", models: ["claude-opus-5"] })]);
+  now = new Date(NOW.getTime() + 2 * 60_000);
+  await loop.tick();
+  expect(alerts).toHaveLength(1);
+  expect(alerts[0]).toContain("`model-news-watch`");
+  const failed = (await routineStore.get("model-news-watch"))!;
+  expect(failed.state.lastOutcome).toBe("failed");
+  expect(failed.state.consecutiveFailures).toBe(1);
 });

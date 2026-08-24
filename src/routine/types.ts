@@ -297,10 +297,42 @@ export const RoutineStateSchema = z.object({
   chosenFireAt: z.string().nullable().default(null),
   /** The period key we have already fired for — blocks a second fire in the same period. */
   lastFiredPeriodKey: z.string().nullable().default(null),
-  /** ISO time of the last successful dispatch (for `inspect`). */
+  /**
+   * ISO time of the last dispatch ATTEMPT (period claimed), success or not. Distinct from
+   * {@link lastSucceededAt}: a routine that throws on every fire still has a lastFiredAt, and
+   * listing it as "healthy because it fired" was the bug this field split exists to kill.
+   */
   lastFiredAt: z.string().nullable().default(null),
+  /** ISO time of the last dispatch that actually returned. Null if none ever has. */
+  lastSucceededAt: z.string().nullable().default(null),
+  /** Last dispatch result the scheduler recorded. Null if this routine has never attempted. */
+  lastOutcome: z.enum(["ok", "failed"]).nullable().default(null),
+  /** Short error from the last failed dispatch (no stack). Null when lastOutcome is not failed. */
+  lastError: z.string().nullable().default(null),
+  /** Consecutive failed dispatches since the last success (or since first fire). Survives restart. */
+  consecutiveFailures: z.number().int().nonnegative().default(0),
+  /** Error signature last posted to the ops channel — same signature stays quiet until a threshold. */
+  lastAlertedSignature: z.string().nullable().default(null),
+  /** consecutiveFailures value at the last ops alert, so 5/20 re-alerts fire once each. */
+  lastAlertedAtCount: z.number().int().nonnegative().default(0),
 });
 export type RoutineState = z.infer<typeof RoutineStateSchema>;
+
+/** Fresh never-fired state. Used by the store seed/add path so new fields are never omitted. */
+export function emptyRoutineState(): RoutineState {
+  return {
+    periodKey: null,
+    chosenFireAt: null,
+    lastFiredPeriodKey: null,
+    lastFiredAt: null,
+    lastSucceededAt: null,
+    lastOutcome: null,
+    lastError: null,
+    consecutiveFailures: 0,
+    lastAlertedSignature: null,
+    lastAlertedAtCount: 0,
+  };
+}
 
 export const RoutineSchema = z.object({
   /** Stable id/name, kebab-case (e.g. "daily-x-shitpost"). */
@@ -318,12 +350,7 @@ export const RoutineSchema = z.object({
    * action's doc comment above.
    */
   schedule: ScheduleSchema.optional(),
-  state: RoutineStateSchema.default({
-    periodKey: null,
-    chosenFireAt: null,
-    lastFiredPeriodKey: null,
-    lastFiredAt: null,
-  }),
+  state: RoutineStateSchema.default(emptyRoutineState()),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

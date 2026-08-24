@@ -14,7 +14,7 @@ import {
   zonedWallToUtc,
 } from "./schedule.ts";
 import { seededRng } from "./schedule.ts";
-import type { RoutineState, Schedule, Weekday } from "./types.ts";
+import { emptyRoutineState, type RoutineState, type Schedule, type Weekday } from "./types.ts";
 
 const PT = "America/Los_Angeles";
 const schedule: Schedule = {
@@ -98,7 +98,7 @@ const weekly: Schedule = {
 
 /** Fresh (never-rolled, never-fired) state — what a routine looks like before its first tick. */
 function freshState(): RoutineState {
-  return { periodKey: null, chosenFireAt: null, lastFiredPeriodKey: null, lastFiredAt: null };
+  return emptyRoutineState();
 }
 
 describe("ISO week keys (the weekly period key)", () => {

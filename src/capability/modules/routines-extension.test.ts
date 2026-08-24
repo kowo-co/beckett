@@ -21,6 +21,7 @@ import { RoutineStore } from "../../routine/store.ts";
 import type { RoutineScheduler, RoutineSchedulerDeps } from "../../routine/scheduler.ts";
 import { buildDispatchPlan } from "../../routine/plan.ts";
 import type { Routine } from "../../routine/types.ts";
+import { emptyRoutineState } from "../../routine/types.ts";
 import { validateConfig } from "../../config.ts";
 import { buildPaths } from "../../paths.ts";
 import type { Config, Logger } from "../../types.ts";
@@ -151,9 +152,33 @@ test("start arms the loop in the LATE sweep only, over the init-built store, wit
   expect(schedulerBuilds.length).toBe(1);
 });
 
-test("start refuses when init never ran (the daemon always inits first)", () => {
+test("start refuses when init never ran (the daemon always inits first)", async () => {
   const { ext } = build();
-  expect(() => (ext.lifecycle!.start! as (c: ExtensionContext) => void)(ctx())).toThrow(/not initialized/);
+  await expect(ext.lifecycle!.start!(ctx())).rejects.toThrow(/not initialized/);
+});
+
+test("boot names an enabled routine whose origin cannot resolve — one ops line", async () => {
+  const store = tempStore();
+  await store.add({
+    id: "daily-x-shitpost",
+    name: "daily X shitpost",
+    enabled: true,
+    action: { kind: "agent", agentId: "social-media", input: "compose today's shitpost" },
+    schedule: { cadence: { kind: "daily" }, window: { start: "12:00", end: "13:00", tz: "America/Los_Angeles" } },
+  });
+  const ops: string[] = [];
+  const { ext, deps } = build({
+    createStore: () => store,
+    defaultOrigin: () => ({ channelId: null, requesterId: null }),
+    postOps: async (text) => {
+      ops.push(text);
+    },
+  });
+  await ext.lifecycle!.init!(deps);
+  await ext.lifecycle!.start!(deps);
+  expect(ops).toHaveLength(1);
+  expect(ops[0]).toContain("`daily-x-shitpost`");
+  expect(ops[0]).toContain("origin");
 });
 
 test("the REAL scheduler loop arms on start and stop stills it (idempotent)", async () => {
@@ -258,12 +283,22 @@ test("routines.list/inspect are FREE reads over the lifecycle store — no origi
 
   const listed = await registry.invoke({ capabilityId: "routines.list", args: {} }, deps);
   expect(listed.ok).toBeTrue();
-  const routines = (listed.data as { routines: Array<{ id: string }> }).routines;
+  const routines = (listed.data as { routines: Array<{ id: string; lastOutcome: string | null; lastSucceededAt: string | null; consecutiveFailures: number }> }).routines;
   expect(routines.map((r) => r.id)).toEqual(["daily-check"]);
+  expect(routines[0]!.lastOutcome).toBeNull();
+  expect(routines[0]!.lastSucceededAt).toBeNull();
+  expect(routines[0]!.consecutiveFailures).toBe(0);
 
   const inspected = await registry.invoke({ capabilityId: "routines.inspect", args: { id: "daily-check" } }, deps);
   expect(inspected.ok).toBeTrue();
-  expect(inspected.data).toMatchObject({ id: "daily-check", action: "browser", window: "09:00-09:40 UTC" });
+  expect(inspected.data).toMatchObject({
+    id: "daily-check",
+    action: "browser",
+    window: "09:00-09:40 UTC",
+    lastOutcome: null,
+    lastSucceededAt: null,
+    consecutiveFailures: 0,
+  });
   expect((inspected.data as { state: unknown }).state).toBeDefined();
 
   const missing = await registry.invoke({ capabilityId: "routines.inspect", args: { id: "nope" } }, deps);
@@ -511,7 +546,7 @@ function xSocialBrowserRoutine(): Routine {
       credsEntry: "x-account",
     },
     schedule: { cadence: { kind: "daily" }, window: { start: "18:00", end: "19:00", tz: "America/Los_Angeles" } },
-    state: { periodKey: null, chosenFireAt: null, lastFiredPeriodKey: null, lastFiredAt: null },
+    state: emptyRoutineState(),
     createdAt: "2026-08-05T00:00:00.000Z",
     updatedAt: "2026-08-05T00:00:00.000Z",
   };
@@ -556,7 +591,7 @@ test("a browser-lane routine with no X markers still dispatches normally — the
     enabled: true,
     action: { kind: "browser", task: "check the status page and post a summary" },
     schedule: { cadence: { kind: "daily" }, window: { start: "09:00", end: "10:00", tz: "America/Los_Angeles" } },
-    state: { periodKey: null, chosenFireAt: null, lastFiredPeriodKey: null, lastFiredAt: null },
+    state: emptyRoutineState(),
     createdAt: "2026-08-05T00:00:00.000Z",
     updatedAt: "2026-08-05T00:00:00.000Z",
   };
