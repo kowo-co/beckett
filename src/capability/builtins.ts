@@ -496,8 +496,13 @@ export const configFragments = {
   shared_context: z
     .object({
       enabled: z.boolean().default(true),
-      max_entries_per_channel: posInt.default(200),
-      max_age_hours: posInt.default(72),
+      max_entries_per_channel: posInt.default(1000),
+      // The retention edge, and it is a HARD delete: compaction rewrites each channel file to
+      // exactly this window, so anything older is gone from disk, not merely un-injected. At 72h
+      // a fact stated four days ago could not be recalled by any path. Two weeks of a
+      // hard-capped, count-bounded window is still small (1000 lines/channel) and covers the
+      // "we already discussed this last week" case the old bound could not.
+      max_age_hours: posInt.default(336),
       inject_budget_tokens: posInt.default(3000),
       roster_max: posInt.default(12),
       // Server memory (v4.1): rolling per-channel profiles built by a one-shot small-model
@@ -521,6 +526,16 @@ export const configFragments = {
       // block. Default 0.5: any literal content-word overlap scores ≥1 and passes, while a strong
       // paraphrase-only hit can too; lower it toward SEM_FLOOR (0.12) to admit weaker paraphrases.
       cross_channel_min_score: z.number().positive().default(0.5),
+      // How many candidate windows the search returns before the relevance floor, session-dedup
+      // and budget trim them. Previously this reused `awareness_max_channels` (5) — the number of
+      // channels to NAME in the footer, which has nothing to do with how many relevant windows a
+      // turn may see. Five candidates across every channel is a very small net.
+      cross_channel_search_limit: posInt.default(24),
+      // Whether the CURRENT channel's own windows are eligible for this block. They are: the
+      // unseen-window block only carries lines the session has not read yet, so a fact stated in
+      // this room earlier — or before a session rotation — was otherwise unreachable unless the
+      // model chose to run a search. That is the "you forget stuff already said here" bug.
+      cross_channel_include_current: z.boolean().default(true),
       // Reply-context injection: a native reply to a message OUTSIDE the session's window gets
       // the target plus this many messages before and after it fetched from Discord, stamped
       // with how long ago the exchange happened. 5 gives the ±5 window around the target.

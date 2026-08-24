@@ -2078,8 +2078,8 @@ triage_model = "claude-haiku-4-5"
 
 [shared_context]
 enabled = true
-max_entries_per_channel = 200
-max_age_hours = 72
+max_entries_per_channel = 1000
+max_age_hours = 336
 inject_budget_tokens = 3000
 roster_max = 12
 profile_model = "claude-haiku-4-5"
@@ -2088,6 +2088,8 @@ awareness_max_channels = 5
 cross_channel_enabled = true
 cross_channel_budget_tokens = 1200
 cross_channel_min_score = 0.5
+cross_channel_search_limit = 24
+cross_channel_include_current = true
 reply_context_surrounding = 5
 
 [concierge]

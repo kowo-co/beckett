@@ -18,6 +18,8 @@
     "eval:browser": "bun scripts/eval/browser-agent.ts",
     "eval:triage": "bun scripts/eval/triage-classifier.ts",
     "eval:turns": "bun scripts/eval/turn-decisions.ts",
+    "eval:recall": "bun scripts/eval/memory-recall.ts",
+    "eval:recall:harvest": "bun scripts/eval/memory-recall-harvest.ts",
     "eval:turns:regression": "bun scripts/eval/turn-decisions-regression-demo.ts",
     "telemetry:refresh": "bun scripts/ops/telemetry-harvest.ts",
     "code-stats:refresh": "bun scripts/ops/code-stats-harvest.ts",
