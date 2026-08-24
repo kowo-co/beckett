@@ -155,6 +155,55 @@ export function defaultPersonaPath(): string {
   return join(resolveBeckettDir(), "persona.md");
 }
 
+/**
+ * The persona file's `## sample lines` / `good:` blockquotes — the exact voice-reference lines a
+ * chilltext rewrite has, twice now (2026-08-21, 2026-08-24), handed back VERBATIM in place of an
+ * actual rewrite: a confident, fabricated bubble with zero relationship to what Beckett actually
+ * said (`src/concierge/echo-guard.ts`'s `detectPersonaSampleLineLeak` is the guard that uses this).
+ * `bad (never):` lines are deliberately excluded — those are examples of what NOT to sound like,
+ * not text that could legitimately appear in a real reply.
+ */
+const SAMPLE_LINES_HEADING_RE = /^##\s*sample lines\s*$/im;
+const NEXT_SECTION_RE = /^##\s/m;
+const BAD_SUBHEADING_RE = /^bad\b/im;
+const QUOTE_LINE_RE = /^>\s*(.+)$/gm;
+
+/**
+ * Parse the `## sample lines` section's `good:` blockquotes out of raw persona text. Pure — no
+ * disk access — so the extraction itself is unit-testable without a file. Missing section, missing
+ * `>` lines, or no persona at all all degrade to `[]`, never a throw: the same fail-safe posture as
+ * every other persona read in this module.
+ */
+export function extractPersonaSampleLines(persona: string): string[] {
+  const heading = SAMPLE_LINES_HEADING_RE.exec(persona);
+  if (!heading) return [];
+  const afterHeading = persona.slice(heading.index + heading[0].length);
+  const nextSection = afterHeading.search(NEXT_SECTION_RE);
+  const section = nextSection === -1 ? afterHeading : afterHeading.slice(0, nextSection);
+  const bad = BAD_SUBHEADING_RE.exec(section);
+  const good = bad ? section.slice(0, bad.index) : section;
+  const lines: string[] = [];
+  for (const m of good.matchAll(QUOTE_LINE_RE)) {
+    const line = m[1]!.trim();
+    if (line) lines.push(line);
+  }
+  return lines;
+}
+
+/**
+ * Read `personaPath` (default `<beckettDir>/persona.md`) and extract its sample lines, or `[]` on
+ * any read failure — a missing/unreadable persona file means this guard simply has nothing to
+ * check a bubble against, never a blocked or dropped delivery. Read fresh on every call, same as
+ * {@link chillSystemPrompt}, so an edited persona takes effect with no restart.
+ */
+export function personaSampleLines(personaPath: string = defaultPersonaPath()): string[] {
+  try {
+    return extractPersonaSampleLines(readFileSync(personaPath, "utf8"));
+  } catch {
+    return [];
+  }
+}
+
 /** Paths already logged about, so a missing/carved persona logs once per process, not per message. */
 const loggedPaths = new Set<string>();
 

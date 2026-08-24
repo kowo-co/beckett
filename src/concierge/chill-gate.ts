@@ -48,7 +48,15 @@
 import type { Config, DiscordGateway, Logger, ReplyOptions } from "../types.ts";
 import { chillTransform, shouldBypassChill, type ChillTransformResult } from "../chilltext.ts";
 import { enforceMentions } from "../discord/mentions.ts";
-import { detectEchoedInput, detectPromptScaffolding, detectContentSubstitution, type PromptScaffoldResult } from "./echo-guard.ts";
+import {
+  detectEchoedInput,
+  detectPromptScaffolding,
+  detectContentSubstitution,
+  detectLeadingClauseSubstitution,
+  detectPersonaSampleLineLeak,
+  type PromptScaffoldResult,
+  type PersonaLeakResult,
+} from "./echo-guard.ts";
 import { appendChillTransformLog, type ChillTransformLogRecord } from "./chilltext-log.ts";
 import { outboundBubbleKey } from "../discord/outbound-dedupe.ts";
 
@@ -88,6 +96,14 @@ interface ReconciledEntry {
    * when there was no bubble to score (a `"block-fallback"` with no bubble, or a `"dropped"` bubble
    * that matched no block at all). */
   fidelityScore: number | null;
+  /** True when this entry's fallback was forced by `detectLeadingClauseSubstitution` (the
+   * 2026-08-24 incident) rather than by the whole-message containment score alone — see that
+   * function's doc in `./echo-guard.ts`. Only ever set on the bubble matched to the FIRST block.
+   * Omitted (not `false`) otherwise. */
+  leadingClauseFail?: boolean;
+  /** `detectLeadingClauseSubstitution`'s score, alongside `leadingClauseFail`. `undefined` when the
+   * check didn't run for this entry. */
+  leadingClauseScore?: number | null;
 }
 
 /**
@@ -123,6 +139,8 @@ function reconcileBubblesWithBlocks(blocks: string[], bubbles: string[]): Reconc
     sourceIndex: number;
     blockIndex: number | null;
     score: number | null;
+    leadingClauseFail?: boolean;
+    leadingClauseScore?: number | null;
   }
   // A bubble with no content words at all (a bare "ok") has nothing to score — treat it as a
   // perfect fit either way, so it never drives the cursor by itself.
@@ -138,11 +156,32 @@ function reconcileBubblesWithBlocks(blocks: string[], bubbles: string[]): Reconc
     while (bi < blocks.length - 1 && matchScore(bubble, blocks[bi + 1]!) > matchScore(bubble, blocks[bi]!)) {
       bi++;
     }
-    const check = bi < blocks.length ? detectContentSubstitution(bubble, blocks[bi]!) : { unrelated: true, score: null };
+    let check: { unrelated: boolean; score: number | null } =
+      bi < blocks.length ? detectContentSubstitution(bubble, blocks[bi]!) : { unrelated: true, score: null };
+    // The leading-clause check (2026-08-24 incident) runs ONLY for the bubble landing on block 0 —
+    // the one carrying the reply's opening clause. Every OTHER bubble matched to block 0 (a block
+    // legitimately split into several bubbles) covers a LATER fragment of it and would misfire
+    // against the block's own opener, so `sourceIndex === 0` (the first bubble chilltext returned)
+    // is the proxy for "this is the bubble that's supposed to open the reply." Only runs when the
+    // whole-message containment check already passed — a bubble it already flagged unrelated needs
+    // no second opinion.
+    let leadingClauseFail: boolean | undefined;
+    let leadingClauseScore: number | null | undefined;
+    if (sourceIndex === 0 && bi === 0 && !check.unrelated && blocks.length > 0) {
+      const lead = detectLeadingClauseSubstitution(bubble, blocks[0]!);
+      leadingClauseScore = lead.score;
+      if (lead.unrelated) {
+        leadingClauseFail = true;
+        check = { unrelated: true, score: check.score };
+      }
+    }
     if (bi < blocks.length && !check.unrelated) {
-      raw.push({ bubble, sourceIndex, blockIndex: bi, score: check.score });
+      raw.push({ bubble, sourceIndex, blockIndex: bi, score: check.score, leadingClauseFail, leadingClauseScore });
     } else {
-      raw.push({ bubble, sourceIndex, blockIndex: null, score: null });
+      // `check.score` survives into the dropped entry even though the bubble didn't match — it's
+      // the whole-message containment score, and for a `leadingClauseFail` drop specifically it's
+      // the number that proves the whole-message check alone would have passed this bubble.
+      raw.push({ bubble, sourceIndex, blockIndex: null, score: check.score, leadingClauseFail, leadingClauseScore });
     }
   });
 
@@ -151,7 +190,18 @@ function reconcileBubblesWithBlocks(blocks: string[], bubbles: string[]): Reconc
   const flushDropped = () => {
     while (rawPtr < raw.length && raw[rawPtr]!.blockIndex === null) {
       const r = raw[rawPtr]!;
-      entries.push({ kind: "dropped", text: r.bubble, rewritten: r.bubble, sourceIndex: r.sourceIndex, fidelityScore: null });
+      entries.push({
+        kind: "dropped",
+        text: r.bubble,
+        rewritten: r.bubble,
+        sourceIndex: r.sourceIndex,
+        // `r.score` is `null` for a genuine surplus bubble (never scored against any block at
+        // all). For a `leadingClauseFail` drop it's the whole-message CONTAINMENT score that
+        // passed — worth keeping in the log precisely because it's the number that proves the
+        // whole-message check alone would have let this bubble through.
+        fidelityScore: r.score,
+        ...(r.leadingClauseFail ? { leadingClauseFail: true, leadingClauseScore: r.leadingClauseScore ?? null } : {}),
+      });
       rawPtr++;
     }
   };
@@ -207,6 +257,8 @@ export interface DeliverChilledOptions {
   echoGuard?: typeof detectEchoedInput;
   /** Test seam: inject a fake prompt-scaffolding guard instead of `detectPromptScaffolding`. */
   promptGuard?: typeof detectPromptScaffolding;
+  /** Test seam: inject a fake persona-sample-line guard instead of `detectPersonaSampleLineLeak`. */
+  personaGuard?: typeof detectPersonaSampleLineLeak;
   /**
    * Path to the chilltext transform transcript (`./chilltext-log.ts`). Opt-in, same shape as
    * `recordPost`: when omitted, nothing is logged and nothing on disk is touched — real call sites
@@ -249,6 +301,7 @@ export async function deliverChilled(
   const transform = opts.transform ?? chillTransform;
   const echoGuard = opts.echoGuard ?? detectEchoedInput;
   const promptGuard = opts.promptGuard ?? detectPromptScaffolding;
+  const personaGuard = opts.personaGuard ?? detectPersonaSampleLineLeak;
   const logPath = opts.logPath;
   const startedAt = Date.now();
   // Every return point below appends exactly one transcript record; only the shared fields differ.
@@ -299,6 +352,14 @@ export async function deliverChilled(
   const NOT_CHECKED: EchoScore = { echoed: false, contentScore: null, fullScore: null, repaired: false };
   type PromptLeakScore = PromptScaffoldResult & { textEcho: boolean };
   const NO_PROMPT_LEAK: PromptLeakScore = { leaked: false, signals: [], textEcho: false };
+  const NO_PERSONA_LEAK: PersonaLeakResult = { leaked: false, matchedClause: null };
+
+  // The persona sample-line clauses (2026-08-21, 2026-08-24 incidents) this bubble set gets checked
+  // against — echoed back by `transform` itself (`ChillTransformResult.sampleLines`), same reasoning
+  // as `systemPrompt` below: a second read here could, in principle, catch the persona file mid-edit
+  // and disagree with what this call's `chillTransform` actually saw. `[]` when the persona file had
+  // none (missing, or no sample-lines section) — nothing to check against, never a blocked delivery.
+  const sampleLines = result.sampleLines ?? [];
 
   // The `system` text THIS call actually sent, echoed back by `transform` itself (`ChillTransformResult.system`)
   // rather than re-resolved here — a second resolution would re-read the persona file off disk a
@@ -309,6 +370,7 @@ export async function deliverChilled(
 
   const echoScores: EchoScore[] = [];
   const promptLeakScores: PromptLeakScore[] = [];
+  const personaLeakScores: PersonaLeakResult[] = [];
   const echoChecked: string[] = result.messages.map((bubble) => {
     // Prompt-scaffolding check first, on every bubble regardless of `input` — neither signal
     // needs the user's message, only the bubble's own shape and the prompt this call sent.
@@ -331,8 +393,28 @@ export async function deliverChilled(
         promptTextEcho: leak.textEcho,
         bubble: truncateForLog(bubble),
       });
-      // No echo-vs-input check on a bubble already discarded — keep echoScores index-aligned
-      // with `result.messages` for the logTransform mapping below.
+      // No echo-vs-input check on a bubble already discarded — keep echoScores/personaLeakScores
+      // index-aligned with `result.messages` for the logTransform mapping below.
+      echoScores.push(NOT_CHECKED);
+      personaLeakScores.push(NO_PERSONA_LEAK);
+      return text;
+    }
+
+    // Persona sample-line substitution check (2026-08-21 whole-bubble, 2026-08-24 opening-clause-
+    // only) — also unconditional on `input`, and also fails fully closed: unlike the input-echo
+    // check below, there is no partial repair for a bubble carrying fabricated persona text.
+    let persona: PersonaLeakResult = NO_PERSONA_LEAK;
+    try {
+      persona = personaGuard(bubble, text, sampleLines);
+    } catch (err) {
+      logger?.warn("persona sample-line guard threw — keeping the rewritten bubble", { error: String(err) });
+    }
+    personaLeakScores.push(persona);
+    if (persona.leaked) {
+      logger?.warn(
+        "chilltext bubble contains a persona sample line the agent never said — falling back to the original text",
+        { matchedClause: persona.matchedClause, bubble: truncateForLog(bubble) },
+      );
       echoScores.push(NOT_CHECKED);
       return text;
     }
@@ -391,7 +473,12 @@ export async function deliverChilled(
   const blocks = single ? [text] : splitIntoBlocks(text);
   const reconciled = reconcileBubblesWithBlocks(blocks, mentionRepaired);
   for (const entry of reconciled) {
-    if (entry.kind === "dropped") {
+    if (entry.kind === "dropped" && entry.leadingClauseFail) {
+      logger?.warn(
+        "chilltext bubble's opening clause doesn't match the reply's opening clause — falling back to the original block",
+        { leadingClauseScore: entry.leadingClauseScore, bubble: truncateForLog(entry.text) },
+      );
+    } else if (entry.kind === "dropped") {
       logger?.warn(
         "chilltext returned a surplus bubble unrelated to any block of the reply — dropping it, never posting fabricated content",
         { bubble: truncateForLog(entry.text) },
@@ -417,6 +504,7 @@ export async function deliverChilled(
       const i = entry.sourceIndex;
       const echo = i !== null ? echoScores[i]! : NOT_CHECKED;
       const leak = i !== null ? promptLeakScores[i]! : NO_PROMPT_LEAK;
+      const persona = i !== null ? personaLeakScores[i]! : NO_PERSONA_LEAK;
       return {
         // The RAW bubble chilltext returned, before the echo/prompt guards touched it — same
         // convention `rewritten` has always had here. `entry.rewritten` is the POST-guard text
@@ -429,9 +517,11 @@ export async function deliverChilled(
         echoFullScore: echo.fullScore,
         ...(echo.repaired ? { echoRepaired: true } : {}),
         ...(leak.leaked ? { promptLeak: true, promptLeakSignals: leak.signals, promptTextEcho: leak.textEcho } : {}),
+        ...(persona.leaked ? { personaLeak: true, personaLeakLine: persona.matchedClause } : {}),
         fidelityScore: entry.fidelityScore,
         ...(entry.kind === "block-fallback" ? { fidelityFallback: true } : {}),
         ...(entry.kind === "dropped" ? { fidelityDropped: true } : {}),
+        ...(entry.leadingClauseFail ? { leadingClauseFallback: true, leadingClauseScore: entry.leadingClauseScore ?? null } : {}),
       };
     }),
   });

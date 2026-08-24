@@ -15,7 +15,9 @@ import {
   buildChillSystemPrompt,
   chillSystemPrompt,
   defaultPersonaPath,
+  extractPersonaSampleLines,
   personaBudget,
+  personaSampleLines,
   selectPersonaForGate,
 } from "./chill-system.ts";
 import { DEFAULT_PERSONA } from "./concierge/index.ts";
@@ -170,4 +172,59 @@ test("a carve is announced once, naming the markers that would replace the guess
 
 test("the default persona path is the one the daemon's paths resolve to", () => {
   expect(defaultPersonaPath().endsWith("/persona.md")).toBe(true);
+});
+
+test("extractPersonaSampleLines pulls the 'good:' blockquotes out of the sample-lines section", () => {
+  const persona = [
+    "# persona: beckett",
+    "",
+    "## who this is",
+    "",
+    "some identity text",
+    "",
+    "## sample lines",
+    "",
+    "good:",
+    "> yeah that's broken. i know why. gimme 10",
+    "",
+    "> pushed the fix. the bug was in your commit btw, not mine. skill issue",
+    "",
+    "bad (never):",
+    "> Great question! I'd be happy to take a look at that for you! 🚀",
+    "",
+    "## another section",
+    "",
+    "more text",
+  ].join("\n");
+  expect(extractPersonaSampleLines(persona)).toEqual([
+    "yeah that's broken. i know why. gimme 10",
+    "pushed the fix. the bug was in your commit btw, not mine. skill issue",
+  ]);
+});
+
+test("extractPersonaSampleLines excludes the 'bad (never):' lines", () => {
+  const persona = `## sample lines\n\ngood:\n> good line\n\nbad (never):\n> bad line one\n\n> bad line two\n`;
+  expect(extractPersonaSampleLines(persona)).toEqual(["good line"]);
+});
+
+test("extractPersonaSampleLines returns [] when there's no sample-lines section at all", () => {
+  expect(extractPersonaSampleLines("# persona: beckett\n\n## who this is\n\nsome text\n")).toEqual([]);
+});
+
+test("extractPersonaSampleLines returns [] for an empty persona", () => {
+  expect(extractPersonaSampleLines("")).toEqual([]);
+});
+
+test("extractPersonaSampleLines never throws on a malformed section", () => {
+  expect(extractPersonaSampleLines("## sample lines\nno good: heading, no quote lines at all")).toEqual([]);
+});
+
+test("personaSampleLines reads the file and extracts its sample lines", () => {
+  const path = join(tmp(), "persona.md");
+  writeFileSync(path, "## sample lines\n\ngood:\n> yeah that's broken. i know why. gimme 10\n");
+  expect(personaSampleLines(path)).toEqual(["yeah that's broken. i know why. gimme 10"]);
+});
+
+test("personaSampleLines on a missing file returns [], never throws", () => {
+  expect(personaSampleLines(join(tmp(), "not-there.md"))).toEqual([]);
 });

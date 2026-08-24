@@ -51,7 +51,16 @@ interface ChillTransformBubbleRecord {
   /** True when the echo guard flagged this bubble as echoing `input` — whether it was repaired
    * (see `echoRepaired`) or replaced wholesale with the original `agentOutput`. */
   echoFallback: boolean;
-  /** `detectEchoedInput`'s scores for this bubble. `null` when the guard didn't run (no `input`) or threw. */
+  /**
+   * `detectEchoedInput`'s scores for this bubble — overlap against the USER'S TRIGGERING MESSAGE
+   * (`input`), NOT against `agentOutput`/`rewritten`. This pair exists to catch the rewrite handing
+   * the user's own words back as Beckett's reply (2026-08-18); it is NOT a fidelity/substitution
+   * check and both routinely read 0 on a substitution incident (2026-08-24: a fabricated bubble
+   * scored `echoContentScore: 0, echoFullScore: 0` while `fidelityScore: 0.9`) — that is expected,
+   * not a bug in these two fields. For "does this bubble actually relate to what the agent said,"
+   * see `fidelityScore`/`fidelityFallback`/`fidelityDropped`, `leadingClauseFallback`, and
+   * `personaLeak` instead. `null` when the guard didn't run (no `input`) or threw.
+   */
   echoContentScore: number | null;
   echoFullScore: number | null;
   /** True when `echoFallback` was resolved by stripping an echoed leading/trailing span and
@@ -69,6 +78,13 @@ interface ChillTransformBubbleRecord {
   /** True when the trip was (also) a near-copy of the `system` prompt this call sent, as opposed
    * to only the structural shape check. Present only alongside `promptLeak: true`. */
   promptTextEcho?: boolean;
+  /** True when this bubble was replaced with `agentOutput` because it contained a verbatim
+   * `persona.md` sample-line clause the agent's own output did not (the 2026-08-21/2026-08-24
+   * incidents — see `detectPersonaSampleLineLeak` in `./echo-guard.ts`). Omitted (not `false`)
+   * when this class of check didn't trip. */
+  personaLeak?: boolean;
+  /** The normalized persona clause that matched. Present only alongside `personaLeak: true`. */
+  personaLeakLine?: string | null;
   /** `detectContentSubstitution`'s containment score for this bubble against the block of the
    * reply it was matched to (the 2026-08-21 incident — see `reconcileBubblesWithBlocks` in
    * `chill-gate.ts`). `null` when there was no bubble to score (a `block-fallback` entry with no
@@ -82,6 +98,13 @@ interface ChillTransformBubbleRecord {
    * every block of the reply, structurally in excess of what chilltext should have returned. Never
    * posted; `posted` is `null`. Omitted (not `false`) otherwise. */
   fidelityDropped?: boolean;
+  /** True when the fallback (`fidelityFallback`/`fidelityDropped`) was forced by
+   * `detectLeadingClauseSubstitution` (the 2026-08-24 incident: only the bubble's OPENING clause
+   * was substituted, diluted below the whole-message fidelity threshold) rather than by the
+   * whole-message containment score alone. Omitted (not `false`) otherwise. */
+  leadingClauseFallback?: boolean;
+  /** `detectLeadingClauseSubstitution`'s score, alongside `leadingClauseFallback`. */
+  leadingClauseScore?: number | null;
 }
 
 export interface ChillTransformLogRecord {
@@ -170,15 +193,20 @@ function formatChillTransformRecord(record: ChillTransformLogRecord): string {
     const promptLeakNote = bubble.promptLeak
       ? ` [PROMPT LEAK signals=${(bubble.promptLeakSignals ?? []).join(",") || "(none)"}${bubble.promptTextEcho ? " textEcho" : ""}]`
       : "";
+    const personaLeakNote = bubble.personaLeak ? ` [PERSONA SAMPLE-LINE LEAK matched="${bubble.personaLeakLine ?? ""}"]` : "";
     const fidelityScoreText = typeof bubble.fidelityScore === "number" ? ` fidelity=${bubble.fidelityScore.toFixed(2)}` : "";
-    const fidelityNote = bubble.fidelityDropped
-      ? ` [FIDELITY DROPPED — surplus bubble, unrelated to any block${fidelityScoreText}]`
-      : bubble.fidelityFallback
-        ? ` [FIDELITY FALLBACK — block posted verbatim${fidelityScoreText}]`
-        : "";
+    const leadingClauseScoreText =
+      typeof bubble.leadingClauseScore === "number" ? ` leadingClause=${bubble.leadingClauseScore.toFixed(2)}` : "";
+    const fidelityNote = bubble.leadingClauseFallback
+      ? ` [LEADING CLAUSE FALLBACK — opening clause substituted, block posted verbatim${fidelityScoreText}${leadingClauseScoreText}]`
+      : bubble.fidelityDropped
+        ? ` [FIDELITY DROPPED — surplus bubble, unrelated to any block${fidelityScoreText}]`
+        : bubble.fidelityFallback
+          ? ` [FIDELITY FALLBACK — block posted verbatim${fidelityScoreText}]`
+          : "";
     lines.push(`  bubble ${i + 1} rewritten: ${bubble.rewritten === null ? "(no bubble — block posted verbatim)" : oneLine(bubble.rewritten)}`);
     lines.push(
-      `  bubble ${i + 1} posted:    ${bubble.posted === null ? "(dropped — never posted)" : oneLine(bubble.posted)}${echoNote}${promptLeakNote}${fidelityNote}`,
+      `  bubble ${i + 1} posted:    ${bubble.posted === null ? "(dropped — never posted)" : oneLine(bubble.posted)}${echoNote}${promptLeakNote}${personaLeakNote}${fidelityNote}`,
     );
   }
   return lines.join("\n");

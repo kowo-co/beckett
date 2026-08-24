@@ -5,7 +5,13 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { detectContentSubstitution, detectEchoedInput, detectPromptScaffolding } from "./echo-guard.ts";
+import {
+  detectContentSubstitution,
+  detectEchoedInput,
+  detectLeadingClauseSubstitution,
+  detectPersonaSampleLineLeak,
+  detectPromptScaffolding,
+} from "./echo-guard.ts";
 
 describe("detectEchoedInput — the 2026-08-18 incident", () => {
   // Channel 1520986792373911622, message 1539063244914950257. The user's triggering message
@@ -279,5 +285,119 @@ describe("detectPromptScaffolding — legitimate replies that brush a single sig
     for (const bubble of ["yeah, agreed", "on it", "sounds good, talk soon", "pushed the fix, tests are green"]) {
       expect(detectPromptScaffolding(bubble).leaked).toBe(false);
     }
+  });
+});
+
+describe("detectLeadingClauseSubstitution — the 2026-08-24 incident", () => {
+  // Channel 1520986792373911622, 22:50:41.399Z: only the OPENING clause was substituted; the rest
+  // of the bubble is untouched. The whole-message containment score (`detectContentSubstitution`)
+  // scored this 0.9 — comfortably "related" — because it's length-weighted and 90%+ of the tokens
+  // survived. This check looks only at the part that changed.
+  const AGENT_OUTPUT =
+    "hi booper. you got the mention right and the message wrong, which is more than most of the " +
+    "pipelines around here managed today";
+  const CORRUPTED_BUBBLE =
+    "yeah that's broken. you got the mention right and the message wrong, which is more than most " +
+    "of the pipelines around here managed today";
+
+  test("trips on the real evidence pair — zero shared content in the opening clause", () => {
+    const result = detectLeadingClauseSubstitution(CORRUPTED_BUBBLE, AGENT_OUTPUT);
+    expect(result.unrelated).toBe(true);
+    expect(result.score).toBe(0);
+  });
+
+  test("the whole-message containment score alone would NOT have caught this — confirming the blind spot", () => {
+    const result = detectContentSubstitution(CORRUPTED_BUBBLE, AGENT_OUTPUT);
+    expect(result.unrelated).toBe(false);
+    expect(result.score).toBeGreaterThanOrEqual(0.85);
+  });
+
+  test("a faithful rewording of the opening clause does not trip", () => {
+    const rewritten = "yo booper. you got the mention right and the message wrong, more than most pipelines today";
+    expect(detectLeadingClauseSubstitution(rewritten, AGENT_OUTPUT).unrelated).toBe(false);
+  });
+
+  test("an unchanged bubble (byte-identical) does not trip", () => {
+    expect(detectLeadingClauseSubstitution(AGENT_OUTPUT, AGENT_OUTPUT).unrelated).toBe(false);
+  });
+
+  test("neither side carries an early sentence terminator: the check declines rather than guessing", () => {
+    // Neither `.`/`!`/`?` appears early in either string — comparing "the whole bubble" against
+    // "the whole source" here would just be a worse version of the whole-message check, and a size
+    // mismatch (one side terminated, one not) is exactly the false-positive shape this guards
+    // against — see the doc on `leadingClause`.
+    const result = detectLeadingClauseSubstitution("yeah all good, nothing running", "sounds good no worries");
+    expect(result.unrelated).toBe(false);
+    expect(result.score).toBeNull();
+  });
+
+  test("only the SOURCE has an early terminator (a short first sentence merged into an untermined rewrite): declines, does not misfire", () => {
+    // Regression: comparing a genuine short source clause ("stopped.") against an entire untermined
+    // bubble ("yeah all good, nothing running") produced a spurious near-zero score even though the
+    // bubble is a faithful, if restructured, rewrite of the same reply.
+    const bubble = "yeah all good, nothing running";
+    const source = "stopped. nothing deployed, nothing running, we're clean.";
+    const result = detectLeadingClauseSubstitution(bubble, source);
+    expect(result.unrelated).toBe(false);
+    expect(result.score).toBeNull();
+  });
+
+  test("a bare-stopword opener has no content words to score and does not trip", () => {
+    const result = detectLeadingClauseSubstitution("ok. sure thing", "so. anyway here's the update");
+    expect(result.unrelated).toBe(false);
+    expect(result.score).toBeNull();
+  });
+});
+
+describe("detectPersonaSampleLineLeak — the 2026-08-21 / 2026-08-24 incidents", () => {
+  const SAMPLE_LINES = [
+    "yeah that's broken. i know why. gimme 10",
+    "pushed the fix. the bug was in your commit btw, not mine. skill issue",
+    "the deploy went about as well as you'd expect",
+    "ok fair, i was wrong about the cache. moving on",
+  ];
+
+  test("trips when a bubble contains a persona clause the agent's own output never said", () => {
+    const bubble =
+      "yeah that's broken. you got the mention right and the message wrong, which is more than most " +
+      "of the pipelines around here managed today";
+    const agentOutput =
+      "hi booper. you got the mention right and the message wrong, which is more than most of the " +
+      "pipelines around here managed today";
+    const result = detectPersonaSampleLineLeak(bubble, agentOutput, SAMPLE_LINES);
+    expect(result.leaked).toBe(true);
+    expect(result.matchedClause).toBe("yeah that's broken");
+  });
+
+  test("trips on a whole verbatim sample-line bubble (the 2026-08-21 shape)", () => {
+    const result = detectPersonaSampleLineLeak(
+      "yeah that's broken. i know why. gimme 10",
+      "the classifier is going now",
+      SAMPLE_LINES,
+    );
+    expect(result.leaked).toBe(true);
+  });
+
+  test("a clause the agent's own output ALSO contains is not a leak", () => {
+    const agentOutput = "yeah that's broken. i know why. gimme 10 and it'll be fixed";
+    const result = detectPersonaSampleLineLeak(agentOutput, agentOutput, SAMPLE_LINES);
+    expect(result.leaked).toBe(false);
+  });
+
+  test("short, common clauses under the word-count floor never trip (false-positive guard)", () => {
+    // "moving on" and "skill issue" are real sample-line fragments but only 2 words — common enough
+    // in ordinary chat that a coincidental match isn't a leak.
+    const result = detectPersonaSampleLineLeak("cool, moving on then", "totally unrelated agent output", SAMPLE_LINES);
+    expect(result.leaked).toBe(false);
+  });
+
+  test("no sample lines to check against: never trips", () => {
+    const result = detectPersonaSampleLineLeak("yeah that's broken. i know why. gimme 10", "hi there", []);
+    expect(result.leaked).toBe(false);
+  });
+
+  test("ordinary chat sharing no persona clauses never trips", () => {
+    const result = detectPersonaSampleLineLeak("sounds good, talk soon", "sounds good, talk soon", SAMPLE_LINES);
+    expect(result.leaked).toBe(false);
   });
 });
