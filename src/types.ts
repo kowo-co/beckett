@@ -1115,6 +1115,10 @@ export interface Config {
     cross_channel_budget_tokens: number;
     /** Minimum blended relevance score a cross-channel hit must clear to be injected (else the block is omitted). */
     cross_channel_min_score: number;
+    /** Candidate windows the search returns before the relevance floor, dedup and budget trim them. */
+    cross_channel_search_limit: number;
+    /** Whether the CURRENT channel's own windows are eligible for the relevance block. */
+    cross_channel_include_current: boolean;
     /**
      * Messages fetched either side of a reply target that sits outside the session's window
      * (the "message plus N before and after" reply-context injection).

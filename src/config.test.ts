@@ -248,8 +248,8 @@ test("shared_context defaults ship enabled with the OPS-80 bounds", () => {
   const config = validateConfig({});
   expect(config.shared_context).toMatchObject({
     enabled: true,
-    max_entries_per_channel: 200,
-    max_age_hours: 72,
+    max_entries_per_channel: 1000,
+    max_age_hours: 336,
     inject_budget_tokens: 3000,
     roster_max: 12,
   });
