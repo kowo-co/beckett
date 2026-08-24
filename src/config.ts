@@ -154,9 +154,13 @@ function mergeProactivityOverride(rawConfig: unknown, overridePath: string): unk
  *   - `plane`   — the first tracker section, long since folded into `[tracker]` (itself now gone).
  *   - `tracker` — the out-of-process ticket queue. v7 has no board; the run ledger is the queue.
  *   - `progress`— `cards_as_code`, the ticket dispatcher's card switch (retired with the v7 run engine).
- *   - `dream`   — the nightly dream pass, deleted whole in the v7 debt sweep (overhaul P16).
+ *
+ * `dream` was retired here too after the v7 debt sweep (overhaul P16), but the nightly dream
+ * pass was later rebuilt on top of the day's Discord sessions (`src/dream/`) and `[dream]` is a
+ * live schema key again — it must NOT be listed below, or a real config.toml's `[dream]` section
+ * would be silently stripped at load instead of taking effect.
  */
-const RETIRED_CONFIG_SECTIONS = ["plane", "tracker", "progress", "dream"] as const;
+const RETIRED_CONFIG_SECTIONS = ["plane", "tracker", "progress"] as const;
 
 /**
  * Drop retired top-level sections from a parsed config before the strict schema sees them.
@@ -270,9 +274,9 @@ export function loadConfig(opts: LoadConfigOptions = {}): Config {
   // 3. runtime proactivity overrides (partial [proactivity]) → raw object.
   raw = mergeProactivityOverride(raw, opts.proactivityOverrideFile ?? `${beckettDir}/proactivity.json`);
 
-  // 3b. retired v6 sections ([tracker], [progress], [plane], [dream]) → stripped with a
-  //     deprecation line, so a prod config.toml written before the run engine still boots this
-  //     daemon.
+  // 3b. retired v6 sections ([tracker], [progress], [plane]) → stripped with a deprecation
+  //     line, so a prod config.toml written before the run engine still boots this daemon.
+  //     ([dream] is NOT in this list — it is a live schema key again, see RETIRED_CONFIG_SECTIONS.)
   raw = dropRetiredSections(raw, (message) => console.warn(message));
 
   // 3c. the retired `[concierge.chilltext] system` voice string → stripped the same way, so prod's

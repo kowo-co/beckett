@@ -21,6 +21,10 @@
  *   - `weekly-free-time` (docs/freetime.md) — once a week in the small hours, one unprompted
  *     session inside a scratch directory on a hard token budget, whose only durable outputs are a
  *     journal entry and create-only `free-time`-namespace memories that seed the next session.
+ *   - `nightly-dream` (`src/dream/`) — once a day in the small hours, a cheap tool-less model
+ *     reviews the day's guild Discord sessions and commits at most a handful of durable,
+ *     provenance-checked inferences into the `dream`-namespace memory, plus a dated journal entry
+ *     and one short line to `[dream] channel_id`.
  *
  * As of issue #55/#72 the shitpost routine drives that post THROUGH the `social-media` agent rather than
  * an ad-hoc composer: its action invokes the agent (which WRITES the post — taste lives in the
@@ -177,6 +181,15 @@ export const FREE_TIME_ID = "weekly-free-time";
 const SELF_REPAIR_ID = "nightly-self-repair";
 
 /**
+ * Id of the nightly dream routine (`src/dream/`): once a day, deep night PT, Beckett reviews the
+ * day's guild Discord sessions and commits at most a handful of durable, provenance-checked
+ * inferences to memory. Like free time it is a plain builtin routine and gets no scheduling
+ * machinery of its own — disabling it is the same `beckett routine disable` every other builtin
+ * answers to, and `[dream] enabled=false` is the config off-switch honored before anything spawns.
+ */
+export const NIGHTLY_DREAM_ID = "nightly-dream";
+
+/**
  * Config-sourced overrides for the built-in definitions. Free time's schedule ships in
  * `[free_time]` config so a fresh install can be retimed without editing source; every other
  * builtin's window is a code constant. After the seed the routine store owns the timing — that
@@ -188,6 +201,13 @@ const SELF_REPAIR_ID = "nightly-self-repair";
 export interface BuiltinRoutineOverrides {
   freeTime?: { weekday: Weekday; window: FuzzWindow };
   selfRepair?: { window: FuzzWindow };
+  /**
+   * The nightly dream pass's FIXED fire time, from `[dream] fire_at` / `[dream] timezone`.
+   * Unlike free time's seed-only window this is applied on EVERY load (see
+   * `RoutineStore.reconcileDreamSchedule`): the pass runs at ITS time, and "its time" is a config
+   * value a human edits, so a seed-only binding would go stale the moment they edited it.
+   */
+  dream?: { fireAt: string; tz: string };
   /**
    * The proactive-sweep routine's opt-in repo list, from `[proactive_sweep] repos` in config.
    * Unlike `freeTime` (seed-only), this override is applied on EVERY load, not just the first
@@ -246,6 +266,27 @@ const TIMELINE_REPLY_WINDOWS: Record<(typeof TIMELINE_REPLY_IDS)[number], FuzzWi
   "x-timeline-replies-3": { start: "17:15", end: "18:00", tz: PT_TZ },
 };
 
+/** The nightly dream pass's fire time when config says nothing: midnight, Beckett's own zone. */
+export const DREAM_DEFAULT_FIRE_AT = "00:00";
+export const DREAM_DEFAULT_TZ = PT_TZ;
+
+/**
+ * A FIXED fire time expressed in the scheduler's one schedule shape. Every routine is a cadence
+ * plus a fuzz window; a fixed time is the degenerate case of that — a ONE-MINUTE window, which
+ * `rollFireTime` can only ever resolve to its start (`spanMinutes` is 1, so the rolled minute is
+ * 0 whatever the RNG returns). No new schedule kind, no second code path in the scheduler, and
+ * `beckett routine ls` still prints one honest instant.
+ *
+ * The trailing minute is also why `[dream] fire_at` refuses `23:59`: the window must END inside
+ * the same day, or the fire would read as a late catch-up rather than an on-time one.
+ */
+export function fixedFireWindow(fireAt: string, tz: string): FuzzWindow {
+  const [h, m] = fireAt.split(":").map(Number);
+  const minutes = (h! * 60 + m! + 1) % (24 * 60);
+  const end = `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+  return { start: fireAt, end, tz };
+}
+
 /**
  * The definitions (sans timestamps/state — the store stamps those on seed). Kept as a factory
  * so the seeder gets fresh objects and can't accidentally share mutable state.
@@ -259,6 +300,7 @@ export function builtinRoutineDefs(
   const selfRepair = overrides.selfRepair
     ? { cadence: { kind: "daily" as const }, window: overrides.selfRepair.window }
     : SELF_REPAIR_DEFAULT_SCHEDULE;
+  const dream = overrides.dream ?? { fireAt: DREAM_DEFAULT_FIRE_AT, tz: DREAM_DEFAULT_TZ };
   return [
     ...DAILY_SHITPOST_IDS.map((id) => ({
       id,
@@ -383,6 +425,24 @@ export function builtinRoutineDefs(
       // Fires whether the box is busy: filing a run is a queue insert, not contention.
       action: { kind: "self-repair" },
       schedule: selfRepair,
+    },
+    {
+      id: NIGHTLY_DREAM_ID,
+      name: "nightly dream",
+      builtin: true,
+      enabled: true,
+      // No prompt, no creds, no channel baked in: what the pass reads (the day's guild sessions)
+      // and writes (create-only `dream`-namespace memories, capped) lives in code under
+      // `src/dream/`, so editing the routine can never widen what the pass is allowed to do.
+      action: { kind: "dream" },
+      // A FIXED time, daily — 00:00 PT unless `[dream] fire_at`/`timezone` say otherwise. Not a
+      // fuzz window and not idle-gated: ro ruled the busy skip out, so a night with the fleet
+      // working is a night the pass still runs. `fixedFireWindow` renders that as the one-minute
+      // window the scheduler's one schedule shape can express.
+      schedule: {
+        cadence: { kind: "daily" },
+        window: fixedFireWindow(dream.fireAt, dream.tz),
+      },
     },
   ];
 }

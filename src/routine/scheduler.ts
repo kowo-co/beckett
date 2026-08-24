@@ -28,6 +28,7 @@ import type { Logger } from "../types.ts";
 import type { RoutineStore } from "./store.ts";
 import type { Routine } from "./types.ts";
 import { periodDateKey, periodKey, rollFireTime, windowBounds } from "./schedule.ts";
+import { toMinutes } from "./types.ts";
 import { buildDispatchPlan, type RoutineDispatchPlan } from "./plan.ts";
 
 /**
@@ -38,6 +39,12 @@ import { buildDispatchPlan, type RoutineDispatchPlan } from "./plan.ts";
  * `daily-x-shitpost` lanes together. A late routine that loses the race is NOT retried later this
  * tick or a later one: {@link evaluate} marks its period spent right away, so it rolls cleanly to
  * its next period (tomorrow, for a daily routine) instead of piling up.
+ *
+ * FIXED-time routines (a one-minute window — `builtins.ts`'s `fixedFireWindow`, which the nightly
+ * dream pass uses) are exempt: with a 60-second window, any tick landing a minute off reads as
+ * "late", and losing the slot would mark the day spent and silently skip a pass whose whole
+ * contract is that it runs at its time. The exemption cannot storm — the period is still claimed
+ * exactly once, so it is at most one extra cheap local job per tick.
  */
 const LATE_CATCH_UP_BUDGET_PER_TICK = 1;
 
@@ -123,7 +130,15 @@ export function startRoutineScheduler(deps: RoutineSchedulerDeps): RoutineSchedu
     //    `LATE_CATCH_UP_BUDGET_PER_TICK` late routines may claim+dispatch per tick; any others
     //    roll straight to their next period instead of storming in together.
     const windowEnd = windowBounds(routine.schedule.window, periodDateKey(routine.schedule.cadence, key)).end;
-    const isLate = at.getTime() > windowEnd.getTime();
+    // A FIXED-time routine (a one-minute window — see `fixedFireWindow`) is exempt from the
+    // budget. The guard exists to stop a boot storm of BROWSER-posting siblings landing in the
+    // same second; a fixed-time lane is one cheap local job whose whole contract is that it runs
+    // at its time, and with a 60-second window it would read as "late" on any tick that lands a
+    // minute off. Losing that race marks the period spent, so the exemption is the difference
+    // between "ran a little after midnight" and "silently skipped today". It cannot storm: the
+    // period is still claimed exactly once, so this is at most one extra fire per tick.
+    const spanMinutes = toMinutes(routine.schedule.window.end) - toMinutes(routine.schedule.window.start);
+    const isLate = at.getTime() > windowEnd.getTime() && spanMinutes > 1;
     if (isLate) {
       if (catchUpBudget.remaining <= 0) {
         const skipped = { ...state, lastFiredPeriodKey: key };

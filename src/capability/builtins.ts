@@ -25,6 +25,7 @@ import { isAbsolute, resolve } from "node:path";
 import { z } from "zod";
 import type { Config } from "../types.ts";
 import { HHMM, WEEKDAYS } from "../routine/types.ts";
+import { isValidTimeZone } from "../routine/schedule.ts";
 import { DIRECTED_SETTLE_MAX_MS } from "../concierge/directed-settle.ts";
 import { ActionClass, CapabilityRegistry, type Capability } from "./index.ts";
 
@@ -765,6 +766,37 @@ export const configFragments = {
     })
     .strict()
     .default({}),
+  // The nightly dream pass (`src/dream/`): reviews the day's Discord sessions and commits at
+  // most a handful of durable inferences into the `dream` memory namespace. Every value here is
+  // a WALL the pass runs INSIDE — its process has no write path back to this file.
+  dream: z
+    .object({
+      enabled: z.boolean().default(true),
+      model: z.string().default("claude-haiku-4-5"),
+      hard_timeout_s: posInt.default(600),
+      output_token_budget: posInt.default(20_000),
+      window_hours: posInt.default(24),
+      // The conservatism cap: a pass that writes twenty nodes a night is a bug, not a success.
+      memories_per_night_max: posInt.default(3),
+      // The same idea one namespace over: how many UPDATE/RETIRE/FLAG ops one pass may apply.
+      prunes_per_night_max: posInt.default(3),
+      // The FIXED wall-clock the pass fires at — no fuzz window, no idle gate. ro's call: the
+      // pass runs at its time. `23:59` is refused because the scheduler needs the trailing
+      // minute to recognize the fire as on-time rather than a late catch-up.
+      fire_at: HHMM.refine(
+        (v) => v !== "23:59",
+        "23:59 has no room for the trailing minute; use 23:58 or 00:00",
+      ).default("00:00"),
+      timezone: z
+        .string()
+        .min(1)
+        .refine(isValidTimeZone, "must be an IANA timezone id (e.g. America/Los_Angeles)")
+        .default("America/Los_Angeles"),
+      // Defaults to this install's dream-report channel; empty = the pass says nothing to anyone.
+      channel_id: z.string().default("1520658476974735490"),
+    })
+    .strict()
+    .default({}),
   // The social-media agent's chill pass (W4A tune): route its composed X posts through
   // chilltext's tone rewrite before they reach the browser lane. Reuses
   // `concierge.chilltext`'s url/timeout rather than duplicating them.
@@ -829,6 +861,7 @@ const BUILTIN_CAPABILITY_INFO: {
   observed_bots: { id: "observed-bots", summary: "Bots Beckett may read but never talk to (e.g. booper)." },
   free_time: { id: "free-time", summary: "Weekly self-directed session: trigger, walls, token ceiling, share channel." },
   self_repair: { id: "self-repair", summary: "Nightly error clustering + capped run filing against own source." },
+  dream: { id: "dream", summary: "Nightly session-review pass: short-term-to-long-term memory commits, walls, token ceiling." },
   social: { id: "social", summary: "Social-media agent's chilltext chill-pass toggle." },
   ops_log: { id: "ops-log", summary: "Discord ops-log mirror: legible event lines, batching, turn heartbeat." },
 };

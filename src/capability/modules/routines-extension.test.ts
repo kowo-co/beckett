@@ -62,6 +62,7 @@ function fakeScheduler(log: string[]): RoutineScheduler {
         agentInput: null,
         freeTime: false,
         selfRepair: false,
+        dream: false,
         browserTask: "check the thing",
         depsUpdate: null,
         proactiveSweep: null,
@@ -372,15 +373,19 @@ test("unknown capabilities and pre-init calls refuse with results", async () => 
 // ── the deps-update lane forks BEFORE the browser (issue #85) ─────────────────────────────
 
 /** A plan shaped like the scheduler builds one, minus the fields the lane under test ignores. */
-function planFor(kind: "deps-update" | "browser" | "self" | "spend-report" | "free-time" | "self-repair") {
+function planFor(
+  kind: "deps-update" | "browser" | "self" | "spend-report" | "free-time" | "self-repair" | "dream",
+) {
   return {
     routineId:
       kind === "self" ? "morning-sweep"
       : kind === "free-time" ? "weekly-free-time"
       : kind === "self-repair" ? "nightly-self-repair"
+      : kind === "dream" ? "nightly-dream"
       : kind === "spend-report" ? "weekly-spend-report"
       : "weekly-deps-update",
-    lane: kind === "free-time" || kind === "self-repair" ? "self" : kind,
+    // The free-time, self-repair, and dream variants ride the self LANE; only their flags differ.
+    lane: kind === "free-time" || kind === "self-repair" || kind === "dream" ? "self" : kind,
     agentId: null,
     agentInput: null,
     browserTask: kind === "browser" ? "go do the thing" : null,
@@ -388,6 +393,7 @@ function planFor(kind: "deps-update" | "browser" | "self" | "spend-report" | "fr
     selfPrompt: kind === "self" ? "look over the board and nudge anything stalled" : null,
     freeTime: kind === "free-time",
     selfRepair: kind === "self-repair",
+    dream: kind === "dream",
     preview: "p",
     credsEntry: null,
     channelId: null,
@@ -575,6 +581,7 @@ function agentPlanFor(agentId: string, agentInput: string) {
     selfPrompt: null,
     freeTime: false,
     selfRepair: false,
+    dream: false,
     preview: "p",
     credsEntry: "x-account",
     channelId: null,
@@ -1110,9 +1117,68 @@ test("the idle gate defers a free-time fire on a busy machine and only that fire
   expect(dispatcher.deferReason?.(planFor("free-time") as never, {} as never)).toContain("worker fleet is busy");
   // Self-repair does not defer — filing a run is a queue insert (ro, 2026-08-24).
   expect(dispatcher.deferReason?.(planFor("self-repair") as never, {} as never)).toBeNull();
+  // Nothing else is ever deferred — the veto is free time's alone (dream is asserted separately below).
   expect(dispatcher.deferReason?.(planFor("self") as never, {} as never)).toBeNull();
   fleetIdle = true;
   expect(dispatcher.deferReason?.(planFor("free-time") as never, {} as never)).toBeNull();
+});
+
+test("a dream fire spawns its contained process on the self lane — never the browser, never a concierge wake", async () => {
+  const launched: string[][] = [];
+  const dispatcher = await dispatcherOf({
+    // Reaching the browser agent/registry/runner throws, so this passing means dream forks on
+    // the self lane BEFORE the browser-deps requirement check.
+    ...exploding(),
+    wakeSelf: () => {
+      throw new Error("a dream fire framed a concierge turn — the pass must not hold the concierge's shell");
+    },
+    spawnDream: (argv) => void launched.push(argv),
+  });
+
+  await dispatcher.dispatch(planFor("dream") as never, {} as never);
+
+  expect(launched.length).toBe(1);
+  expect(launched[0]!.slice(0, 2)).toEqual(["dream", "run"]);
+  const routineFlag = launched[0]!.indexOf("--routine");
+  expect(routineFlag).toBeGreaterThan(-1);
+  expect(launched[0]![routineFlag + 1]).toBe("nightly-dream");
+  expect(launched[0]!.join(" ")).not.toContain("--creds");
+});
+
+test("[dream] enabled=false refuses the fire before anything spawns (the human off-switch)", async () => {
+  const dispatcher = await dispatcherOf(
+    {
+      ...exploding(),
+      spawnDream: () => {
+        throw new Error("a disabled dream routine still launched a pass");
+      },
+    },
+    (config) => {
+      config.dream.enabled = false;
+    },
+  );
+  // Refused, not thrown: the period stays claimed and the day closes quietly.
+  await dispatcher.dispatch(planFor("dream") as never, {} as never);
+});
+
+test("a dream fire is NEVER deferred — busy fleet, busy concierge, it still runs at its time", async () => {
+  // The inverse of the gate this test used to assert. ro ruled the skip out: the dream pass is
+  // one cheap tool-less model call, so it does not wait for a quiet machine. Free time still
+  // does, in the same dispatcher, which is what makes this a behavior difference and not a
+  // wiring accident.
+  const { ext, deps, schedulerBuilds } = build({
+    defaultOrigin: () => ({ channelId: "chan", requesterId: "owner-1" }),
+    isFleetIdle: () => false,
+    conciergeQuiet: () => false,
+  });
+  const registry = new ExtensionRegistry();
+  registry.register(ext);
+  await registry.initAll(deps);
+  await registry.startAll(deps, "late");
+  const dispatcher = schedulerBuilds[0]!.dispatcher;
+
+  expect(dispatcher.deferReason?.(planFor("dream") as never, {} as never)).toBeNull();
+  expect(dispatcher.deferReason?.(planFor("free-time") as never, {} as never)).toContain("fleet");
 });
 
 test("a self fire still needs an origin channel to report to", async () => {

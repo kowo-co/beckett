@@ -94,11 +94,15 @@ describe("retired sections", () => {
     expect(config.concurrency.max_workers).toBe(4);
   });
 
-  test("a config.toml still carrying [dream] loads with a deprecation warning instead of failing strict validation", () => {
+  test("[dream] is a live schema key again — NOT in the retired list — and its values apply", () => {
+    // [dream] used to be retired (v7 debt sweep, overhaul P16); the nightly dream pass was
+    // rebuilt on top of the day's Discord sessions and the section is live again. A config.toml
+    // carrying it must be VALIDATED, not silently stripped.
     const config = loadToml(
-      `[dream]\noutput_token_budget = 1000\nmodel = "opus"\n\n[concurrency]\nmax_workers = 4\n`,
+      `[dream]\noutput_token_budget = 1000\nmodel = "claude-opus-5"\n\n[concurrency]\nmax_workers = 4\n`,
     );
-    expect(config).not.toHaveProperty("dream");
+    expect(config.dream.output_token_budget).toBe(1000);
+    expect(config.dream.model).toBe("claude-opus-5");
     expect(config.concurrency.max_workers).toBe(4);
   });
 
