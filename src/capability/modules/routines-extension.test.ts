@@ -61,6 +61,7 @@ function fakeScheduler(log: string[]): RoutineScheduler {
         agentId: null,
         agentInput: null,
         freeTime: false,
+        selfRepair: false,
         browserTask: "check the thing",
         depsUpdate: null,
         proactiveSweep: null,
@@ -371,21 +372,22 @@ test("unknown capabilities and pre-init calls refuse with results", async () => 
 // ── the deps-update lane forks BEFORE the browser (issue #85) ─────────────────────────────
 
 /** A plan shaped like the scheduler builds one, minus the fields the lane under test ignores. */
-function planFor(kind: "deps-update" | "browser" | "self" | "spend-report" | "free-time") {
+function planFor(kind: "deps-update" | "browser" | "self" | "spend-report" | "free-time" | "self-repair") {
   return {
     routineId:
       kind === "self" ? "morning-sweep"
       : kind === "free-time" ? "weekly-free-time"
+      : kind === "self-repair" ? "nightly-self-repair"
       : kind === "spend-report" ? "weekly-spend-report"
       : "weekly-deps-update",
-    // The free-time variant rides the self LANE; only its flag differs.
-    lane: kind === "free-time" ? "self" : kind,
+    lane: kind === "free-time" || kind === "self-repair" ? "self" : kind,
     agentId: null,
     agentInput: null,
     browserTask: kind === "browser" ? "go do the thing" : null,
     depsUpdate: kind === "deps-update" ? { repo: null, base: "main", sourceRepo: null } : null,
     selfPrompt: kind === "self" ? "look over the board and nudge anything stalled" : null,
     freeTime: kind === "free-time",
+    selfRepair: kind === "self-repair",
     preview: "p",
     credsEntry: null,
     channelId: null,
@@ -572,6 +574,7 @@ function agentPlanFor(agentId: string, agentInput: string) {
     depsUpdate: null,
     selfPrompt: null,
     freeTime: false,
+    selfRepair: false,
     preview: "p",
     credsEntry: "x-account",
     channelId: null,
@@ -1059,6 +1062,22 @@ test("a free-time fire spawns its contained process on the self lane — never t
   expect(launched[0]!.join(" ")).not.toContain("--creds");
 });
 
+test("a self-repair fire spawns its contained process on the self lane — never the browser", async () => {
+  const launched: string[][] = [];
+  const dispatcher = await dispatcherOf({
+    ...exploding(),
+    wakeSelf: () => {
+      throw new Error("a self-repair fire framed a concierge turn");
+    },
+    spawnSelfRepair: (argv) => void launched.push(argv),
+  });
+
+  await dispatcher.dispatch(planFor("self-repair") as never, {} as never);
+
+  expect(launched.length).toBe(1);
+  expect(launched[0]!.slice(0, 2)).toEqual(["self-repair", "run"]);
+});
+
 test("[free_time] enabled=false refuses the fire before anything spawns (the human off-switch)", async () => {
   const dispatcher = await dispatcherOf(
     {
@@ -1089,7 +1108,8 @@ test("the idle gate defers a free-time fire on a busy machine and only that fire
   const dispatcher = schedulerBuilds[0]!.dispatcher;
 
   expect(dispatcher.deferReason?.(planFor("free-time") as never, {} as never)).toContain("worker fleet is busy");
-  // Nothing else is ever deferred — the veto is free time's alone.
+  // Self-repair does not defer — filing a run is a queue insert (ro, 2026-08-24).
+  expect(dispatcher.deferReason?.(planFor("self-repair") as never, {} as never)).toBeNull();
   expect(dispatcher.deferReason?.(planFor("self") as never, {} as never)).toBeNull();
   fleetIdle = true;
   expect(dispatcher.deferReason?.(planFor("free-time") as never, {} as never)).toBeNull();

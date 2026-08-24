@@ -155,6 +155,12 @@ const CASES: Case[] = [
   { name: "free-time: show of an unlived session fails", argv: ["free-time", "show", "2026-01-01-abcdef12"] },
   { name: "free-time: unknown sub prints usage", argv: ["free-time", "bogus"] },
 
+  // ── self-repair (docs/self-repair.md) — journal read-back; hermetic sandbox = no passes yet ──
+  { name: "self-repair: bare lists an empty journal", argv: ["self-repair"] },
+  { name: "self-repair: ls lists an empty journal", argv: ["self-repair", "ls"] },
+  { name: "self-repair: show of an unlived pass fails", argv: ["self-repair", "show", "2026-01-01-abcdef12"] },
+  { name: "self-repair: unknown sub prints usage", argv: ["self-repair", "bogus"] },
+
   // ── proposals (issue #37) — the queue is empty and silent in a fresh sandbox ────────────
   { name: "proposals: ls on an empty queue", argv: ["proposals", "ls"] },
   { name: "proposals: ls --all on an empty queue", argv: ["proposals", "ls", "--all"] },

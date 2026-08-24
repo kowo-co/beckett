@@ -733,6 +733,23 @@ export const configFragments = {
     })
     .strict()
     .default({}),
+  // Nightly self-repair (docs/self-repair.md): cluster recurring errors and file runs.
+  // Clustering is deterministic; the model dial is reserved for optional ranking.
+  self_repair: z
+    .object({
+      enabled: z.boolean().default(true),
+      window_start: HHMM.default("00:00"),
+      window_end: HHMM.default("00:30"),
+      tz: z.string().min(1).default("America/Los_Angeles"),
+      model: z.string().default("claude-sonnet-5"),
+      min_count: posInt.default(2),
+      min_occasions: posInt.default(2),
+      file_cap: posInt.default(2),
+      lookback_days: posInt.default(7),
+      channel_id: z.string().default(""),
+    })
+    .strict()
+    .default({}),
   // The social-media agent's chill pass (W4A tune): route its composed X posts through
   // chilltext's tone rewrite before they reach the browser lane. Reuses
   // `concierge.chilltext`'s url/timeout rather than duplicating them.
@@ -796,6 +813,7 @@ const BUILTIN_CAPABILITY_INFO: {
   federation: { id: "federation", summary: "Peer-Beckett federation over Discord." },
   observed_bots: { id: "observed-bots", summary: "Bots Beckett may read but never talk to (e.g. booper)." },
   free_time: { id: "free-time", summary: "Weekly self-directed session: trigger, walls, token ceiling, share channel." },
+  self_repair: { id: "self-repair", summary: "Nightly error clustering + capped run filing against own source." },
   social: { id: "social", summary: "Social-media agent's chilltext chill-pass toggle." },
   ops_log: { id: "ops-log", summary: "Discord ops-log mirror: legible event lines, batching, turn heartbeat." },
 };

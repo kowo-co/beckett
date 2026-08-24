@@ -127,6 +127,12 @@ export interface RoutineDispatchPlan {
    * {@link ./scheduler.ts}) when the fleet is busy, so free time never competes with real work.
    */
   freeTime: boolean;
+  /**
+   * self lane, self-repair variant (docs/self-repair.md): true when this fire is the nightly
+   * error-clustering pass. Same pre-browser fork as free time. It does NOT defer when the
+   * machine is busy: filing a run is a queue insert and does not contend with live work.
+   */
+  selfRepair: boolean;
   /** Human-readable summary shown in a dry-run + logs. */
   preview: string;
   /** jingle keychain entry passed to the browser lane via --creds (a NAME, never a secret). */
@@ -161,6 +167,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       proactiveSweep: null,
       selfPrompt: null,
       freeTime: false,
+      selfRepair: false,
       preview: `invoke agent ${action.agentId}: ${action.input}`,
       credsEntry: action.credsEntry ?? null,
       channelId: action.channelId ?? null,
@@ -185,6 +192,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       proactiveSweep: null,
       selfPrompt: null,
       freeTime: false,
+      selfRepair: false,
       preview:
         `update in-range dependencies in an isolated clone, run typecheck + tests, ` +
         `open a PR against ${action.base}${action.repo ? ` on ${action.repo}` : ""}`,
@@ -211,6 +219,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       proactiveSweep: { repos },
       selfPrompt: null,
       freeTime: false,
+      selfRepair: false,
       preview:
         repos.length === 0
           ? "sweep for rot — but no repos are opted in, so nothing is swept (add them to [proactive_sweep] repos in config.toml)"
@@ -236,6 +245,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       proactiveSweep: null,
       selfPrompt: null,
       freeTime: false,
+      selfRepair: false,
       preview:
         `poll ${action.feedUrl} every ${action.pollIntervalMinutes}m; on a genuinely new, ` +
         `unseen, rate-limit-clear model release, dispatch agent ${action.agentId} with the item ` +
@@ -261,6 +271,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       proactiveSweep: null,
       selfPrompt: action.prompt,
       freeTime: false,
+      selfRepair: false,
       preview: `wake the concierge on its own ledger: ${action.prompt}`,
       credsEntry: null,
       channelId: action.channelId ?? null,
@@ -283,9 +294,31 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       proactiveSweep: null,
       selfPrompt: null,
       freeTime: true,
+      selfRepair: false,
       preview:
         "one self-directed session on the self lane (free time): a scratch directory it may not " +
         "write outside of, a hard output-token ceiling, and a writeback that seeds the next one",
+      credsEntry: null,
+      channelId: action.channelId ?? null,
+      requesterId: action.requesterId ?? null,
+    };
+  }
+
+  if (action.kind === "self-repair") {
+    return {
+      routineId: routine.id,
+      lane: "self",
+      agentId: null,
+      agentInput: null,
+      browserTask: null,
+      depsUpdate: null,
+      proactiveSweep: null,
+      selfPrompt: null,
+      freeTime: false,
+      selfRepair: true,
+      preview:
+        "nightly self-repair: cluster recurring errors from the real surfaces and file a capped " +
+        "number of runs against Beckett's own source (never edits production, never merges)",
       credsEntry: null,
       channelId: action.channelId ?? null,
       requesterId: action.requesterId ?? null,
@@ -307,6 +340,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       proactiveSweep: null,
       selfPrompt: null,
       freeTime: false,
+      selfRepair: false,
       preview: `post the per-task spend bill for the last ${action.since} to the channel`,
       credsEntry: null,
       channelId: action.channelId ?? null,
@@ -327,6 +361,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       proactiveSweep: null,
       selfPrompt: null,
       freeTime: false,
+      selfRepair: false,
       preview: `invoke agent ${SOCIAL_MEDIA_AGENT_ID}: ${LEGACY_SHITPOST_INPUT}`,
       credsEntry: action.credsEntry ?? null,
       channelId: action.channelId ?? null,
@@ -354,6 +389,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       proactiveSweep: null,
       selfPrompt: null,
       freeTime: false,
+      selfRepair: false,
       preview: refused ? `REFUSED (targets X/social on the ungrounded browser lane): ${action.task}` : action.task,
       credsEntry,
       channelId: action.channelId ?? null,

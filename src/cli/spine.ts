@@ -207,6 +207,11 @@ export const SPINE: SpineEntry[] = [
     cliHelp: "free-time run [--dry] | free-time ls|show <id>",
     verbs: [{ name: "free-time", load: async () => (await import("../freetime/cli.ts")).runFreeTimeCli }],
   },
+  {
+    id: "self-repair",
+    cliHelp: "self-repair run [--dry] | self-repair ls|show [id]",
+    verbs: [{ name: "self-repair", load: async () => (await import("../self-repair/cli.ts")).runSelfRepairCli }],
+  },
 
   { id: "spend", verbs: [{ name: "spend", load: core((m) => m.runSpend) }] },
   { id: "journal", verbs: [{ name: "journal", load: core((m) => m.runJournal) }] },
