@@ -216,6 +216,18 @@ file_cap = 2
 lookback_days = 7
 channel_id = ""
 
+[dream]
+enabled = true
+model = "claude-haiku-4-5"
+hard_timeout_s = 600
+output_token_budget = 20000
+window_hours = 24
+memories_per_night_max = 3
+prunes_per_night_max = 3
+fire_at = "00:00"
+timezone = "America/Los_Angeles"
+channel_id = "1520658476974735490"
+
 [social]
 chill = true
 

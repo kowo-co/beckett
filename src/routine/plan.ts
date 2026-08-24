@@ -133,6 +133,13 @@ export interface RoutineDispatchPlan {
    * machine is busy: filing a run is a queue insert and does not contend with live work.
    */
   selfRepair: boolean;
+  /**
+   * self lane, dream variant (`src/dream/`): true when this fire is the nightly sessions-review
+   * pass. The dispatcher spawns the contained `beckett dream run` body — same pre-browser fork
+   * and same no-agent/no-browser/no-creds shape as a plain self wake. It runs at its fixed time
+   * regardless of fleet business (ro's call), unlike `freeTime`.
+   */
+  dream: boolean;
   /** Human-readable summary shown in a dry-run + logs. */
   preview: string;
   /** jingle keychain entry passed to the browser lane via --creds (a NAME, never a secret). */
@@ -168,6 +175,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       selfPrompt: null,
       freeTime: false,
       selfRepair: false,
+      dream: false,
       preview: `invoke agent ${action.agentId}: ${action.input}`,
       credsEntry: action.credsEntry ?? null,
       channelId: action.channelId ?? null,
@@ -193,6 +201,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       selfPrompt: null,
       freeTime: false,
       selfRepair: false,
+      dream: false,
       preview:
         `update in-range dependencies in an isolated clone, run typecheck + tests, ` +
         `open a PR against ${action.base}${action.repo ? ` on ${action.repo}` : ""}`,
@@ -220,6 +229,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       selfPrompt: null,
       freeTime: false,
       selfRepair: false,
+      dream: false,
       preview:
         repos.length === 0
           ? "sweep for rot — but no repos are opted in, so nothing is swept (add them to [proactive_sweep] repos in config.toml)"
@@ -246,6 +256,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       selfPrompt: null,
       freeTime: false,
       selfRepair: false,
+      dream: false,
       preview:
         `poll ${action.feedUrl} every ${action.pollIntervalMinutes}m; on a genuinely new, ` +
         `unseen, rate-limit-clear model release, dispatch agent ${action.agentId} with the item ` +
@@ -272,6 +283,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       selfPrompt: action.prompt,
       freeTime: false,
       selfRepair: false,
+      dream: false,
       preview: `wake the concierge on its own ledger: ${action.prompt}`,
       credsEntry: null,
       channelId: action.channelId ?? null,
@@ -295,6 +307,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       selfPrompt: null,
       freeTime: true,
       selfRepair: false,
+      dream: false,
       preview:
         "one self-directed session on the self lane (free time): a scratch directory it may not " +
         "write outside of, a hard output-token ceiling, and a writeback that seeds the next one",
@@ -316,9 +329,37 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       selfPrompt: null,
       freeTime: false,
       selfRepair: true,
+      dream: false,
       preview:
         "nightly self-repair: cluster recurring errors from the real surfaces and file a capped " +
         "number of runs against Beckett's own source (never edits production, never merges)",
+      credsEntry: null,
+      channelId: action.channelId ?? null,
+      requesterId: action.requesterId ?? null,
+    };
+  }
+
+  if (action.kind === "dream") {
+    // The nightly dream pass (`src/dream/`) rides the SELF lane, same shape as free-time: never
+    // the browser, never an agent, never a credential, and it runs as the contained
+    // `beckett dream run` subprocess so the token ceiling and the conservatism cap on memory
+    // writes stay enforced in code rather than in a prompt. No busy gate: it fires at its fixed
+    // time regardless of fleet or concierge load (ro's call).
+    return {
+      routineId: routine.id,
+      lane: "self",
+      agentId: null,
+      agentInput: null,
+      browserTask: null,
+      depsUpdate: null,
+      proactiveSweep: null,
+      selfPrompt: null,
+      freeTime: false,
+      selfRepair: false,
+      dream: true,
+      preview:
+        "one nightly pass on the self lane (dream): review the day's guild sessions and commit " +
+        "at most a handful of durable, provenance-checked notes to memory",
       credsEntry: null,
       channelId: action.channelId ?? null,
       requesterId: action.requesterId ?? null,
@@ -341,6 +382,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       selfPrompt: null,
       freeTime: false,
       selfRepair: false,
+      dream: false,
       preview: `post the per-task spend bill for the last ${action.since} to the channel`,
       credsEntry: null,
       channelId: action.channelId ?? null,
@@ -362,6 +404,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       selfPrompt: null,
       freeTime: false,
       selfRepair: false,
+      dream: false,
       preview: `invoke agent ${SOCIAL_MEDIA_AGENT_ID}: ${LEGACY_SHITPOST_INPUT}`,
       credsEntry: action.credsEntry ?? null,
       channelId: action.channelId ?? null,
@@ -390,6 +433,7 @@ export function buildDispatchPlan(routine: Routine): RoutineDispatchPlan {
       selfPrompt: null,
       freeTime: false,
       selfRepair: false,
+      dream: false,
       preview: refused ? `REFUSED (targets X/social on the ungrounded browser lane): ${action.task}` : action.task,
       credsEntry,
       channelId: action.channelId ?? null,

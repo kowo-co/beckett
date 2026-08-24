@@ -18,12 +18,18 @@
  * `x-account`). `migrateCredsEntry` rewrites any occurrence in place on the next load, once,
  * logged, so prod's `routines.json` heals itself with no manual surgery. Idempotent: a routine
  * already on `x-account` (or any other entry) is untouched, so a repeat boot is a no-op.
+ *
+ * A second boot-time heal, `healRemovedBuiltins`, does the same for `removedBuiltins` residue:
+ * an install that lived through the v7 debt sweep (overhaul P16, `dream` retired whole) still
+ * carries `removedBuiltins: ["nightly-dream"]` on disk from BEFORE the pass was rebuilt
+ * (`src/dream/`) — with no heal, that stale entry would permanently block {@link RoutineStore.seed}
+ * from ever recreating the rebuilt builtin, and the pass would silently never fire on that box.
  */
 
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
-import { builtinRoutineDefs, X_CREDS_ENTRY, type BuiltinRoutineOverrides } from "./builtins.ts";
+import { builtinRoutineDefs, fixedFireWindow, X_CREDS_ENTRY, type BuiltinRoutineOverrides } from "./builtins.ts";
 import { RoutineRegistrySchema, type Routine, type RoutineRegistry } from "./types.ts";
 import { log } from "../log.ts";
 import type { Logger } from "../types.ts";
@@ -35,9 +41,26 @@ const LOCK_ATTEMPTS = 200;
  *  has never had an entry by this name. Anything still carrying it is healed on the next load. */
 const DEAD_X_CREDS_ENTRY = "x.com";
 
-/** Action kinds retired from the schema. A row still carrying one is dropped before the strict
- *  parse, so a live routines.json written by an older build cannot make the daemon refuse to boot. */
-const RETIRED_ACTION_KINDS = ["dream"] as const;
+/**
+ * Builtin ids whose `removedBuiltins` entry is stale retirement residue, not a deliberate current
+ * removal — see the class doc. Healed out on every load so {@link RoutineStore.seed} can recreate
+ * them. Trade-off, same one `migrateCredsEntry` accepts for the dead creds string: an operator who
+ * runs `beckett routine remove nightly-dream` AFTER this heal ships will see it reappear on the
+ * next boot, because the on-disk state left by that command is indistinguishable from the pre-
+ * rebuild residue this heal exists to fix. Nothing else on disk records the difference.
+ */
+const HEALED_REMOVED_BUILTINS: readonly string[] = ["nightly-dream"];
+
+/**
+ * Action kinds retired from the schema. A row still carrying one is dropped before the strict
+ * parse, so a live routines.json written by an older build cannot make the daemon refuse to boot.
+ *
+ * `dream` was retired here too (v7 debt sweep, overhaul P16) but the nightly dream pass was
+ * later rebuilt on top of the day's Discord sessions (`src/dream/`) and `{kind: "dream"}` is a
+ * live action again — it must NOT be listed below, or the builtin `nightly-dream` routine would
+ * be silently dropped on every load and the pass would never fire.
+ */
+const RETIRED_ACTION_KINDS: readonly string[] = [];
 
 /**
  * Strip retired-kind routines from RAW json before `RoutineRegistrySchema.parse` sees it —
@@ -228,6 +251,24 @@ export class RoutineStore {
     return changed;
   }
 
+  /**
+   * Drop any id in {@link HEALED_REMOVED_BUILTINS} from `removedBuiltins`, before {@link seed} so
+   * a healed id is reseeded the SAME load. Runs on every load, logged, idempotent: once the entry
+   * is gone there is nothing left to heal, so a repeat boot is a no-op — the exact shape of
+   * {@link migrateCredsEntry} above. Returns true if it changed anything.
+   */
+  private healRemovedBuiltins(reg: RoutineRegistry): boolean {
+    let changed = false;
+    for (const id of HEALED_REMOVED_BUILTINS) {
+      const idx = reg.removedBuiltins.indexOf(id);
+      if (idx === -1) continue;
+      reg.removedBuiltins.splice(idx, 1);
+      changed = true;
+      this.logger.info("healed a stale removed-builtin entry", { routineId: id });
+    }
+    return changed;
+  }
+
   /** Seed any built-in not present and not in the removed list. Returns true if it changed. */
   private seed(reg: RoutineRegistry): boolean {
     if (!this.seedBuiltins) return false;
@@ -271,6 +312,33 @@ export class RoutineStore {
     return changed;
   }
 
+  /**
+   * Force the `nightly-dream` routine's window to the FIXED time in `[dream] fire_at` /
+   * `[dream] timezone`, on EVERY load — the same config-authoritative treatment the proactive
+   * sweep's repo list gets, and for the same reason: it is a config value a human edits, so a
+   * seed-only binding would go stale the moment they edited it. Rerolls nothing by itself; the
+   * scheduler re-rolls the period whenever the persisted `chosenFireAt` falls outside the new
+   * window's period, and a one-minute window can only ever roll to its own start.
+   * No-op when no override was supplied (a store built without `builtins.dream`).
+   */
+  private reconcileDreamSchedule(reg: RoutineRegistry): boolean {
+    const override = this.builtinOverrides.dream;
+    if (!override) return false;
+    const next = fixedFireWindow(override.fireAt, override.tz);
+    let changed = false;
+    for (const routine of reg.routines) {
+      if (routine.action.kind !== "dream" || !routine.schedule) continue;
+      const w = routine.schedule.window;
+      if (w.start === next.start && w.end === next.end && w.tz === next.tz) continue;
+      routine.schedule = { ...routine.schedule, window: next };
+      // A window move invalidates the minute already chosen inside the OLD one.
+      routine.state = { ...routine.state, periodKey: null, chosenFireAt: null };
+      routine.updatedAt = this.now().toISOString();
+      changed = true;
+    }
+    return changed;
+  }
+
   private async mutate<T>(change: (reg: RoutineRegistry) => T): Promise<T> {
     await this.acquireLock();
     try {
@@ -281,11 +349,14 @@ export class RoutineStore {
         droppedRetired = true;
       }
       const migrated = this.migrateCredsEntry(reg);
+      const healedRemoved = this.healRemovedBuiltins(reg);
       const seeded = this.seed(reg);
       const reconciled = this.reconcileProactiveSweep(reg);
+      const dreamRetimed = this.reconcileDreamSchedule(reg);
       const before = JSON.stringify(reg);
       const result = change(reg);
-      if (droppedRetired || migrated || seeded || reconciled || JSON.stringify(reg) !== before) this.write(reg);
+      if (droppedRetired || migrated || healedRemoved || seeded || reconciled || dreamRetimed || JSON.stringify(reg) !== before)
+        this.write(reg);
       return result;
     } finally {
       rmSync(this.lockPath, { recursive: true, force: true });

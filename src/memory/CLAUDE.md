@@ -136,6 +136,16 @@ point — do not widen it, and do not route dream writes through `remember()`:
   never read back as something that was observed to happen. Keep new read surfaces on that
   helper. Containment tests live in `dreams.test.ts`; they try to violate this and must fail.
 
+Maintenance inside the namespace is a SEPARATE trio of methods, never a widening of
+`rememberDream` — the pass prunes as well as adds (`dream-maintenance.test.ts`):
+
+- `updateDream` / `retireDream` — rewrite or archive a node that is BOTH dream-named and
+  `type: dream`. Anything else throws. Retire archives (`archive/` + `archived_reason`), so
+  "nothing is ever deleted" holds here too.
+- `flagStaleNode` — a create-only dream node ABOUT a non-dream node, carrying `flag_target` /
+  `flag_reason` / provenance. The target file does not change by a byte; a flag is a claim for a
+  human to adjudicate, not an edit. Flagging another dream node is refused.
+
 ## The cross-store bridge (`bridge.ts`, issue #160)
 
 Beckett has a SECOND memory store the graph doesn't own: the Claude Code harness auto-memory

@@ -163,6 +163,36 @@ export interface DreamRememberInput {
   reason: string;
 }
 
+/** Input to {@link MemoryStore.updateDream}. The node must already exist AND be a dream node. */
+export interface DreamUpdateInput {
+  /** `dream-YYYY-MM-DD-<slug>` of an EXISTING `type: dream` node. */
+  name: string;
+  /** Replaces the description when non-empty; omitted/blank keeps the current one. */
+  description?: string;
+  /** Replaces the body when provided (pass "" to clear it). */
+  body?: string;
+  /** Replaces the provenance list when non-empty; omitted keeps what the node already cites. */
+  provenance?: string[];
+  /** Logged into the memory git commit, like remember's reason. */
+  reason: string;
+}
+
+/** Input to {@link MemoryStore.flagStaleNode} — a dream-namespace flag ABOUT another node. */
+export interface DreamStaleFlagInput {
+  /** `dream-YYYY-MM-DD-<slug>` for the flag node itself — a NEW node, create-only. */
+  name: string;
+  /** The node the flag is about. Must exist, and must NOT itself be a dream node. */
+  target: string;
+  /** Why the pass thinks the target has gone stale. Required — a flag with no reason is noise. */
+  flagReason: string;
+  /** Assembled source ids the suspicion is derived from. Required, same rule as a dream memory. */
+  provenance: string[];
+  /** Optional longer note for the flag's body. */
+  body?: string;
+  /** Logged into the memory git commit, like remember's reason. */
+  reason: string;
+}
+
 /**
  * The free-time namespace's mandatory name shape (docs/freetime.md): the date the session ran
  * plus a slug. Same load-bearing prefix rule as {@link DREAM_NAME_RE} — a free-time session can
@@ -224,8 +254,10 @@ const META_ORDER = [
   "decided", "supersedes",
   // calibration
   "kind", "channel", "about", "reason",
-  // dream (issue #36) — the inference marker + the sources the inference was derived from
-  "inference", "provenance",
+  // dream (issue #36) — the inference marker + the sources the inference was derived from,
+  // plus the stale-flag pair a dream node carries when it is ABOUT another node rather than a
+  // standalone inference (`MemoryStore.flagStaleNode`).
+  "inference", "provenance", "flag_target", "flag_reason",
 ];
 /** Provenance fields rendered last (Spec 08 §1.2; visibility/provenance from multiplayer §7). */
 const META_TAIL = [
@@ -519,6 +551,156 @@ export class MemoryStore implements Memory {
       metadata: { inference: true, provenance },
       reason: input.reason,
     });
+  }
+
+  // ── dream MAINTENANCE (update / retire / flag) ───────────────────────────────────────
+  //
+  // The dream pass reviews its OWN namespace as well as the day's sessions, so it needs more
+  // than "add": a superseded inference should be corrected, a wrong one retired, and a
+  // non-dream node the day's sessions contradict should be FLAGGED for a human. All three are
+  // deliberately separate methods rather than a widening of `rememberDream`, and each carries
+  // its own namespace check, so the create-only guarantee that path exists for is untouched:
+  //
+  //   - `updateDream` / `retireDream` refuse any name that is not `dream-YYYY-MM-DD-<slug>` AND
+  //     any node whose `metadata.type` is not `dream`. A dream can still never reach a fact.
+  //   - `flagStaleNode` writes a NEW dream-namespace node ABOUT the target. The target's file is
+  //     not touched by a byte — the flag is a claim a human (or `memory maintain`) adjudicates,
+  //     never an edit to somebody's observed fact.
+  //   - Retirement is an ARCHIVE, never an unlink — the store's "nothing is ever deleted"
+  //     invariant holds for the dream namespace exactly as it does everywhere else.
+
+  /** Update an EXISTING dream-namespace node in place. Refuses anything outside the namespace. */
+  async updateDream(input: DreamUpdateInput): Promise<MemoryNode> {
+    return this.withLock(() => this.updateDreamLocked(input));
+  }
+
+  private async updateDreamLocked(input: DreamUpdateInput): Promise<MemoryNode> {
+    const name = String(input.name ?? "").trim();
+    // Same discipline as `rememberLocked`: never decide against a cached graph on a write path.
+    this.warmGraph = undefined;
+    this.mossSyncedGraph = undefined;
+    const node = this.requireDreamNode("updateDream", name);
+    const provenance = (input.provenance ?? []).map((s) => String(s).trim()).filter(Boolean);
+    const description = String(input.description ?? "").trim() || node.description;
+    if (!description) throw new Error(`memory.updateDream: 'description' is required for '${name}'`);
+
+    this.warmGraph = undefined;
+    this.mossSyncedGraph = undefined;
+    await this.ensureDir();
+    let g = this.buildGraph();
+    const now = nowIso();
+    const next: MemoryNode = {
+      ...node,
+      description,
+      body: input.body === undefined ? node.body : String(input.body).trim(),
+      metadata: {
+        ...node.metadata,
+        type: "dream",
+        inference: true,
+        ...(provenance.length ? { provenance } : {}),
+        updated: now,
+      },
+      updated: now,
+      mtime: Date.now(),
+    };
+    this.atomicWrite(node.path, renderNode(next, g));
+
+    g = this.buildGraph();
+    this.atomicWrite(join(this.dir, "MEMORY.md"), renderIndex(g));
+    await this.commit(`memory: dream update ${name} (${input.reason})`);
+    await this.syncMossQuietly(g);
+    this.syncBridge(g);
+    const result = g.nodes.get(name);
+    if (!result) throw new Error(`memory.updateDream: node '${name}' missing after write`);
+    return result;
+  }
+
+  /**
+   * Retire an EXISTING dream-namespace node: the file moves to `archive/` with `archived` /
+   * `archived_reason` stamped, exactly as {@link maintain} archives. This is the dream pass's
+   * "delete" — the node leaves the graph, the bytes stay recoverable, and nothing outside the
+   * dream namespace can ever be named here.
+   */
+  async retireDream(name: string, reason: string): Promise<void> {
+    return this.withLock(() => this.retireDreamLocked(name, reason));
+  }
+
+  private async retireDreamLocked(rawName: string, reason: string): Promise<void> {
+    const name = String(rawName ?? "").trim();
+    this.warmGraph = undefined;
+    this.mossSyncedGraph = undefined;
+    const node = this.requireDreamNode("retireDream", name);
+    await this.ensureDir();
+    let g = this.buildGraph();
+    this.archiveFile(node, reason || "retired by the nightly dream pass", g);
+    g = this.buildGraph();
+    this.atomicWrite(join(this.dir, "MEMORY.md"), renderIndex(g));
+    await this.commit(`memory: dream retire ${name} (${reason})`);
+    await this.syncMossQuietly(g);
+    this.syncBridge(g);
+  }
+
+  /**
+   * Write a dream-namespace STALE FLAG about a node outside the namespace. The flag is a normal
+   * create-only dream node carrying `flag_target` / `flag_reason` plus the provenance the
+   * suspicion came from; the target file is never read-modified-written. Refuses to flag another
+   * dream node (a pass that wants to correct its own inference has `updateDream`/`retireDream`)
+   * and refuses a target that does not exist (a flag on a phantom is not evidence of anything).
+   */
+  async flagStaleNode(input: DreamStaleFlagInput): Promise<MemoryNode> {
+    return this.withLock(() => this.flagStaleNodeLocked(input));
+  }
+
+  private async flagStaleNodeLocked(input: DreamStaleFlagInput): Promise<MemoryNode> {
+    const target = String(input.target ?? "").trim();
+    const flagReason = String(input.flagReason ?? "").trim();
+    const provenance = (input.provenance ?? []).map((s) => String(s).trim()).filter(Boolean);
+    if (!flagReason) {
+      throw new Error(`memory.flagStaleNode: a stale flag needs a reason ('${input.name}')`);
+    }
+    if (!provenance.length) {
+      throw new Error(`memory.flagStaleNode: a stale flag needs a non-empty provenance list ('${input.name}')`);
+    }
+    this.warmGraph = undefined;
+    this.mossSyncedGraph = undefined;
+    const node = this.buildGraph().nodes.get(target);
+    if (!node || node.phantom) {
+      throw new Error(`memory.flagStaleNode: no such node to flag: '${target}'`);
+    }
+    if (node.type === "dream" || DREAM_NAME_RE.test(target)) {
+      throw new Error(
+        `memory.flagStaleNode: '${target}' is a dream node — use updateDream/retireDream inside the namespace`,
+      );
+    }
+    return this.createOnlyLocked({
+      method: "flagStaleNode",
+      noun: "dream",
+      name: input.name,
+      nameRe: DREAM_NAME_RE,
+      nameShape: "dream-YYYY-MM-DD-<kebab-slug>",
+      type: "dream",
+      description: `possibly stale: ${target} — ${flagReason}`,
+      body: input.body,
+      metadata: { inference: true, provenance, flag_target: target, flag_reason: flagReason },
+      reason: input.reason,
+    });
+  }
+
+  /** The one namespace check both in-place dream writes share. Throws with the calling method. */
+  private requireDreamNode(method: string, name: string): MemoryNode {
+    if (!DREAM_NAME_RE.test(name)) {
+      throw new Error(
+        `memory.${method}: invalid dream node name '${name}' (must be dream-YYYY-MM-DD-<kebab-slug>)`,
+      );
+    }
+    const node = this.buildGraph().nodes.get(name);
+    if (!node || node.phantom || !node.path) {
+      throw new Error(`memory.${method}: no such dream node: '${name}'`);
+    }
+    if (node.type !== "dream") {
+      throw new Error(`memory.${method}: '${name}' is not a dream node (type: ${node.type})`);
+    }
+    return node;
   }
 
   /**

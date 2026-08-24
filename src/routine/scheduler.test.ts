@@ -46,18 +46,22 @@ test("fires exactly once per period (idempotent) and delegates dispatch off-proc
   await scheduler.tick();
   await scheduler.tick();
 
-  // Two dispatches this tick — the ORIGINAL shitpost fire (with rng 0 its 12:00 PT roll is
-  // already due at 12:30 PT, and its window hasn't elapsed yet, so it's ON TIME, not a catch-up)
-  // and its 11:00–11:30 PT sibling `daily-x-shitpost-2` (LATE — its window already elapsed by
-  // 12:30 PT), which claims this tick's one late-catch-up slot (boot-storm guard,
-  // `LATE_CATCH_UP_BUDGET_PER_TICK`). The proactive rot sweep (issue #79; its 09:00–10:30 PT
-  // window is ALSO past by 12:30 PT) is late too but loses the race — evaluated after
-  // `daily-x-shitpost-2` exhausts the budget, it rolls straight to its next period instead of
-  // storming in alongside it (the 2026-08-22T00:57 restart bug this guard fixes). The other
-  // siblings (`daily-x-shitpost-3`/`-4`, all three timeline-reply rounds) roll to windows still in
-  // the future at 12:30 PT, so they do not fire this tick either.
-  expect(calls.length).toBe(2);
-  expect(calls.map((c) => c.routineId).sort()).toEqual(["daily-x-shitpost", "daily-x-shitpost-2"]);
+  // Three dispatches this tick:
+  //   - the ORIGINAL shitpost fire (with rng 0 its 12:00 PT roll is already due at 12:30 PT, and
+  //     its window hasn't elapsed yet, so it's ON TIME, not a catch-up);
+  //   - its 11:00–11:30 PT sibling `daily-x-shitpost-2` (LATE — its window already elapsed by
+  //     12:30 PT), which claims this tick's one late-catch-up slot (boot-storm guard,
+  //     `LATE_CATCH_UP_BUDGET_PER_TICK`);
+  //   - `nightly-dream`, whose 00:00 PT FIXED time is long past — a one-minute window is exempt
+  //     from the catch-up budget (`src/dream/`: the pass runs at its time, and losing the slot
+  //     would silently skip its whole day), so it catches up alongside the slot-winner.
+  // The proactive rot sweep (issue #79; its 09:00–10:30 PT window is ALSO past by 12:30 PT) is
+  // late too and NOT exempt — evaluated after `daily-x-shitpost-2` exhausts the budget, it rolls
+  // straight to its next period instead of storming in (the 2026-08-22T00:57 restart bug this
+  // guard fixes). The other siblings (`daily-x-shitpost-3`/`-4`, all three timeline-reply rounds)
+  // roll to windows still in the future at 12:30 PT, so they do not fire this tick either.
+  expect(calls.length).toBe(3);
+  expect(calls.map((c) => c.routineId).sort()).toEqual(["daily-x-shitpost", "daily-x-shitpost-2", "nightly-dream"]);
   const shitpost = calls.find((c) => c.routineId === "daily-x-shitpost")!;
   expect(shitpost.credsEntry).toBe("x-account");
   // The period is claimed on disk, for both — INCLUDING the sweep, which rolled to tomorrow
@@ -65,6 +69,7 @@ test("fires exactly once per period (idempotent) and delegates dispatch off-proc
   const state = (await store.get("daily-x-shitpost"))!.state;
   expect(state.lastFiredPeriodKey).toBe("2026-07-20");
   expect((await store.get("proactive-sweep"))!.state.lastFiredPeriodKey).toBe("2026-07-20");
+  expect((await store.get("nightly-dream"))!.state.lastFiredPeriodKey).toBe("2026-07-20");
 });
 
 test("a restart inside the window neither re-rolls the chosen time nor double-fires", async () => {
@@ -161,13 +166,14 @@ test("does not fire before the chosen time", async () => {
   });
   stoppers.push(scheduler.stop);
   await scheduler.tick();
-  // The pre-rolled 12:45 PT shitpost must NOT fire at 12:30 — only its 11:00–11:30 PT sibling
-  // `daily-x-shitpost-2` (already past by 12:30 PT) dispatches this tick, claiming the tick's one
-  // late-catch-up slot. The seeded proactive sweep (also past its 09:00–10:30 PT window) is late
-  // too but is evaluated after the budget is spent, so it rolls to its next period instead of
-  // storming in alongside it — same boot-storm guard as the test above.
+  // The pre-rolled 12:45 PT shitpost must NOT fire at 12:30 — its 11:00–11:30 PT sibling
+  // `daily-x-shitpost-2` (already past by 12:30 PT) claims the tick's one late-catch-up slot, and
+  // `nightly-dream` catches up beside it because a FIXED-time window is exempt from that budget
+  // (see the test above). The seeded proactive sweep (also past its 09:00–10:30 PT window) is
+  // late, not exempt, and evaluated after the budget is spent, so it rolls to its next period
+  // instead of storming in — same boot-storm guard as the test above.
   expect(calls.filter((c) => c.routineId === "daily-x-shitpost").length).toBe(0);
-  expect(calls.map((c) => c.routineId).sort()).toEqual(["daily-x-shitpost-2"]);
+  expect(calls.map((c) => c.routineId).sort()).toEqual(["daily-x-shitpost-2", "nightly-dream"]);
   expect((await store.get("proactive-sweep"))!.state.lastFiredPeriodKey).toBe("2026-07-20");
 });
 
@@ -322,4 +328,58 @@ test("a weekly routine does not fire on a non-matching weekday", async () => {
   const state = (await store.get("weekly-deps-update"))!.state;
   expect(state.periodKey).toBe("2026-W30");
   expect(state.chosenFireAt).toBe("2026-07-26T15:00:00.000Z");
+});
+
+// ── the dream pass's FIXED fire time (no fuzz, no idle deferral) ────────────────────────────
+
+test("the nightly dream pass fires at exactly 00:00 PT, whatever the RNG says, once per day", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-routine-sched-dream-"));
+  dirs.push(dir);
+  const store = new RoutineStore(join(dir, "routines.json"), {
+    builtins: { dream: { fireAt: "00:00", tz: "America/Los_Angeles" } },
+  });
+  const { dispatcher, calls } = recorder();
+  let now = new Date("2026-08-19T07:00:10.000Z"); // 00:00:10 PT — ten seconds past the fire time
+  const scheduler = startRoutineScheduler({
+    store, dispatcher, logger: quietLogger,
+    now: () => now,
+    // The far end of the RNG range: a fuzz window would roll LATE with this; a fixed time can't.
+    rng: () => 0.999999,
+    intervalMs: 10_000_000,
+  });
+  stoppers.push(scheduler.stop);
+
+  await scheduler.tick();
+  // The minute it rolled is the window's start exactly — 00:00:00 PT = 07:00:00Z — and the
+  // tick ten seconds later fires it.
+  expect((await store.get("nightly-dream"))!.state.chosenFireAt).toBe("2026-08-19T07:00:00.000Z");
+  expect(calls.filter((p) => p.routineId === "nightly-dream")).toHaveLength(1);
+
+  for (const iso of ["2026-08-19T07:00:40.000Z", "2026-08-19T18:00:00.000Z"]) {
+    now = new Date(iso);
+    await scheduler.tick();
+  }
+  expect(calls.filter((p) => p.routineId === "nightly-dream")).toHaveLength(1); // still once
+});
+
+test("a fixed-time fire a few minutes late still runs — it is exempt from the catch-up budget", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-routine-sched-dream-late-"));
+  dirs.push(dir);
+  const store = new RoutineStore(join(dir, "routines.json"), {
+    builtins: { dream: { fireAt: "00:00", tz: "America/Los_Angeles" } },
+  });
+  const { dispatcher, calls } = recorder();
+  const scheduler = startRoutineScheduler({
+    store, dispatcher, logger: quietLogger,
+    // 00:20 PT: the one-minute window elapsed nineteen minutes ago, and several OTHER builtins
+    // are late too on this tick — under the plain guard the dream pass could lose the single
+    // catch-up slot and have its whole day marked spent. The pass runs at its time.
+    now: () => new Date("2026-08-19T07:20:00.000Z"),
+    rng: () => 0,
+    intervalMs: 10_000_000,
+  });
+  stoppers.push(scheduler.stop);
+
+  await scheduler.tick();
+  expect(calls.filter((p) => p.routineId === "nightly-dream")).toHaveLength(1);
 });

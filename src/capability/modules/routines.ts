@@ -144,8 +144,12 @@ export interface RoutinesExtensionDeps {
   /**
    * Is the worker fleet doing nothing right now? Bound by the daemon to the dispatcher's live
    * census. Free time is the ONLY consumer: an unprompted session must never compete with real
-   * work. Nightly self-repair does NOT consult this — filing a run is a queue insert (ro,
-   * 2026-08-24). Unwired ⇒ treated as idle.
+   * work for the machine, so a busy fleet defers the fire (before the period is claimed) instead
+   * of running alongside it. Nightly self-repair does NOT consult this — filing a run is a queue
+   * insert (ro, 2026-08-24). (The nightly dream pass used to consult it too; ro ruled that skip
+   * out — it now runs at its fixed time regardless.) Unwired ⇒ treated as idle: the CLI never
+   * arms a scheduler, and a daemon that somehow lacks the accessor should still get its free
+   * time rather than starve.
    */
   isFleetIdle?: () => boolean;
   /** Is the concierge's turn queue empty? Second half of the same idle gate, same defaults. */
@@ -187,6 +191,13 @@ export interface RoutinesExtensionDeps {
    * without a live control socket.
    */
   notifyOrigin?: (channelId: string, text: string) => Promise<void>;
+  /**
+   * How the nightly dream pass (`src/dream/`) is launched. Default: a detached `beckett dream
+   * run` subprocess, exactly like `spawnFreeTime`. Injected for the same reason — so a test can
+   * assert the pass forks on the self lane BEFORE (and never resolves) the browser
+   * agent/registry/runner, and never posts a `routine.self` concierge wake.
+   */
+  spawnDream?: (argv: string[]) => void;
   /** Test seams — the scheduler's injectable clock/RNG/cadence (see {@link RoutineSchedulerDeps}). */
   now?: () => Date;
   rng?: () => number;
@@ -483,18 +494,53 @@ export const createRoutinesExtension =
     }
 
     /**
-     * The scheduler's pre-claim veto ({@link RoutineDispatcher.deferReason}), free time only.
-     * Consulted BEFORE the period is claimed, so a deferral costs the window and not the week:
-     * the next 30s tick asks again, and if the fleet is still working, again, until the fleet
-     * goes quiet or the week rolls over. A disabled session is NOT deferred — it falls through to
-     * dispatch, which refuses it once and lets the period close.
+     * Launch the nightly dream pass (`src/dream/`) as its own `beckett dream run` process — the
+     * SAME pattern as {@link spawnFreeTime}: detached, not awaited, and it owns whatever
+     * reporting it does (its journal entry under `~/.beckett/dreams` is the record; the optional
+     * one-line report is posted by the RUNNER after the pass exits, never by the pass itself). It
+     * rides the SELF lane's pre-browser fork, so like a plain self wake it can never resolve the
+     * browser agent, an agent registry entry, or a creds entry.
+     */
+    function spawnDream(
+      plan: RoutineDispatchPlan,
+      origin: { channelId: string; requesterId: string },
+    ): void {
+      const argv = [
+        "dream", "run",
+        "--routine", plan.routineId,
+        // Provenance only — the pass's report goes to `[dream] channel_id`, not here.
+        "--requester", origin.requesterId,
+      ];
+      if (deps.spawnDream) {
+        deps.spawnDream(argv);
+        return;
+      }
+      const proc = Bun.spawn([process.execPath, BECKETT_CLI_ENTRY, ...argv], {
+        cwd: ctx.paths.home,
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      proc.unref?.();
+      ctx.logger.info("dream pass launched off-process", { routineId: plan.routineId, pid: proc.pid });
+    }
+
+    /**
+     * The scheduler's pre-claim veto ({@link RoutineDispatcher.deferReason}) — free time, and
+     * free time only. Consulted BEFORE the period is claimed, so a deferral costs the window and
+     * not the week: the next 30s tick asks again, and if the fleet is still working, again, until
+     * the fleet goes quiet or the period rolls over. A disabled session is NOT deferred — it
+     * falls through to dispatch, which refuses it once and lets the period close.
+     *
+     * The nightly dream pass deliberately does NOT appear here. ro ruled the skip out: the pass
+     * runs at its fixed time whether or not the box is busy (it is one cheap, tool-less model
+     * call on a hard token ceiling — it does not meaningfully contend with a build), so there is
+     * nothing left to defer and no dream busy gate anywhere in the tree.
      */
     function deferReason(plan: RoutineDispatchPlan): string | null {
-      if (!plan.freeTime || !ctx.config.free_time.enabled) return null;
-      return freeTimeDeferReason({
-        fleetIdle: deps.isFleetIdle?.() ?? true,
-        conciergeQuiet: deps.conciergeQuiet?.() ?? true,
-      });
+      const busy = { fleetIdle: deps.isFleetIdle?.() ?? true, conciergeQuiet: deps.conciergeQuiet?.() ?? true };
+      if (plan.freeTime && ctx.config.free_time.enabled) return freeTimeDeferReason(busy);
+      return null;
     }
 
     /**
@@ -793,12 +839,26 @@ export const createRoutinesExtension =
           spawnFreeTime(plan, { channelId, requesterId });
           return;
         }
+        // Nightly self-repair forks the SAME way, one check later: `[self_repair] enabled=false`
+        // is its own off-switch, honored here before anything spawns, for the same reason free
+        // time's is — a refused fire keeps its claimed period and the day closes quietly.
         if (plan.selfRepair) {
           if (!ctx.config.self_repair.enabled) {
             ctx.logger.info("self-repair fire refused: [self_repair] enabled=false", { routineId: plan.routineId });
             return;
           }
           spawnSelfRepair(plan, { channelId, requesterId });
+          return;
+        }
+        // The nightly dream pass forks the SAME way, one check later: `[dream] enabled=false` is
+        // its own off-switch, honored here before anything spawns, for the same reason free
+        // time's is — a refused fire keeps its claimed period and the day closes quietly.
+        if (plan.dream) {
+          if (!ctx.config.dream.enabled) {
+            ctx.logger.info("dream fire refused: [dream] enabled=false", { routineId: plan.routineId });
+            return;
+          }
+          spawnDream(plan, { channelId, requesterId });
           return;
         }
         if (!plan.selfPrompt) throw new Error("self-lane routine is missing its prompt");
@@ -904,6 +964,9 @@ export const createRoutinesExtension =
           },
         },
         proactiveSweep: { repos: ctx.config.proactive_sweep.repos },
+        // The dream pass's FIXED time, applied on every load like the sweep's repo list — see
+        // `RoutineStore.reconcileDreamSchedule`.
+        dream: { fireAt: ctx.config.dream.fire_at, tz: ctx.config.dream.timezone },
       };
     }
 

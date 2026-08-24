@@ -18,22 +18,24 @@ export type SpendOutcome = "done" | "rework" | "failed" | "cancelled" | "launch_
  * per-cast quality rate should use. A `launch_failed` row is a launcher/provider event, not an
  * attempt by the model.
  *
- * A `free-time` row is excluded for a different reason: nobody asked for it, nothing was owed, and
- * nothing was reviewed (docs/freetime.md), so there is no work for it to have succeeded or failed
- * at. Counting it would move a cast's quality rate on a session that had no bar to clear.
+ * A `free-time` or `dream` row is excluded for a different reason: nobody asked for it, nothing
+ * was owed, and nothing was reviewed (docs/freetime.md; `src/dream/`), so there is no work for it
+ * to have succeeded or failed at. Counting it would move a cast's quality rate on a session that
+ * had no bar to clear.
  */
 export function isAttempt(row: Pick<SpendRecord, "outcome" | "stage">): boolean {
-  return row.outcome !== "launch_failed" && row.stage !== "free-time";
+  return row.outcome !== "launch_failed" && row.stage !== "free-time" && row.stage !== "dream";
 }
 
 /**
  * Which lane spent the money. `implement`/`review` are worker stages on a ticket; `free-time` is
- * the weekly unprompted session (docs/freetime.md), which is on the ledger so "what did free time
- * cost" is answerable from `beckett spend` — but is never ticket work.
+ * the weekly unprompted session (docs/freetime.md) and `dream` is the nightly sessions-review
+ * pass (`src/dream/`) — both on the ledger so "what did this cost" is answerable from
+ * `beckett spend`, but neither is ever ticket work.
  */
-export type SpendStage = "implement" | "review" | "free-time";
+export type SpendStage = "implement" | "review" | "free-time" | "dream";
 
-const SPEND_STAGES: readonly string[] = ["implement", "review", "free-time"];
+const SPEND_STAGES: readonly string[] = ["implement", "review", "free-time", "dream"];
 
 /**
  * The synthetic `ticketId` every `free-time` row carries. Free time has no run, and the
@@ -43,6 +45,9 @@ const SPEND_STAGES: readonly string[] = ["implement", "review", "free-time"];
  * back to its journal entry.
  */
 export const FREE_TIME_SPEND_TICKET_ID = "free-time";
+
+/** The synthetic `ticketId` every `dream` row carries — same reasoning as {@link FREE_TIME_SPEND_TICKET_ID}. */
+export const DREAM_SPEND_TICKET_ID = "dream";
 
 export interface SpendRecord {
   /** The ticket the spend belongs to — or {@link FREE_TIME_SPEND_TICKET_ID} when there is none. */

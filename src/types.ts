@@ -1261,6 +1261,38 @@ export interface Config {
     /** Share channel. Empty = fall back to `[free_time] channel_id`. */
     channel_id: string;
   };
+  /**
+   * The nightly dream pass (`src/dream/`): once a day, a cheap, tool-less model reviews the
+   * day's Discord sessions (the durable per-channel windows in `shared_context`, guild-only —
+   * DMs are never read) and commits at most a handful of durable inferences into the `dream`
+   * memory namespace via `MemoryStore.rememberDream`. Every value here is a WALL, not a dial the
+   * pass can reach: it runs as its own process and has no write path to this file.
+   */
+  dream: {
+    /** The human off-switch. False = the routine's fire is refused before anything spawns. */
+    enabled: boolean;
+    /** Model the pass runs on. Extraction/judgment over already-written text, not architecture —
+     *  a cheap model is the right default, not the concierge's own. */
+    model: string;
+    /** Wall-clock cap on the one model call, in seconds. A wedged child is killed, not waited on. */
+    hard_timeout_s: number;
+    /** Hard ceiling on model OUTPUT tokens per pass. A pass that cannot fit does not launch. */
+    output_token_budget: number;
+    /** How far back "the day's sessions" reaches, in hours, from the moment the pass fires. */
+    window_hours: number;
+    /** The conservatism cap (requirement 3): most durable memories one pass may ever write.
+     *  Over-cap proposals are dropped and counted, never silently truncated to fit. */
+    memories_per_night_max: number;
+    /** The same cap for the MAINTENANCE half: most update/retire/flag ops one pass may apply. */
+    prunes_per_night_max: number;
+    /** The FIXED wall-clock ("HH:MM") the nightly routine fires at — no fuzz, no idle deferral.
+     *  ro's call: the pass runs at its time. `23:59` is refused by the schema. */
+    fire_at: string;
+    /** IANA zone `fire_at` is read in, and the zone the journal's date stamp rolls over on. */
+    timezone: string;
+    /** Discord channel the pass posts its one line to. Empty = the pass says nothing to anyone. */
+    channel_id: string;
+  };
   /** The social-media agent's chilltext chill pass (W4A tune): reuses `concierge.chilltext`. */
   social: {
     /** Route composed X posts through chilltext before they reach the browser lane. Default

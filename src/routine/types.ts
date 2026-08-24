@@ -264,6 +264,23 @@ export const RoutineActionSchema = z.discriminatedUnion("kind", [
     /** Authenticated requester the fire is attributed to (optional; owner env fallback). */
     requesterId: z.string().optional(),
   }),
+  /**
+   * `dream` (`src/dream/`): the nightly sessions-review pass, riding the SAME self-lane fork as
+   * `free-time`/`self` — no agent, no browser, no credentials — and executed as the contained
+   * `beckett dream run` subprocess. It has no prompt field: what the pass may read (the day's
+   * guild channel sessions) and write (create-only `dream`-namespace memories, capped) is decided
+   * in code, not by a routine edit. Like `free-time` it may DEFER: the scheduler asks the
+   * dispatcher before claiming the period, and a busy fleet or an in-flight concierge turn pushes
+   * the fire to a later tick the same day rather than competing with real work.
+   */
+  z.object({
+    kind: z.literal("dream"),
+    /** Discord channel the fire is attributed to (optional; env fallback). Provenance only —
+     *  the pass's one-line report posts to `[dream] channel_id`, not to this. */
+    channelId: z.string().optional(),
+    /** Authenticated requester the fire is attributed to (optional; owner env fallback). */
+    requesterId: z.string().optional(),
+  }),
 ]);
 export type RoutineAction = z.infer<typeof RoutineActionSchema>;
 
