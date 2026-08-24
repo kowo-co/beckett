@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { RoutineSchema } from "./types.ts";
+import { RoutineSchema, emptyRoutineState } from "./types.ts";
 import { toMinutes } from "./types.ts";
 import {
   builtinRoutineDefs,
@@ -42,7 +42,7 @@ test("the timeline-reply routine parses against the real Routine schema (with ti
     ...def,
     createdAt: "2026-08-21T00:00:00.000Z",
     updatedAt: "2026-08-21T00:00:00.000Z",
-    state: { periodKey: null, chosenFireAt: null, lastFiredPeriodKey: null, lastFiredAt: null },
+    state: emptyRoutineState(),
   };
   expect(() => RoutineSchema.parse(stamped)).not.toThrow();
 });

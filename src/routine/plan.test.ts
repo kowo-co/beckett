@@ -2,7 +2,7 @@
 
 import { expect, test } from "bun:test";
 import { buildDispatchPlan, browserActionTargetsXSocial, LEGACY_SHITPOST_INPUT } from "./plan.ts";
-import type { Routine, RoutineAction } from "./types.ts";
+import { emptyRoutineState, type Routine, type RoutineAction } from "./types.ts";
 import { SOCIAL_MEDIA_AGENT_ID } from "../agent/builtins.ts";
 
 function routine(action: RoutineAction): Routine {
@@ -13,7 +13,7 @@ function routine(action: RoutineAction): Routine {
     enabled: true,
     action,
     schedule: { cadence: { kind: "daily" }, window: { start: "12:00", end: "13:00", tz: "America/Los_Angeles" } },
-    state: { periodKey: null, chosenFireAt: null, lastFiredPeriodKey: null, lastFiredAt: null },
+    state: emptyRoutineState(),
     createdAt: "t",
     updatedAt: "t",
   };

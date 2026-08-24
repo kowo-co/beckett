@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RoutineStore } from "./store.ts";
+import { emptyRoutineState } from "./types.ts";
 import { fixedFireWindow } from "./builtins.ts";
 import { rollFireTime } from "./schedule.ts";
 import type { Logger } from "../types.ts";
@@ -367,10 +368,9 @@ test("a registry with no retired rows is not rewritten", async () => {
 test("definitions and chosen fire time persist and restore across a new store", async () => {
   const { path, store } = makeStore();
   await store.setState("daily-x-shitpost", {
+    ...emptyRoutineState(),
     periodKey: "2026-07-20",
     chosenFireAt: "2026-07-20T19:23:00.000Z",
-    lastFiredPeriodKey: null,
-    lastFiredAt: null,
   });
 
   // A fresh store (simulating a daemon restart) reads the same chosen time back.

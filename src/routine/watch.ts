@@ -77,6 +77,16 @@ export interface WatchDeps {
    *  like every other routine action. */
   defaultOrigin: () => WatchOrigin;
   logger: Logger;
+  /**
+   * Observability hook: every completed cycle stamps lastFiredAt; an actual agent-lane attempt
+   * (or a missing origin at post time) also records ok/failed. Optional so feed/qualify unit
+   * tests stay isolated from the routine store.
+   */
+  reportHealth?: (event: {
+    routineId: string;
+    at: Date;
+    dispatch?: { ok: true } | { ok: false; err: unknown };
+  }) => Promise<void>;
 }
 
 /** The instruction handed to the agent — the item's own data, not composed prose, so the agent's
@@ -129,6 +139,19 @@ function bucketFor(posts: WatchPostRecord[], dryRun: boolean): WatchPostRecord[]
  * returns `feed-error` with no state mutation beyond `lastPolledAt`; the cold-start round seeds
  * and returns without ever evaluating a single item for qualification.
  */
+async function reportWatchHealth(
+  routine: Routine,
+  deps: WatchDeps,
+  dispatch?: { ok: true } | { ok: false; err: unknown },
+): Promise<void> {
+  if (!deps.reportHealth) return;
+  try {
+    await deps.reportHealth({ routineId: routine.id, at: deps.now(), dispatch });
+  } catch (err) {
+    deps.logger.warn("model-news watch: health report failed", { routine: routine.id, error: String(err) });
+  }
+}
+
 export async function runWatchCycle(routine: Routine, deps: WatchDeps): Promise<WatchCycleResult> {
   const action = routine.action;
   if (action.kind !== "watch") {
@@ -143,7 +166,9 @@ export async function runWatchCycle(routine: Routine, deps: WatchDeps): Promise<
       reason: feed.reason,
     });
     await deps.stateStore.update(routine.id, (s) => ({ ...s, lastPolledAt: now.toISOString() }));
-    return { status: "feed-error", droppedModelIds: [], error: feed.reason };
+    const result = { status: "feed-error" as const, droppedModelIds: [], error: feed.reason };
+    await reportWatchHealth(routine, deps);
+    return result;
   }
 
   const prior = await deps.stateStore.get(routine.id);
@@ -163,7 +188,9 @@ export async function runWatchCycle(routine: Routine, deps: WatchDeps): Promise<
       routine: routine.id,
       count: seenIds.length,
     });
-    return { status: "seeded", droppedModelIds: [] };
+    const seeded = { status: "seeded" as const, droppedModelIds: [] };
+    await reportWatchHealth(routine, deps);
+    return seeded;
   }
 
   const seenSet = new Set(prior.seenIds.map((s) => s.id));
@@ -181,7 +208,9 @@ export async function runWatchCycle(routine: Routine, deps: WatchDeps): Promise<
 
   if (qualifying.length === 0) {
     await persistSeen();
-    return { status: "no-qualifying", droppedModelIds: [] };
+    const idle = { status: "no-qualifying" as const, droppedModelIds: [] };
+    await reportWatchHealth(routine, deps);
+    return idle;
   }
 
   const postsBucket = bucketFor(prior.posts, action.dryRun);
@@ -196,7 +225,9 @@ export async function runWatchCycle(routine: Routine, deps: WatchDeps): Promise<
         dropped,
       });
     }
-    return { status: "no-qualifying", droppedModelIds: dropped };
+    const idle = { status: "no-qualifying" as const, droppedModelIds: dropped };
+    await reportWatchHealth(routine, deps);
+    return idle;
   }
 
   if (!withinRateLimit(postsBucket, now)) {
@@ -206,7 +237,9 @@ export async function runWatchCycle(routine: Routine, deps: WatchDeps): Promise<
       routine: routine.id,
       dropped,
     });
-    return { status: "rate-limited", droppedModelIds: dropped };
+    const limited = { status: "rate-limited" as const, droppedModelIds: dropped };
+    await reportWatchHealth(routine, deps);
+    return limited;
   }
 
   if (dropped.length) {
@@ -237,15 +270,22 @@ export async function runWatchCycle(routine: Routine, deps: WatchDeps): Promise<
       posts: [...s.posts, { modelId, postedAt: now.toISOString(), url: null, simulated: true }],
       lastPolledAt: now.toISOString(),
     }));
-    return { status: "dry-run-posted", postedModelId: modelId, droppedModelIds: dropped };
+    const dry = { status: "dry-run-posted" as const, postedModelId: modelId, droppedModelIds: dropped };
+    await reportWatchHealth(routine, deps);
+    return dry;
   }
 
   if (!channelId || !requesterId) {
     await persistSeen();
+    const missingOrigin = new Error(
+      "routine dispatch needs an origin channel + requester " +
+        "(set BECKETT_ROUTINE_CHANNEL_ID and DISCORD_OWNER_ID, or the routine's channelId/requesterId)",
+    );
     deps.logger.warn("model-news watch: no origin channel/requester resolved, skipping fire", {
       routine: routine.id,
     });
-    return { status: "not-configured", droppedModelIds: dropped, error: "no origin channel/requester configured" };
+    await reportWatchHealth(routine, deps, { ok: false, err: missingOrigin });
+    throw missingOrigin;
   }
 
   try {
@@ -257,7 +297,8 @@ export async function runWatchCycle(routine: Routine, deps: WatchDeps): Promise<
   } catch (err) {
     await persistSeen();
     deps.logger.warn("model-news watch: agent dispatch failed", { routine: routine.id, error: String(err) });
-    return { status: "feed-error", droppedModelIds: dropped, error: (err as Error).message };
+    await reportWatchHealth(routine, deps, { ok: false, err });
+    throw err;
   }
 
   await deps.stateStore.update(routine.id, (s) => ({
@@ -266,7 +307,9 @@ export async function runWatchCycle(routine: Routine, deps: WatchDeps): Promise<
     posts: [...s.posts, { modelId, postedAt: now.toISOString(), url: null, simulated: false }],
     lastPolledAt: now.toISOString(),
   }));
-  return { status: "posted", postedModelId: modelId, droppedModelIds: dropped };
+  const posted = { status: "posted" as const, postedModelId: modelId, droppedModelIds: dropped };
+  await reportWatchHealth(routine, deps, { ok: true });
+  return posted;
 }
 
 export interface WatchPreview {

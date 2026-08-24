@@ -6,6 +6,7 @@ import { RoutineStore } from "./store.ts";
 import { startRoutineScheduler, type RoutineDispatcher } from "./scheduler.ts";
 import type { RoutineDispatchPlan } from "./plan.ts";
 import { quietLogger } from "../cli/io.ts";
+import { emptyRoutineState } from "./types.ts";
 
 const dirs: string[] = [];
 const stoppers: Array<() => void> = [];
@@ -76,6 +77,7 @@ test("a restart inside the window neither re-rolls the chosen time nor double-fi
   const { path, store } = makeStore();
   // Pre-roll a concrete time for today, unfired — as if a prior daemon rolled it before crashing.
   await store.setState("daily-x-shitpost", {
+    ...emptyRoutineState(),
     periodKey: "2026-07-20",
     chosenFireAt: "2026-07-20T19:20:00.000Z",
     lastFiredPeriodKey: null,
@@ -155,6 +157,7 @@ test("a deferred fire does NOT claim its period, and the next tick fires it (doc
 test("does not fire before the chosen time", async () => {
   const { store } = makeStore();
   await store.setState("daily-x-shitpost", {
+    ...emptyRoutineState(),
     periodKey: "2026-07-20",
     chosenFireAt: "2026-07-20T19:45:00.000Z", // 12:45 PT, after our 12:30 now
     lastFiredPeriodKey: null,
@@ -245,10 +248,13 @@ test("fireNow dry-run returns the plan WITHOUT dispatching (no live post)", asyn
 test("fireNow --force dispatches even when already fired this period", async () => {
   const { store } = makeStore();
   await store.setState("daily-x-shitpost", {
+    ...emptyRoutineState(),
     periodKey: "2026-07-20",
     chosenFireAt: "2026-07-20T19:00:00.000Z",
     lastFiredPeriodKey: "2026-07-20", // already fired today
     lastFiredAt: INSIDE.toISOString(),
+    lastSucceededAt: INSIDE.toISOString(),
+    lastOutcome: "ok",
   });
   const { dispatcher, calls } = recorder();
   const scheduler = startRoutineScheduler({
@@ -291,10 +297,13 @@ test("the weekly built-in fires once per ISO WEEK, not once per day", async () =
 test("a restart mid-week keeps the weekly period claimed (no second run that week)", async () => {
   const { path, store } = makeStore();
   await store.setState("weekly-deps-update", {
+    ...emptyRoutineState(),
     periodKey: "2026-W30",
     chosenFireAt: "2026-07-26T15:12:00.000Z",
     lastFiredPeriodKey: "2026-W30",
     lastFiredAt: "2026-07-26T15:12:00.000Z",
+    lastSucceededAt: "2026-07-26T15:12:00.000Z",
+    lastOutcome: "ok",
   });
 
   // A restart on the Wednesday AFTER that Sunday — same ISO week, so still spent.
@@ -383,3 +392,127 @@ test("a fixed-time fire a few minutes late still runs — it is exempt from the 
   await scheduler.tick();
   expect(calls.filter((p) => p.routineId === "nightly-dream")).toHaveLength(1);
 });
+
+test("a failing dispatch alerts once, persists the counter, and list/inspect show failed last outcome", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-routine-sched-loud-"));
+  dirs.push(dir);
+  const store = new RoutineStore(join(dir, "routines.json"), { seedBuiltins: false });
+  await store.add({
+    id: "lane-a",
+    name: "lane-a",
+    enabled: true,
+    action: { kind: "agent", agentId: "social-media", input: "compose" },
+    schedule: { cadence: { kind: "daily" }, window: { start: "09:00", end: "21:00", tz: "America/Los_Angeles" } },
+  });
+
+  const alerts: string[] = [];
+  let blows = true;
+  const scheduler = startRoutineScheduler({
+    store,
+    dispatcher: {
+      async dispatch() {
+        if (blows) throw new Error("routine dispatch needs an origin channel + requester");
+      },
+    },
+    logger: quietLogger,
+    now: () => INSIDE,
+    rng: () => 0,
+    intervalMs: 10_000_000,
+    alert: async (line) => {
+      alerts.push(line);
+    },
+  });
+  stoppers.push(scheduler.stop);
+
+  await scheduler.tick();
+  expect(alerts).toHaveLength(1);
+  expect(alerts[0]).toContain("`lane-a`");
+  expect(alerts[0]).toContain("origin");
+  const failed = (await store.get("lane-a"))!;
+  expect(failed.state.lastOutcome).toBe("failed");
+  expect(failed.state.consecutiveFailures).toBe(1);
+  expect(failed.state.lastFiredAt).not.toBeNull();
+  expect(failed.state.lastSucceededAt).toBeNull();
+  expect(failed.state.lastError).toContain("origin");
+
+  // Same period is claimed — a second tick must not re-dispatch or re-alert.
+  await scheduler.tick();
+  expect(alerts).toHaveLength(1);
+  expect((await store.get("lane-a"))!.state.consecutiveFailures).toBe(1);
+
+  // A forced fire of the same signature stays quiet and bumps the counter (survives "restart").
+  const restarted = new RoutineStore(join(dir, "routines.json"), { seedBuiltins: false });
+  const alerts2: string[] = [];
+  const sched2 = startRoutineScheduler({
+    store: restarted,
+    dispatcher: {
+      async dispatch() {
+        if (blows) throw new Error("routine dispatch needs an origin channel + requester");
+      },
+    },
+    logger: quietLogger,
+    now: () => INSIDE,
+    rng: () => 0,
+    intervalMs: 10_000_000,
+    alert: async (line) => {
+      alerts2.push(line);
+    },
+  });
+  stoppers.push(sched2.stop);
+  await expect(sched2.fireNow("lane-a", { force: true })).rejects.toThrow(/origin/);
+  expect(alerts2).toHaveLength(0);
+  expect((await restarted.get("lane-a"))!.state.consecutiveFailures).toBe(2);
+
+  blows = false;
+  await sched2.fireNow("lane-a", { force: true });
+  expect(alerts2).toHaveLength(1);
+  expect(alerts2[0]).toMatch(/dispatched again after 2 misses/);
+  const ok = (await restarted.get("lane-a"))!;
+  expect(ok.state.lastOutcome).toBe("ok");
+  expect(ok.state.lastSucceededAt).not.toBeNull();
+  expect(ok.state.consecutiveFailures).toBe(0);
+  expect(ok.state.lastError).toBeNull();
+});
+
+test("a forced fire of a failing watch routine is failed, not ok", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beckett-routine-watch-loud-"));
+  dirs.push(dir);
+  const store = new RoutineStore(join(dir, "routines.json"), { seedBuiltins: false });
+  await store.add({
+    id: "model-news-watch",
+    name: "watch",
+    enabled: true,
+    action: {
+      kind: "watch",
+      feedUrl: "https://example.invalid/feed",
+      pollIntervalMinutes: 15,
+      agentId: "social-media",
+      dryRun: false,
+    },
+  });
+
+  const alerts: string[] = [];
+  const scheduler = startRoutineScheduler({
+    store,
+    dispatcher: {
+      async dispatch() {
+        throw new Error("agent dispatch failed");
+      },
+    },
+    logger: quietLogger,
+    now: () => INSIDE,
+    intervalMs: 10_000_000,
+    alert: async (line) => {
+      alerts.push(line);
+    },
+  });
+  stoppers.push(scheduler.stop);
+
+  await expect(scheduler.fireNow("model-news-watch", { force: true })).rejects.toThrow(/agent dispatch failed/);
+  expect(alerts).toHaveLength(1);
+  const state = (await store.get("model-news-watch"))!.state;
+  expect(state.lastOutcome).toBe("failed");
+  expect(state.consecutiveFailures).toBe(1);
+  expect(state.lastSucceededAt).toBeNull();
+});
+

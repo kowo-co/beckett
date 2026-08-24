@@ -30,6 +30,7 @@ import type { Routine } from "./types.ts";
 import { periodDateKey, periodKey, rollFireTime, windowBounds } from "./schedule.ts";
 import { toMinutes } from "./types.ts";
 import { buildDispatchPlan, type RoutineDispatchPlan } from "./plan.ts";
+import { applyDispatchFailure, applyDispatchSuccess, isRoutineHealthAlreadyRecorded } from "./dispatch-health.ts";
 
 /**
  * At most this many LATE fires (a routine whose window has already fully elapsed, not merely a
@@ -76,6 +77,11 @@ export interface RoutineSchedulerDeps {
   now?: () => Date;
   rng?: () => number;
   intervalMs?: number;
+  /**
+   * One short line to the ops-log channel when a dispatch failure is first seen (or re-alerts
+   * at 5/20) and when a previously-failing routine recovers. Missing → persist + log only.
+   */
+  alert?: (line: string) => Promise<void>;
 }
 
 export interface RoutineScheduler {
@@ -90,6 +96,27 @@ export function startRoutineScheduler(deps: RoutineSchedulerDeps): RoutineSchedu
   const now = deps.now ?? (() => new Date());
   const rng = deps.rng ?? Math.random;
   const interval = deps.intervalMs ?? ROUTINE_TICK_MS;
+
+  async function emitAlert(line: string): Promise<void> {
+    if (!deps.alert) return;
+    try {
+      await deps.alert(line);
+    } catch (err) {
+      deps.logger.warn("routine ops alert failed", { error: String(err) });
+    }
+  }
+
+  async function recordOutcome(
+    id: string,
+    base: Routine["state"],
+    result: { ok: true; at: Date } | { ok: false; err: unknown; at: Date },
+  ): Promise<void> {
+    const update = result.ok
+      ? applyDispatchSuccess(base, id, result.at)
+      : applyDispatchFailure(base, result.err, { routineId: id });
+    await deps.store.setState(id, update.state);
+    if (update.alert) await emitAlert(update.alert);
+  }
 
   async function evaluate(routine: Routine, catchUpBudget: { remaining: number }): Promise<void> {
     if (!routine.enabled) return;
@@ -158,9 +185,11 @@ export function startRoutineScheduler(deps: RoutineSchedulerDeps): RoutineSchedu
     deps.logger.info("routine firing", { id: routine.id, period: key, preview: plan.preview });
     try {
       await deps.dispatcher.dispatch(plan, routine);
+      await recordOutcome(routine.id, claimed, { ok: true, at });
     } catch (err) {
-      // The period stays claimed (no double-fire); surface the failure for the operator.
-      deps.logger.warn("routine dispatch failed", { id: routine.id, period: key, error: String(err) });
+      // The period stays claimed (no double-fire); surface the failure where a human will see it.
+      await recordOutcome(routine.id, claimed, { ok: false, err, at });
+      deps.logger.error("routine dispatch failed", { id: routine.id, period: key, error: String(err) });
     }
   }
 
@@ -196,26 +225,47 @@ export function startRoutineScheduler(deps: RoutineSchedulerDeps): RoutineSchedu
     // wall-clock gate that only the separate poll loop enforces.
     if (routine.action.kind === "watch") {
       if (opts.dryRun) return plan;
-      await deps.dispatcher.dispatch(plan, routine);
+      try {
+        await deps.dispatcher.dispatch(plan, routine);
+      } catch (err) {
+        // runWatchCycle already persisted+alerted when the agent lane threw. An origin
+        // refusal that never entered the cycle still needs the same record.
+        if (!isRoutineHealthAlreadyRecorded(err)) {
+          await recordOutcome(id, routine.state, { ok: false, err, at: now() });
+        }
+        throw err;
+      }
       return plan;
     }
 
     if (opts.dryRun) return plan;
     if (!routine.schedule) throw new Error(`routine ${id} has no schedule (only a "watch" action may omit one)`);
     const schedule = routine.schedule;
+    let claimed = routine.state;
     if (!opts.force) {
       // Non-forced manual fire still respects per-period idempotency.
       const key = periodKey(schedule.cadence, schedule.window, now());
       if (routine.state.lastFiredPeriodKey === key) {
         throw new Error(`routine ${id} already fired this period (${key}); use --force to fire again`);
       }
-      await deps.store.setState(id, {
+      claimed = {
         ...routine.state,
         lastFiredPeriodKey: key,
         lastFiredAt: now().toISOString(),
-      });
+      };
+      await deps.store.setState(id, claimed);
+    } else {
+      claimed = { ...routine.state, lastFiredAt: now().toISOString() };
+      await deps.store.setState(id, claimed);
     }
-    await deps.dispatcher.dispatch(plan, routine);
+    const at = now();
+    try {
+      await deps.dispatcher.dispatch(plan, routine);
+      await recordOutcome(id, claimed, { ok: true, at });
+    } catch (err) {
+      await recordOutcome(id, claimed, { ok: false, err, at });
+      throw err;
+    }
     return plan;
   }
 

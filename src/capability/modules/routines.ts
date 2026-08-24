@@ -80,6 +80,12 @@ import {
 import type { BrowserAgent } from "../../browser/agent.ts";
 import { callBus } from "../../shell/control-bus.ts";
 import { fail, out, parse } from "../../cli/io.ts";
+import {
+  enabledRoutinesMissingOrigin,
+  formatOriginStartupLine,
+  resolveRoutineOrigin,
+  applyWatchCycleHealth,
+} from "../../routine/dispatch-health.ts";
 
 /**
  * What the daemon injects beyond {@link ExtensionContext}: the dispatch closure's
@@ -198,6 +204,12 @@ export interface RoutinesExtensionDeps {
    * agent/registry/runner, and never posts a `routine.self` concierge wake.
    */
   spawnDream?: (argv: string[]) => void;
+  /**
+   * Post one short line to the ops-log Discord channel. Daemon wires this to `discord.reply`
+   * on `config.ops_log.channel_id` (read from config, never hardcoded). Injected so tests can
+   * capture failure/recovery/startup alerts without a live socket.
+   */
+  postOps?: (text: string) => Promise<void>;
   /** Test seams — the scheduler's injectable clock/RNG/cadence (see {@link RoutineSchedulerDeps}). */
   now?: () => Date;
   rng?: () => number;
@@ -254,6 +266,10 @@ function summarizeRoutine(routine: Routine): Record<string, unknown> {
     enabled: routine.enabled,
     action: routine.action.kind,
     lastFiredAt: routine.state.lastFiredAt ?? null,
+    lastSucceededAt: routine.state.lastSucceededAt ?? null,
+    lastOutcome: routine.state.lastOutcome ?? null,
+    lastError: routine.state.lastError ?? null,
+    consecutiveFailures: routine.state.consecutiveFailures ?? 0,
   };
   // `watch` has no schedule/window — it polls on its own interval and fires 0..n times a day.
   if (routine.action.kind === "watch") {
@@ -346,6 +362,21 @@ export const createRoutinesExtension =
       return scheduler;
     }
 
+    async function postOpsLine(text: string): Promise<void> {
+      if (deps.postOps) {
+        await deps.postOps(text);
+        return;
+      }
+      const channelId = ctx.config.ops_log.channel_id.trim();
+      if (!channelId) return;
+      await callBus(
+        join(ctx.paths.beckettDir, "control.sock"),
+        "discord.reply",
+        { channelId, text },
+        30_000,
+      );
+    }
+
     /** The `watch` action's runtime deps — ONE shared object serves every `watch` routine (and
      *  the automatic poll loop, a real `--force` fire, and — via `previewWatchCycle` — a
      *  `--dry-run` fire): `dispatchAgent` takes the target `agentId` per call rather than being
@@ -363,6 +394,14 @@ export const createRoutinesExtension =
           ),
         defaultOrigin: () => deps.defaultOrigin?.() ?? { channelId: null, requesterId: null },
         logger: ctx.logger.child("model-news-watch"),
+        reportHealth: async (event) => {
+          if (!store) return;
+          const routine = await store.get(event.routineId);
+          if (!routine) return;
+          const update = applyWatchCycleHealth(routine.state, event.routineId, event.at, event.dispatch);
+          await store.setState(event.routineId, update.state);
+          if (update.alert) await postOpsLine(update.alert);
+        },
       };
     }
 
@@ -771,14 +810,14 @@ export const createRoutinesExtension =
       // Resolve the origin channel/requester at fire time (the daemon binds this to
       // BECKETT_ROUTINE_CHANNEL_ID / DISCORD_OWNER_ID) so no id is baked into a routine.
       const fallback = deps.defaultOrigin?.() ?? { channelId: null, requesterId: null };
-      const channelId = plan.channelId ?? fallback.channelId;
-      const requesterId = plan.requesterId ?? fallback.requesterId;
-      if (!channelId || !requesterId) {
+      const origin = resolveRoutineOrigin(plan.channelId, plan.requesterId, fallback);
+      if (!origin) {
         throw new Error(
           "routine dispatch needs an origin channel + requester " +
             "(set BECKETT_ROUTINE_CHANNEL_ID and DISCORD_OWNER_ID, or the routine's channelId/requesterId)",
         );
       }
+      const { channelId, requesterId } = origin;
 
       // The LOCAL maintenance lane (issue #85) forks BEFORE every browser dependency below: a
       // dependency update wants a checkout and a package manager, not a web session, so it must
@@ -1585,6 +1624,7 @@ export const createRoutinesExtension =
               dispatch: (plan, routine) => dispatchPlan(plan, routine),
               deferReason: (plan) => deferReason(plan),
             },
+            alert: (line) => postOpsLine(line),
             ...(deps.now ? { now: deps.now } : {}),
             ...(deps.rng ? { rng: deps.rng } : {}),
             ...(deps.intervalMs !== undefined ? { intervalMs: deps.intervalMs } : {}),
@@ -1597,7 +1637,7 @@ export const createRoutinesExtension =
         // churn; per-period idempotency would still prevent a double FIRE). The `watch` poll
         // loop arms alongside it, off the SAME store — `beckett routine enable/disable` needs
         // no restart because both loops re-read the store live every tick.
-        start: () => {
+        start: async () => {
           if (scheduler) return;
           if (!schedulerDeps || !store) {
             throw new Error("the routines extension is not initialized (lifecycle.init has not run)");
@@ -1615,6 +1655,21 @@ export const createRoutinesExtension =
             ...(deps.watchIntervalMs !== undefined ? { intervalMs: deps.watchIntervalMs } : {}),
           };
           watchLoop = deps.createWatchLoop?.(watchLoopDeps) ?? startWatchLoop(watchLoopDeps);
+
+          // Name every enabled routine that cannot resolve an origin BEFORE the first scheduled
+          // fire silently fails — the check that would have caught a missing
+          // BECKETT_ROUTINE_CHANNEL_ID five days earlier. One line, not one per routine.
+          try {
+            const fallback = deps.defaultOrigin?.() ?? { channelId: null, requesterId: null };
+            const missing = enabledRoutinesMissingOrigin(await store.list(), fallback);
+            const line = formatOriginStartupLine(missing);
+            if (line) {
+              ctx.logger.error("routine origin missing at boot", { ids: missing });
+              await postOpsLine(line);
+            }
+          } catch (err) {
+            ctx.logger.warn("routine origin boot check failed", { error: String(err) });
+          }
         },
         // Idempotent: clears the prime + interval; a later start() may re-arm cleanly.
         stop: () => {
