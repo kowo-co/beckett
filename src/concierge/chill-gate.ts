@@ -50,6 +50,7 @@ import { chillTransform, shouldBypassChill, type ChillTransformResult } from "..
 import { enforceMentions } from "../discord/mentions.ts";
 import { detectEchoedInput, detectPromptScaffolding, detectContentSubstitution, type PromptScaffoldResult } from "./echo-guard.ts";
 import { appendChillTransformLog, type ChillTransformLogRecord } from "./chilltext-log.ts";
+import { outboundBubbleKey } from "../discord/outbound-dedupe.ts";
 
 /** How much of a bubble/input to keep in a trip's warning log — enough to diagnose, not a full dump. */
 const LOG_SNIPPET_CHARS = 200;
@@ -212,9 +213,25 @@ export interface DeliverChilledOptions {
    * pass `buildPaths(config).chilltextLog`. A write failure here never blocks or drops a delivery.
    */
   logPath?: string;
+  /**
+   * Identity of this delivery (the mention/ambient message id). Combined with channel and bubble
+   * index into {@link ReplyOptions.idempotencyKey} so the same bubble cannot be posted twice if
+   * auto-post and `beckett discord reply` both fire, or if `gateway.post` is retried.
+   */
+  deliveryId?: string;
 }
 
 const defaultSleep = (ms: number): Promise<void> => (ms > 0 ? Bun.sleep(ms) : Promise.resolve());
+
+function bubbleOpts(
+  postOpts: ReplyOptions | undefined,
+  deliveryId: string | undefined,
+  channelId: string,
+  bubbleIndex: number,
+): ReplyOptions | undefined {
+  if (!deliveryId) return postOpts;
+  return { ...postOpts, idempotencyKey: outboundBubbleKey(deliveryId, channelId, bubbleIndex) };
+}
 
 /**
  * Post `text` to `channelId`, chilled through the configured API when eligible, falling back to
@@ -245,7 +262,7 @@ export async function deliverChilled(
   };
 
   if (shouldBypassChill(text, cfg)) {
-    const messageId = await gateway.post(channelId, text, postOpts);
+    const messageId = await gateway.post(channelId, text, bubbleOpts(postOpts, opts.deliveryId, channelId, 0));
     recordPost?.(channelId, text, messageId);
     logTransform({ outcome: "bypassed", durationMs: Date.now() - startedAt, bubbles: null });
     return messageId;
@@ -265,7 +282,7 @@ export async function deliverChilled(
   const transformDurationMs = Date.now() - startedAt;
 
   if (!result) {
-    const messageId = await gateway.post(channelId, text, postOpts);
+    const messageId = await gateway.post(channelId, text, bubbleOpts(postOpts, opts.deliveryId, channelId, 0));
     recordPost?.(channelId, text, messageId);
     logTransform({ outcome: threw ? "threw" : "fallback", durationMs: transformDurationMs, bubbles: null });
     return messageId;
@@ -423,8 +440,12 @@ export async function deliverChilled(
   for (let i = 0; i < messages.length; i++) {
     if (i > 0) await sleep(cfg!.bubble_delay_ms);
     const bubble = messages[i]!;
-    const bubbleOpts: ReplyOptions = { ...(i === 0 ? postOpts : {}), singleMessage: true };
-    const messageId = await gateway.post(channelId, bubble, bubbleOpts);
+    const bubbleOptsForPost: ReplyOptions = {
+      ...(i === 0 ? postOpts : {}),
+      singleMessage: true,
+      ...bubbleOpts(undefined, opts.deliveryId, channelId, i),
+    };
+    const messageId = await gateway.post(channelId, bubble, bubbleOptsForPost);
     if (i === 0) firstId = messageId;
     recordPost?.(channelId, bubble, messageId);
   }

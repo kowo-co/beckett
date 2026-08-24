@@ -92,6 +92,17 @@ import {
   isBrowserQuestionMessage,
 } from "../browser/question-message.ts";
 import { initialPresenceData } from "./presence.ts";
+import { discordNonceForKey, OutboundDedupe } from "./outbound-dedupe.ts";
+
+/** `channel.send` returned an id, then a later chunk or disconnect threw. Do not re-send. */
+class PartialDiscordSendError extends Error {
+  readonly messageId: string;
+  constructor(messageId: string, cause: unknown) {
+    super("discord send landed then failed", { cause: cause instanceof Error ? cause : undefined });
+    this.name = "PartialDiscordSendError";
+    this.messageId = messageId;
+  }
+}
 
 /** Discord's hard per-message ceiling (Spec 05 §9.1). */
 const DISCORD_MAX_CHARS = 2000;
@@ -254,6 +265,8 @@ export class DiscordJsGateway implements DiscordGateway {
   private readonly ownMessageIds = new Set<string>();
   /** Privacy-critical subset of own ids, marked synchronously before `sendNow` returns. */
   private readonly browserQuestionMessageIds = new Set<string>();
+  /** Coalesces retries of the same bubble (see {@link ReplyOptions.idempotencyKey}). */
+  private readonly outboundDedupe = new OutboundDedupe();
 
   /** Liveness, tracked from shard lifecycle events (more accurate than client.isReady). */
   private connected = false;
@@ -558,10 +571,17 @@ export class DiscordJsGateway implements DiscordGateway {
    * caller so the loop can retry / degrade to the CLI (Spec 04 T19, Spec 05 §9.2).
    */
   async post(channelId: string, content: string, opts?: ReplyOptions): Promise<string> {
+    return this.outboundDedupe.run(opts?.idempotencyKey, () => this.postOnce(channelId, content, opts));
+  }
+
+  private async postOnce(channelId: string, content: string, opts?: ReplyOptions): Promise<string> {
     if (this.connected && this.client) {
       try {
         return await this.sendNow(channelId, content, opts);
       } catch (err) {
+        if (err instanceof PartialDiscordSendError) {
+          return this.keepPartialSend(channelId, err);
+        }
         // If the drop happened mid-send, fall through to the queue; otherwise it's a real
         // failure (e.g. bad channel / permissions) the caller must handle.
         if (this.connected || opts?.queueIfOffline === false) throw err;
@@ -1312,7 +1332,8 @@ export class DiscordJsGateway implements DiscordGateway {
     let capped = false;
 
     let firstId: string | null = null;
-    for (let i = 0; i < chunks.length; i++) {
+    try {
+      for (let i = 0; i < chunks.length; i++) {
       if (i > 0) {
         const gap = gaps[i - 1] ?? 0;
         if (gap > 0) {
@@ -1333,6 +1354,10 @@ export class DiscordJsGateway implements DiscordGateway {
       // the same person never gets both an explicit ping and the reply notification.
       const messageContent = replyUserId ? stripUserMention(chunks[i]!, replyUserId) : chunks[i]!;
       const payload: MessageCreateOptions = messageContent ? { content: messageContent } : {};
+      if (i === 0 && opts?.idempotencyKey) {
+        payload.nonce = discordNonceForKey(opts.idempotencyKey);
+        payload.enforceNonce = true;
+      }
       // Every outgoing message disables Discord's implicit parsing. A direct reply opts back into
       // exactly its author's native-reply notification, and any ids resolved from `--ping` (issue
       // #10) are allow-listed too — never roles, @here, @everyone, or another user named ad hoc in
@@ -1370,6 +1395,10 @@ export class DiscordJsGateway implements DiscordGateway {
       this.ownMessageIds.add(sent.id);
       if (i === 0 && opts?.browserQuestion) this.browserQuestionMessageIds.add(sent.id);
       firstId ??= sent.id;
+    }
+    } catch (err) {
+      if (firstId) throw new PartialDiscordSendError(firstId, err);
+      throw err;
     }
     this.lastEventTs = Date.now();
     // The FIRST message id is the reply-correlation anchor (Spec 05 §4.1): it carries the native
@@ -1617,6 +1646,16 @@ export class DiscordJsGateway implements DiscordGateway {
     );
   }
 
+  /** `channel.send` already landed; never treat the throw as a reason to send again. */
+  private keepPartialSend(channelId: string, err: PartialDiscordSendError): string {
+    this.logger.warn("post landed on Discord then failed; not re-queueing", {
+      channelId,
+      messageId: err.messageId,
+      error: String(err.cause ?? err),
+    });
+    return err.messageId;
+  }
+
   /** Buffer a post until reconnect; the promise resolves with the real id when it lands. */
   private enqueue(channelId: string, content: string, opts?: ReplyOptions): Promise<string> {
     this.logger.warn("discord gateway down; queueing post for reconnect", {
@@ -1639,6 +1678,12 @@ export class DiscordJsGateway implements DiscordGateway {
         const id = await this.sendNow(item.channelId, item.content, item.opts);
         item.resolve(id);
       } catch (err) {
+        if (err instanceof PartialDiscordSendError) {
+          // Same class as postOnce: at least one Discord message already exists. Replaying
+          // this queued item from scratch on the next reconnect would duplicate it.
+          item.resolve(this.keepPartialSend(item.channelId, err));
+          continue;
+        }
         if (!this.connected) {
           // Dropped again mid-flush: requeue this + the remainder for the next reconnect.
           this.outbound.unshift(...pending.slice(i));

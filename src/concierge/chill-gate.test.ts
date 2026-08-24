@@ -9,6 +9,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deliverChilled } from "./chill-gate.ts";
+import { OutboundDedupe } from "../discord/outbound-dedupe.ts";
 import { readChillTransformLog } from "./chilltext-log.ts";
 import { chillTransform, type ChilltextConfig, type ChillTransformResult } from "../chilltext.ts";
 import type { DiscordGateway, Logger, ReplyOptions } from "../types.ts";
@@ -963,5 +964,29 @@ describe("deliverChilled — chilltext transform transcript (logPath)", () => {
     expect(posts.map((p) => p.text)).toEqual(["hey", "so about that"]);
     expect(id).toBe("msg-1");
     expect(warnings.some(([msg]) => msg.includes("chilltext transform log write failed"))).toBe(true);
+  });
+});
+
+
+describe("deliverChilled — bubble idempotency", () => {
+  test("the same deliveryId posts each bubble once even when deliverChilled is called twice", async () => {
+    const { gateway, posts } = fakeGateway();
+    const dedupe = new OutboundDedupe();
+    const send = gateway.post.bind(gateway);
+    gateway.post = (channelId, text, opts) =>
+      dedupe.run(opts?.idempotencyKey, () => send(channelId, text, opts));
+    const opts = {
+      gateway,
+      cfg: cfg(),
+      sleep: async () => {},
+      transform: async () => ({ messages: ["that's one approval, shipping it"] }),
+      deliveryId: "turn:trigger-1",
+    };
+    const first = await deliverChilled(CHAN, "shipping it", opts);
+    const second = await deliverChilled(CHAN, "shipping it", opts);
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.text).toBe("that's one approval, shipping it");
+    expect(first).toBe(second);
+    expect(posts[0]!.opts?.idempotencyKey).toBe(`turn:trigger-1:${CHAN}:0`);
   });
 });
