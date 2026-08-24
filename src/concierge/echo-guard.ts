@@ -551,6 +551,133 @@ export function detectContentSubstitution(rewritten: string, source: string): Co
 }
 
 /**
+ * Incident (2026-08-24, channel 1520986792373911622, 22:50:41.399Z): a second, narrower shape of
+ * the 2026-08-21 persona-sample-line incident above — this time chilltext substituted only the
+ * OPENING CLAUSE of an otherwise-faithful bubble with a verbatim `persona.md` sample line, leaving
+ * the rest of the message untouched:
+ *
+ *   agentOutput: "hi booper. you got the mention right and the message wrong, which is more than
+ *                 most of the pipelines around here managed today"
+ *   posted:      "yeah that's broken. you got the mention right and the message wrong, which is
+ *                 more than most of the pipelines around here managed today"
+ *
+ * `detectContentSubstitution` above cannot catch this: it is a length-weighted WHOLE-MESSAGE
+ * containment score, and 90%+ of the bubble's content words survived untouched (recorded
+ * fidelityScore: 0.9), which comfortably clears `FIDELITY_CONTAINMENT_THRESHOLD`. But the message
+ * that reached Discord was addressed to nobody and asserted a fact ("that's broken") the agent
+ * never claimed — the opening clause carries the addressee and the stance, and diluting it into a
+ * whole-message average is exactly the blind spot this incident exploited.
+ *
+ * `detectLeadingClauseSubstitution` scores ONLY the leading clause of `rewritten` against the
+ * leading clause of `source` — independent of, and strictly narrower than, the whole-message
+ * check. `chill-gate.ts`'s `reconcileBubblesWithBlocks` runs this ONLY for the bubble matched to
+ * the FIRST block of the reply (the one carrying the opening clause); a bubble covering the middle
+ * or end of a block legitimately shares nothing with that block's own opener, so checking every
+ * bubble against it would misfire on chilltext's ordinary, harmless re-chunking.
+ */
+const LEADING_CLAUSE_OVERLAP_THRESHOLD = 0.2;
+
+/** The leading sentence/clause of `text` — everything up to and including the first `.`, `!`, or
+ * `?` — or `null` when `text` carries no such terminator at all. `.` does not cross a newline in
+ * this regex by design — a multi-block `text` with no early terminator on its first line must not
+ * spill the "leading clause" into a LATER block. No fallback to the whole string on a miss: a
+ * short, genuinely-terminated source clause ("stopped.") scored against an untermined bubble that
+ * merged it into a longer sentence would compare a 1-word fragment against the bubble's ENTIRE
+ * text — a size mismatch that produces a low score on ordinary, faithful rewording, not a
+ * substitution. Requiring BOTH sides to carry a real terminator (see the caller below) keeps the
+ * comparison to genuinely comparable units. */
+function leadingClause(text: string): string | null {
+  const match = /^(.*?[.!?])(?:\s|$)/.exec(text.trim());
+  return match ? match[1]!.trim() : null;
+}
+
+/** A rewritten bubble's OPENING clause scored against the source block's opening clause. */
+interface LeadingClauseResult {
+  /** True when the two opening clauses share essentially nothing — a substitution of the opener,
+   * not a rewrite of it. */
+  unrelated: boolean;
+  /** Dice content-word overlap between the two leading clauses. `null` when either clause has no
+   * content words to score (e.g. a bare "ok." opener). */
+  score: number | null;
+}
+
+/**
+ * Score `rewritten`'s opening clause against `source`'s. Runs only when BOTH carry a genuine
+ * sentence terminator early on — see {@link leadingClause}'s doc for why an untermined side (the
+ * whole string standing in for "the leading clause") makes the comparison meaningless rather than
+ * conservative. Threshold sits at 0.2 — well below `FIDELITY_CONTAINMENT_THRESHOLD`'s 0.3 because a
+ * genuine rewrite of a short opener ("hey" → "yo there") can legitimately share zero tokens with
+ * the original while still being a faithful restyle, so this is deliberately loose; it exists only
+ * to catch the degenerate case of NO shared content at all, which a real rewrite of the same clause
+ * essentially never produces (the evidence pair scores exactly 0.0 — "hi booper" and "yeah that's
+ * broken" share not one content word).
+ */
+export function detectLeadingClauseSubstitution(rewritten: string, source: string): LeadingClauseResult {
+  const rewrittenLead = leadingClause(rewritten);
+  const sourceLead = leadingClause(source);
+  if (rewrittenLead === null || sourceLead === null) return { unrelated: false, score: null };
+  const rewrittenClause = tokenize(rewrittenLead).filter((word) => !STOPWORDS.has(word));
+  const sourceClause = tokenize(sourceLead).filter((word) => !STOPWORDS.has(word));
+  if (rewrittenClause.length === 0 || sourceClause.length === 0) return { unrelated: false, score: null };
+  const score = dice(new Set(rewrittenClause), new Set(sourceClause));
+  return { unrelated: score < LEADING_CLAUSE_OVERLAP_THRESHOLD, score };
+}
+
+/** A persona sample-line clause must be at least this many words before a bubble is checked
+ * against it — see the doc below for the false-positive tradeoff. A 2-word fragment like "moving
+ * on" or "skill issue" is common enough in ordinary chat that a coincidental match isn't a leak; a
+ * 3-word fragment like "yeah that's broken" or "i know why" is distinctive enough that a verbatim
+ * match is the persona line itself, not chance. */
+const PERSONA_CLAUSE_MIN_WORDS = 3;
+
+/** Split `line` into its sentence-level clauses and normalize each: lowercase, trailing `.`/`!`/`?`
+ * stripped, whitespace trimmed. The 2026-08-24 incident substituted a single CLAUSE out of a
+ * multi-clause sample line ("yeah that's broken. i know why. gimme 10" → only "yeah that's broken."
+ * leaked), not the whole line, so the check has to operate at clause granularity to catch it. */
+function normalizePersonaClauses(line: string): string[] {
+  return line
+    .split(/(?<=[.!?])\s+/)
+    .map((clause) => clause.toLowerCase().replace(/[.!?]+$/, "").trim())
+    .filter(Boolean);
+}
+
+/** A rewritten bubble scored against `persona.md`'s sample lines. */
+export interface PersonaLeakResult {
+  /** True when `bubble` contains a persona sample-line clause the agent's own output did not. */
+  leaked: boolean;
+  /** The normalized clause that matched, for the trip's warn log. `null` when nothing matched. */
+  matchedClause: string | null;
+}
+
+/**
+ * Detect a chilltext rewrite substituting a verbatim `persona.md` sample-line clause into a bubble
+ * that the agent's own output never contained (the 2026-08-21 and 2026-08-24 incidents — see the
+ * docs above `detectContentSubstitution` and `detectLeadingClauseSubstitution` for the two shapes
+ * this has taken). Trivially detectable once the sample lines are in hand: normalize (lowercase,
+ * strip trailing punctuation) each clause of each sample line, and check whether `bubble` contains
+ * one that `agentOutput` does not. A clause the agent's own output ALSO contains is not a leak —
+ * it's either a coincidence or (more likely) the agent legitimately writing in its own established
+ * voice, and this guard's whole purpose is catching FABRICATED content, not policing style.
+ */
+export function detectPersonaSampleLineLeak(
+  bubble: string,
+  agentOutput: string,
+  sampleLines: readonly string[],
+): PersonaLeakResult {
+  const bubbleNorm = bubble.toLowerCase();
+  const agentOutputNorm = agentOutput.toLowerCase();
+  for (const sampleLine of sampleLines) {
+    for (const clause of normalizePersonaClauses(sampleLine)) {
+      if (clause.split(/\s+/).length < PERSONA_CLAUSE_MIN_WORDS) continue;
+      if (!bubbleNorm.includes(clause)) continue;
+      if (agentOutputNorm.includes(clause)) continue;
+      return { leaked: true, matchedClause: clause };
+    }
+  }
+  return { leaked: false, matchedClause: null };
+}
+
+/**
  * Score a rewritten bubble against the user's triggering message and decide whether it has
  * drifted into being substantially the user's own words — either the whole bubble, or a leading/
  * trailing span of it. Pure and deterministic — no network, no randomness — so a caller can unit

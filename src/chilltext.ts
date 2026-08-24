@@ -17,7 +17,7 @@
  */
 
 import type { Config } from "./types.ts";
-import { chillSystemPrompt } from "./chill-system.ts";
+import { chillSystemPrompt, personaSampleLines } from "./chill-system.ts";
 
 /** The `[concierge.chilltext]` config slice — the single source of truth is types.ts. */
 export type ChilltextConfig = Config["concierge"]["chilltext"];
@@ -63,6 +63,13 @@ export interface ChillTransformResult {
    * no `system` was sent, so a plain `{ messages }` result still round-trips through `toEqual`.
    */
   system?: string;
+  /**
+   * The persona file's `## sample lines` / `good:` clauses, for `chill-gate.ts`'s persona-leak
+   * guard — same reasoning as `system`: echoed back from the read THIS call already did rather
+   * than re-read a second time by the caller. Omitted, not `[]`, when the persona file had none
+   * (missing file, or no sample-lines section), so a plain `{ messages }` result still round-trips.
+   */
+  sampleLines?: string[];
 }
 
 /**
@@ -103,6 +110,10 @@ export async function chillTransform(
     const system = resolveSystemPrompt(cfg, input);
     if (system) body.system = system;
     if (input.single) body.single = true;
+    // Read regardless of which `system` branch fired above — the persona-leak guard this feeds
+    // (`chill-gate.ts`) needs to catch a fabricated sample line even when `input.system` or
+    // `cfg.system_override` replaced the persona voice in the actual request.
+    const sampleLines = personaSampleLines(input.personaPath);
 
     const res = await fetchFn(`${cfg.url}/chill`, {
       method: "POST",
@@ -124,7 +135,10 @@ export async function chillTransform(
       if (!trimmed || trimmed.length > MAX_MESSAGE_CHARS) return null;
       messages.push(trimmed);
     }
-    return system ? { messages, system } : { messages };
+    const result: ChillTransformResult = { messages };
+    if (system) result.system = system;
+    if (sampleLines.length > 0) result.sampleLines = sampleLines;
+    return result;
   } catch {
     // Timeout (AbortSignal), network error, JSON parse failure — all the same fail-open outcome.
     return null;

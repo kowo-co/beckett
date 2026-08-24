@@ -606,6 +606,106 @@ describe("deliverChilled — content substitution and injection (the 2026-08-21 
   });
 });
 
+describe("deliverChilled — opening-clause persona substitution (the 2026-08-24 incident)", () => {
+  // Channel 1520986792373911622, 22:50:41.399Z, exact evidence from `~/.beckett/chilltext-transforms.jsonl`:
+  // chilltext replaced only the OPENING CLAUSE of an otherwise faithful bubble with a verbatim
+  // `persona.md` sample-line fragment ("yeah that's broken."), leaving the rest of the message
+  // untouched. Recorded scores on the real delivery: echoFallback false, echoContentScore 0,
+  // echoFullScore 0 (wrong pair — see `chilltext-log.ts`), fidelityScore 0.9 (length-weighted:
+  // 90%+ of the bubble's tokens survived, so the whole-message containment check passed it). This
+  // is the regression the fix exists to catch: it fails on the pre-fix code (posts the corrupted
+  // bubble) and must pass after.
+  const AGENT_OUTPUT =
+    "hi booper. you got the mention right and the message wrong, which is more than most of the " +
+    "pipelines around here managed today";
+  const CORRUPTED_BUBBLE =
+    "yeah that's broken. you got the mention right and the message wrong, which is more than most " +
+    "of the pipelines around here managed today";
+
+  test("caught by the leading-clause check alone (no persona sample lines supplied): falls back to the original text", async () => {
+    const { gateway, posts } = fakeGateway();
+    await deliverChilled(CHAN, AGENT_OUTPUT, {
+      gateway,
+      cfg: cfg(),
+      input: "@booper did I get pinged right that time",
+      sleep: async () => {},
+      transform: async () => ({ messages: [CORRUPTED_BUBBLE] }),
+    });
+    expect(posts.map((p) => p.text)).toEqual([AGENT_OUTPUT]);
+    expect(posts.some((p) => p.text === CORRUPTED_BUBBLE)).toBe(false);
+  });
+
+  test("the leading-clause trip is logged with a fidelityScore near 0.9 and a leadingClauseFallback flag — proving it wasn't caught by the whole-message score", async () => {
+    const { gateway } = fakeGateway();
+    const logPath = tmpLogPath();
+    await deliverChilled(CHAN, AGENT_OUTPUT, {
+      gateway,
+      cfg: cfg(),
+      sleep: async () => {},
+      transform: async () => ({ messages: [CORRUPTED_BUBBLE] }),
+      logPath,
+    });
+    const rows = readChillTransformLog(logPath);
+    const bubbles = rows[0]!.bubbles!;
+    const dropped = bubbles.find((b) => b.rewritten === CORRUPTED_BUBBLE);
+    expect(dropped).toBeDefined();
+    expect(dropped!.posted).toBeNull();
+    expect(dropped!.leadingClauseFallback).toBe(true);
+    expect(dropped!.leadingClauseScore).toBe(0);
+    // The whole-message fidelity score alone would NOT have caught this — confirming the length-
+    // weighted blind spot the leading-clause check exists to close.
+    expect(dropped!.fidelityScore).toBeGreaterThanOrEqual(0.85);
+    const fallback = bubbles.find((b) => b.posted === AGENT_OUTPUT);
+    expect(fallback).toBeDefined();
+    expect(fallback!.rewritten).toBeNull();
+  });
+
+  test("caught by the persona sample-line guard when the transform echoes back the matching persona clauses", async () => {
+    // Same corrupted bubble, but this time exercised via the OTHER independent guard: chillTransform
+    // echoes back the persona.md sample lines it read for this call (`ChillTransformResult.sampleLines`),
+    // and the corrupted bubble contains "yeah that's broken" verbatim — a clause of the real
+    // persona.md sample line "yeah that's broken. i know why. gimme 10" — which AGENT_OUTPUT never did.
+    const { gateway, posts } = fakeGateway();
+    const logPath = tmpLogPath();
+    await deliverChilled(CHAN, AGENT_OUTPUT, {
+      gateway,
+      cfg: cfg(),
+      sleep: async () => {},
+      transform: async () => ({
+        messages: [CORRUPTED_BUBBLE],
+        sampleLines: [
+          "yeah that's broken. i know why. gimme 10",
+          "pushed the fix. the bug was in your commit btw, not mine. skill issue",
+        ],
+      }),
+      logPath,
+    });
+    expect(posts.map((p) => p.text)).toEqual([AGENT_OUTPUT]);
+    const rows = readChillTransformLog(logPath);
+    const bubble = rows[0]!.bubbles![0]!;
+    expect(bubble.personaLeak).toBe(true);
+    expect(bubble.personaLeakLine).toBe("yeah that's broken");
+    expect(bubble.posted).toBe(AGENT_OUTPUT);
+  });
+
+  test("a clause the agent's own output ALSO contains is not flagged as a persona leak", async () => {
+    // The persona guard must not punish Beckett for legitimately writing in its own established
+    // voice — only a clause that's fabricated (absent from `agentOutput`) counts as a leak.
+    const { gateway, posts } = fakeGateway();
+    const text = "yeah that's broken. i know why. gimme 10 and it'll be fixed";
+    await deliverChilled(CHAN, text, {
+      gateway,
+      cfg: cfg(),
+      sleep: async () => {},
+      transform: async () => ({
+        messages: [text],
+        sampleLines: ["yeah that's broken. i know why. gimme 10"],
+      }),
+    });
+    expect(posts.map((p) => p.text)).toEqual([text]);
+  });
+});
+
 describe("deliverChilled — a bubble that echoes the rewrite's own instructions falls back", () => {
   // Channel 1520986792373911622, 2026-08-20 01:16: chilltext posted a fragment of its OWN
   // delivery-format instructions ("return only the rewritten chat message or messages, separated

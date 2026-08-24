@@ -171,6 +171,43 @@ describe("chillTransform — the contract POST", () => {
   });
 });
 
+describe("chillTransform — sampleLines (persona-leak guard feed)", () => {
+  test("the persona file's sample lines are echoed back on the result", async () => {
+    const fetchFn = okFetch({ messages: ["ok"] });
+    const persona = join(tmp(), "persona.md");
+    writeFileSync(persona, "## sample lines\n\ngood:\n> yeah that's broken. i know why. gimme 10\n");
+
+    const result = await chillTransform(cfg(), { agentOutput: "hi", personaPath: persona }, fetchFn);
+    expect(result?.sampleLines).toEqual(["yeah that's broken. i know why. gimme 10"]);
+  });
+
+  test("omitted, not [], when the persona has no sample-lines section", async () => {
+    const fetchFn = okFetch({ messages: ["hey", "cool"] });
+    const persona = join(tmp(), "persona.md");
+    writeFileSync(persona, "# persona: beckett\n\nno sample lines here");
+
+    const result = await chillTransform(cfg(), { agentOutput: "hi", personaPath: persona }, fetchFn);
+    expect(result?.sampleLines).toBeUndefined();
+  });
+
+  test("omitted, not [], when the persona is missing entirely — a plain result still round-trips", async () => {
+    const result = await chillTransform(cfg(), { agentOutput: "hi", personaPath: noPersona() }, okFetch({ messages: ["hey", "cool"] }));
+    expect(result).toEqual({ messages: ["hey", "cool"] });
+  });
+
+  test("sampleLines is read even when cfg.system_override replaces the system prompt entirely", async () => {
+    const persona = join(tmp(), "persona.md");
+    writeFileSync(persona, "## sample lines\n\ngood:\n> yeah that's broken. i know why. gimme 10\n");
+    const result = await chillTransform(
+      cfg({ system_override: "be snarky and brief" }),
+      { agentOutput: "hi", personaPath: persona },
+      okFetch({ messages: ["ok"] }),
+    );
+    expect(result?.system).toBe("be snarky and brief");
+    expect(result?.sampleLines).toEqual(["yeah that's broken. i know why. gimme 10"]);
+  });
+});
+
 describe("chillTransform — fail-open matrix (every case returns null, never throws)", () => {
   test("non-2xx status", async () => {
     const result = await chillTransform(cfg(), { agentOutput: "hi" }, okFetch({ error: "boom" }, 500));
