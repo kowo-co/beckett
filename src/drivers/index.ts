@@ -22,11 +22,6 @@ import { PiDriver, piPreflight } from "./pi.ts";
 import { CursorDriver, cursorPreflight } from "./cursor.ts";
 import { activeCooldown, clearCooldown } from "./cooldown.ts";
 
-export { ClaudeDriver } from "./claude.ts";
-export { CodexDriver } from "./codex.ts";
-export { PiDriver } from "./pi.ts";
-export { CursorDriver } from "./cursor.ts";
-
 /** Builds a fresh driver instance (one driver == one harness process). */
 export type DriverFactory = (config: Config, logger?: Logger) => HarnessDriver;
 

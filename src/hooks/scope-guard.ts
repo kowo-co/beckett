@@ -248,16 +248,8 @@ export function resolveConfig(
 }
 
 // =======================================================================================
-// Settings/env producers — the wire from manager → claude spawn (Spec 02 §8.2)
+// Settings producers — the wire from manager → claude spawn (Spec 02 §8.2)
 // =======================================================================================
-
-/** The env vars a driver may set on the claude process (env-var fallback path). */
-export function scopeGuardEnv(workspace: string, owned: string[]): Record<string, string> {
-  return {
-    [WORKTREE_ENV]: workspace,
-    [OWNED_GLOBS_ENV]: owned.join(GLOB_SEP),
-  };
-}
 
 /**
  * Return the {@link HookSpec} that registers this hook for a worker. Bakes the root +

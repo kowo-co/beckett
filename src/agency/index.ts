@@ -1,23 +1,15 @@
 /**
- * Beckett — Identity & Agency: the action-class gate + GitHub agency (`src/agency/index.ts`)
+ * Beckett — Identity & GitHub agency (`src/agency/index.ts`)
  * =======================================================================================
- * Implements the {@link Agency} contract (Spec 07): the single choke point through which
- * every outward action funnels, classified as one of three classes —
+ * Beckett's identity (`loadIdentity`) and everything that reaches GitHub: the `gh` CLI
+ * wrapper, the App/PAT credential resolution, branch push, PR open/update/review/merge,
+ * issues, and the publish-via-PR path.
  *
- *   - **FREE** — reversible/internal (branch, commit, PR-open/update, comment/review,
- *     email read/label/draft): just do it, log it. The default and the bulk of activity.
- *   - **HANDSHAKE_GATED** — outbound but expected (merge of UNREVIEWED work, email-send):
- *     do all the work up to the irreversible click, stage a {@link PendingAction}, surface
- *     the **delivery handshake** ("PR's up — review or merge?"), and execute only on a `go`.
- *     A merge whose review already passed (`ctx.reviewed`) is FREE — finished work ships.
- *   - **ALWAYS_ASK** — dangerous/irreversible-at-scale (force-push shared, repo/account
- *     admin, permanent delete, publish-at-scale/money): refused on the unattended path.
- *     `deploy` of Beckett's own surfaces is FREE — its safeguards live in the deploy flow
- *     (dirty-tree refusal, ff-only, typecheck, health read-back), not in a permission prompt.
- *
- * `classify()` is **pure and total** — an unknown action type defaults to ALWAYS_ASK
- * (fail-closed, Spec 07 §2.3). This is the security invariant: if it isn't classified FREE
- * or HANDSHAKE_GATED, it cannot happen on the autonomous path.
+ * Action permissioning does NOT live here. Each capability/extension module declares a
+ * static `actionClass` field ({@link ActionClass}, `src/capability/index.ts`) which
+ * `src/ext/contract.ts::effectiveActionClass` reads — that is the one live gate. The old
+ * Spec 07 `classifyAction(type, ctx)` table and its pending-action handshake types were
+ * superseded by that declaration style and were removed once nothing called them.
  *
  * GitHub agency (Spec 07 §3) rides ONE credential for both git transport (`git push` via a
  * credential helper that reads the secret from the *environment*, never argv) and the API (`gh`
@@ -26,22 +18,12 @@
  * refreshed before expiry; the legacy `GITHUB_PAT` path still works when no app is configured.
  * If NEITHER is configured, GitHub work **degrades gracefully**: branch + diff stay local, and
  * delivery reports {@link PR_PENDING_CREDS_NOTE} — that is correct behavior, not a stub.
- *
- * Gmail is OUT of v0 scope (Spec 12 §3): the taxonomy stays *aware* of `gmail.*` (classify
- * still routes draft→FREE, send→HANDSHAKE_GATED), and the send handshake string exists, but
- * no mail client is implemented here.
  */
 
 import { tmpdir } from "node:os";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
-  ActionType,
-  ActionContext,
-  GateActionResult,
-  HandshakeSpec,
-  PendingAction,
-  PendingActionClass,
   GitHubClient,
   OpenPRParams,
   UpdatePRParams,
@@ -53,7 +35,6 @@ import type {
   Paths,
   Logger,
 } from "../types.ts";
-import { ActionClass } from "../types.ts";
 import type {
   BranchCardCheckSummary,
   GitHubBranchCard,
@@ -63,7 +44,6 @@ import type {
   PrSignals,
 } from "../github/types.ts";
 import type { GitHubActivityCommit, GitHubActivityReader, GitHubMergedPullRequest } from "../github/activity.ts";
-import { pendingActionId } from "../ids.ts";
 import { log as rootLog } from "../log.ts";
 import { childEnv } from "../env.ts";
 import { SCAFFOLDING_DIR } from "../worker/worktree.ts";
@@ -75,24 +55,6 @@ import { landBranch, LandError, type LandClient } from "../cli/land.ts";
 // =======================================================================================
 // Errors
 // =======================================================================================
-
-/**
- * Thrown by {@link BeckettAgency.perform} for an ALWAYS_ASK action on the unattended path
- * (Spec 07 §2.4). There is no `refused` member of {@link GateActionResult} by design — the
- * gate refuses by throwing, fail-closed.
- */
-export class GateRefused extends Error {
-  constructor(
-    readonly actionType: ActionType,
-    readonly context: ActionContext,
-  ) {
-    super(
-      `agency: action "${actionType}" is ALWAYS_ASK and cannot be performed unattended ` +
-        `(Spec 07 §2.3) — it requires an explicit, specific jawrooo instruction`,
-    );
-    this.name = "GateRefused";
-  }
-}
 
 /**
  * Thrown by the GitHub client when NO credential is configured — neither the GitHub App
@@ -110,16 +72,6 @@ export class GitHubUnavailableError extends Error {
   }
 }
 
-// =======================================================================================
-// Handshake prompt strings (Spec 07 §3.4 / §4.4; Spec 00 §3 DELIVER)
-// =======================================================================================
-
-/** The canonical short merge handshake from Spec 00 §3 DELIVER. */
-export const MERGE_HANDSHAKE_SHORT = "PR's up — review or merge?";
-
-/** The canonical send handshake (Gmail is out of v0 scope; kept for taxonomy awareness). */
-export const SEND_EMAIL_HANDSHAKE = "drafted it — send as me, or you handle it?";
-
 /**
  * The DELIVER note when GitHub creds are absent: the work is real and on a local branch,
  * the PR just can't be opened yet (Spec 07 §3; v0 brief — this is correct, not a failure).
@@ -128,141 +80,6 @@ export const PR_PENDING_CREDS_NOTE =
   "PR pending GitHub creds — the work is committed on a local branch; " +
   "add the GitHub App credentials (GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY_PATH) to " +
   "~/.beckett/.env and I'll push it and open the PR.";
-
-/** The full, voiced merge handshake line (Spec 07 §3.4). */
-export function mergeHandshakePrompt(opts: {
-  prNumber: number;
-  taskTitle?: string;
-  base?: string;
-}): string {
-  const what = opts.taskTitle ? `I finished ${opts.taskTitle}. ` : "";
-  const base = opts.base ?? "main";
-  return `${what}PR #${opts.prNumber} is up and green — want to review it yourself, or should I merge to ${base}?`;
-}
-
-/**
- * Build the {@link HandshakeSpec} for a merge-to-main delivery handshake. The payload carries
- * everything needed to rehydrate the merge after a restart (Spec 07 §5.3 — no closure state
- * beyond `ctx`/payload).
- */
-export function mergeHandshakeSpec(opts: {
-  repo: string;
-  prNumber: number;
-  prUrl?: string;
-  strategy?: MergeStrategy;
-  taskTitle?: string;
-  base?: string;
-  expiresAt?: number;
-}): HandshakeSpec {
-  return {
-    actionClass: "merge_pr",
-    promptText: mergeHandshakePrompt(opts),
-    payload: {
-      repo: opts.repo,
-      number: opts.prNumber,
-      url: opts.prUrl,
-      strategy: opts.strategy ?? "squash",
-    },
-    expiresAt: opts.expiresAt,
-  };
-}
-
-/** Default handshake window: 24h (Spec 07 §5.4; no dedicated config key in v0 — see report). */
-const DEFAULT_HANDSHAKE_MS = 24 * 60 * 60 * 1000;
-
-// =======================================================================================
-// classify — the full Spec 07 §2.3 table, pure & total, fail-closed
-// =======================================================================================
-
-/** Shared/protected branches force-push is never allowed to rewrite (Spec 07 §3.5). */
-const SHARED_BRANCH = [/^main$/, /^master$/, /^release\//, /^develop$/];
-
-/** A ref is "shared" if it matches a protected pattern or is outside Beckett's namespace. */
-export function isSharedBranch(ref: string): boolean {
-  if (!ref) return true; // unknown ref → treat as shared (fail-closed)
-  return SHARED_BRANCH.some((re) => re.test(ref)) || !ref.startsWith("beckett/");
-}
-
-/**
- * Classify an action into its {@link ActionClass} (Spec 07 §2.3). Pure and total: every
- * input returns exactly one class, and any unrecognized type defaults to ALWAYS_ASK
- * (fail-closed). Accepts both the frozen-contract action names (`gh.branch.push`, …) and the
- * Spec 07 prose names (`git.branch.push`, `git.commit`, `git.force_push`, `gh.pr.comment`,
- * …) so callers can use either vocabulary.
- */
-export function classifyAction(type: ActionType, ctx: ActionContext = {}): ActionClass {
-  switch (type) {
-    // ── FREE: reversible / internal (the default & the bulk) ──
-    case "gh.branch.push":
-    case "git.branch.push":
-    case "git.commit":
-    case "gh.pr.open":
-    case "gh.pr.update":
-    case "gh.pr.comment":
-    case "gh.pr.review":
-    case "gmail.read":
-    case "gmail.label":
-    case "gmail.draft":
-    case "fs.write": // in-scope writes (the worker's owned globs)
-    case "memory.write":
-    case "task.spawn":
-    case "model.call":
-      return ActionClass.FREE;
-
-    // ── HANDSHAKE_GATED: outbound but the expected finish line ──
-    case "gh.pr.merge":
-      // A green, reviewed PR is finished work — merging it IS the delivery, not a question
-      // (volition doctrine). Unreviewed work keeps the handshake, fail-closed.
-      return ctx.reviewed === true ? ActionClass.FREE : ActionClass.HANDSHAKE_GATED;
-    case "gmail.send":
-      return ActionClass.HANDSHAKE_GATED; // internal OR external (Spec 07 §4.4)
-
-    // ── conditional: depends on the ref / merged-state (Spec 07 §2.3) ──
-    case "git.force_push":
-    case "gh.force_push":
-      // Rewriting shared history is never unattended; own beckett/* branch is gated.
-      return isSharedBranch(String(ctx.ref ?? "")) ? ActionClass.ALWAYS_ASK : ActionClass.HANDSHAKE_GATED;
-    case "gh.branch.delete":
-      // Deleting a merged branch is tidy-up (FREE); unmerged work needs a confirm.
-      return ctx.merged === true ? ActionClass.FREE : ActionClass.HANDSHAKE_GATED;
-
-    // ── FREE: deploying Beckett's own surfaces. The safeguards live in the deploy flow
-    // itself (refuses a dirty tree, ff-only, typecheck gate, health read-back, revertable
-    // via git revert + redeploy) — not in a permission prompt. Volition doctrine: finished
-    // work that only matters live gets deployed, not parked awaiting a "go".
-    case "deploy":
-      return ActionClass.FREE;
-
-    // ── ALWAYS_ASK: dangerous / out of remit / irreversible at scale ──
-    case "gh.repo.admin":
-    case "gh.branch_protection.edit":
-    case "gmail.delete":
-    case "gmail.account.settings":
-    case "fs.write_outside_scope":
-    case "publish": // making something public at scale (npm et al) — not the same as a zone deploy
-    case "money":
-      return ActionClass.ALWAYS_ASK;
-
-    // ── fail-closed: unknown action types are never run unattended ──
-    default:
-      return ActionClass.ALWAYS_ASK;
-  }
-}
-
-/** Map an action type to the persisted {@link PendingActionClass} (Spec 09 §2.11 CHECK set). */
-function pendingClassFor(type: ActionType): PendingActionClass {
-  switch (type) {
-    case "gh.pr.merge":
-      return "merge_pr";
-    case "gmail.send":
-      return "send_email";
-    case "git.force_push":
-    case "gh.force_push":
-      return "force_push";
-    default:
-      return "other";
-  }
-}
 
 // =======================================================================================
 // subprocess helper — stdin always closed; forbidden API keys always stripped

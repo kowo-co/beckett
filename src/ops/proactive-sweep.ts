@@ -46,9 +46,6 @@ import type { Logger } from "../types.ts";
 /** The three kinds of rot the sweep looks for. Each maps to one branch prefix and one PR. */
 export type FindingKind = "ci" | "dependencies" | "readme-links";
 
-/** All three kinds, in the order the sweep runs them. */
-export const FINDING_KINDS: readonly FindingKind[] = ["ci", "dependencies", "readme-links"] as const;
-
 /** A CI check GitHub reports as not-green on the default branch's tip. */
 export interface FailingCheck {
   name: string;

@@ -1,6 +1,0 @@
-bun test v1.3.14 (0d9b296a)
-{"level":"info","ts":"2026-08-05T06:01:31.525Z","component":"e2e-resume.driver.claude","msg":"spawning claude worker","bin":"/tmp/beckett-resume-h1YhqR/fake-claude.sh","workspace":"/tmp/beckett-resume-h1YhqR/worktree","isResume":false,"sessionId":"bffabb93-407b-48da-97f3-c4cf7fded2e9","model":"claude-sonnet-4-5","effort":"low"}
-{"level":"info","ts":"2026-08-05T06:01:32.180Z","component":"e2e-resume.driver.claude","msg":"relaunching with --resume","sessionId":"bffabb93-407b-48da-97f3-c4cf7fded2e9"}
-{"level":"info","ts":"2026-08-05T06:01:32.180Z","component":"e2e-resume.driver.claude","msg":"spawning claude worker","bin":"/tmp/beckett-resume-h1YhqR/fake-claude.sh","workspace":"/tmp/beckett-resume-h1YhqR/worktree","isResume":true,"sessionId":"bffabb93-407b-48da-97f3-c4cf7fded2e9","model":"claude-sonnet-4-5","effort":"low"}
-{"level":"warn","ts":"2026-08-05T06:01:32.974Z","component":"e2e-resume.driver.claude","msg":"aborting worker","reason":"test teardown","sessionId":"bffabb93-407b-48da-97f3-c4cf7fded2e9"}
-{"level":"info","ts":"2026-08-05T06:01:32.976Z","component":"e2e-resume.driver.claude","msg":"harness leader exited on SIGTERM — sweeping remaining process group","pid":1089186}

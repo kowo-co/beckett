@@ -50,7 +50,7 @@ import { createProposal, listProposals } from "../proposal/store.ts";
 import { localDate, parseModelResult } from "./model.ts";
 import { appendSpendRecord, FREE_TIME_SPEND_TICKET_ID, type SpendOutcome } from "../spend.ts";
 
-export { freeTimeDeferReason, type FreeTimeBusySignals } from "./gate.ts";
+export { freeTimeDeferReason } from "./gate.ts";
 
 /** Session ids are the date plus a short random — also the retention sweep's traversal guard. */
 export const FREE_TIME_ID_RE = /^\d{4}-\d{2}-\d{2}-[0-9a-f]{8}$/;

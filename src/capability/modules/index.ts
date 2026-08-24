@@ -22,14 +22,8 @@ import { createMailCapability } from "./mail.ts";
 import { createMemoryCapability } from "./memory.ts";
 import { createSecretCapability } from "./secret.ts";
 
-export { createDeployCapability, createDnsCapability } from "./cloudflare.ts";
-export { createGithubCapability } from "./github.ts";
-export { createImageCapability } from "./image.ts";
-export { createMailCapability } from "./mail.ts";
-export { createMemoryCapability } from "./memory.ts";
-export { createSecretCapability } from "./secret.ts";
 // V6 Phase 1 (docs/v6-architecture.md §6): the first organs on the extension contract. Their
-// table entries above are the asCapability projections; these are the extensions themselves.
+// FACTORIES entries below are the asCapability projections; these are the extensions themselves.
 export { createImageExtension } from "./image.ts";
 export { createSecretExtension } from "./secret.ts";
 // V6 Phase 4 (docs/v6-architecture.md §6): the catalog cutover — the remaining bespoke modules
@@ -39,33 +33,13 @@ export { createSecretExtension } from "./secret.ts";
 export { createGithubExtension } from "./github.ts";
 export { createDnsExtension, createDeployExtension } from "./cloudflare.ts";
 export { createMailExtension } from "./mail.ts";
-// V6 Phase 6: the memory organ proper — lifecycle owns the daemon's warm store + the nightly
-// maintain loop (startPhase "late"), capabilities memory.recall/memory.remember derive their
-// Audience from the token-derived origin INSIDE memory code (docs/v6-architecture.md §7). The
-// CLI verbs are carried and projected into their spine slot exactly as before.
-export { createMemoryExtension } from "./memory.ts";
-export type { MemoryExtension, MemoryExtensionDeps } from "./memory.ts";
 // V6 Phase 2: the first STATEFUL organ — lifecycle wraps the browser host subprocess + the
 // background agent. Not in the v5 FACTORIES table: browser never had a spine slot (its CLI
 // verb and bus bodies live in cli/beckett.ts and the concierge respectively).
 export { createBrowserExtension } from "./browser.ts";
-export type { BrowserExtension, BrowserExtensionDeps } from "./browser.ts";
-// V6 Phase 3: the quick organ — lifecycle wraps the short-lived specialist runner; the CLI
-// verb is carried and projected into its spine slot. Not in the v5 FACTORIES table: like
-// browser, quick never had one (its bus bodies live in the concierge).
-export { createQuickExtension } from "./quick.ts";
-export type { QuickExtension, QuickExtensionDeps } from "./quick.ts";
-// V6 Phase 3b: the routines organ — the first extension whose lifecycle.start runs a
-// BACKGROUND LOOP (the cron scheduler, startPhase "late"); the CLI verb is carried and
-// projected into its spine slot. Not in the v5 FACTORIES table: like browser/quick, routine
-// never had one (its spine slot was an inline literal in cli/beckett.ts).
-export { createRoutinesExtension } from "./routines.ts";
-export type { RoutinesExtension, RoutinesExtensionDeps } from "./routines.ts";
-// V6 Phase 3b (reminders, ro's ask): same shape as routines — the tick loop is a BACKGROUND
-// LOOP (startPhase "late"); the CLI verb is carried and projected into its spine slot. Not in
-// the v5 FACTORIES table: like routine, reminders never had one.
-export { createRemindersExtension } from "./reminders.ts";
-export type { RemindersExtension, RemindersExtensionDeps } from "./reminders.ts";
+// The memory/quick/routines/reminders organs are NOT re-exported here — `shell/main.ts`
+// imports each from its own module file (`./memory.ts`, `./quick.ts`, …), which is the one
+// import style this table is standardizing on.
 
 /** The capability-id → factory table (the analog of `drivers/index.ts::FACTORIES`). */
 const FACTORIES: Record<string, CapabilityFactory> = {

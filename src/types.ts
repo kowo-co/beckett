@@ -252,17 +252,6 @@ export interface DoneSignal {
 // =======================================================================================
 
 
-/** A paused worker's captured checkpoint (Spec 03 §5.2). */
-export interface Checkpoint {
-  workerId: string;
-  at: number;
-  sessionId: string;
-  diff: string; // git diff (captured, not applied)
-  diffStat: { files: number; bytes: number };
-  lastTranscriptOffset: number;
-  counters: WorkerSpend;
-}
-
 
 // =======================================================================================
 // SECTION 9 — Brain outputs (Spec 06)
@@ -620,71 +609,15 @@ export interface Identity {
   osUser: string; // "beckett" on loom-desk
 }
 
-/** Every action is exactly one class (Spec 07 §2.2). */
+/**
+ * Every action is exactly one class (Spec 07 §2.2). Declared per capability/extension module
+ * and read by `src/ext/contract.ts::effectiveActionClass`.
+ */
 export enum ActionClass {
   FREE = "FREE", // reversible/internal → just do it, log it
-  HANDSHAKE_GATED = "HANDSHAKE_GATED", // outward but expected → create PendingAction, ask once
+  HANDSHAKE_GATED = "HANDSHAKE_GATED", // outward but expected → ask once before the irreversible step
   ALWAYS_ASK = "ALWAYS_ASK", // dangerous/irreversible-at-scale → never unattended
 }
-
-/** Action types the gate classifies (Spec 07 §3). Open-ended core. */
-export type ActionType =
-  | "gh.branch.push"
-  | "gh.pr.open"
-  | "gh.pr.update"
-  | "gh.pr.review"
-  | "gh.pr.merge"
-  | "gh.branch.delete"
-  | "gmail.draft"
-  | "gmail.send"
-  | "fs.write"
-  | "memory.write"
-  | (string & {});
-
-/** Context for an action-class decision (Spec 07 §3). */
-export interface ActionContext {
-  ref?: string; // git ref / branch
-  repo?: string;
-  external?: boolean; // crosses an org boundary?
-  [k: string]: unknown;
-}
-
-/** The irreversible class of a staged pending action (Spec 09 §2.11). */
-export type PendingActionClass =
-  | "merge_pr"
-  | "send_email"
-  | "force_push"
-  | "external_post"
-  | "other";
-
-/** A staged irreversible action awaiting a handshake answer (Spec 07 §5; Spec 09 §2.11). */
-export interface PendingAction {
-  id: string;
-  taskId: string;
-  userId: string;
-  actionClass: PendingActionClass;
-  payload: Record<string, unknown>; // the staged op: {pr_url}|{draft_id,to}|…
-  promptText: string; // the handshake question
-  postedMsgId?: string;
-  status: "pending" | "approved" | "rejected" | "expired" | "executed";
-  decidedBy?: string;
-  createdAt: number;
-  decidedAt?: number;
-  expiresAt?: number;
-}
-
-/** The handshake question + classification for a gated action (Spec 07 §5). */
-export interface HandshakeSpec {
-  actionClass: PendingActionClass;
-  promptText: string;
-  payload: Record<string, unknown>;
-  expiresAt?: number;
-}
-
-/** Result of a gate `perform` (Spec 07 §2.3). */
-export type GateActionResult<T> =
-  | { status: "done"; value: T }
-  | { status: "pending"; pendingAction: PendingAction };
 
 /** GitHub operations Beckett performs (Spec 07 §3.4). Most are FREE; merge is gated. */
 export interface GitHubClient {
@@ -1330,24 +1263,6 @@ export interface Config {
 // SECTION 15 — IPC envelope & command set (Spec 01 §7, Spec 10 §8)
 // =======================================================================================
 
-
-/** Daemon introspection reply for `status` (Spec 10 §7/§8.4). */
-export interface StatusReport {
-  pid: number;
-  uptimeMs: number;
-  bunVersion: string;
-  liveWorkers: number;
-  queuedNodes: number;
-  activeTasks: number;
-  discord: {
-    connected: boolean;
-    lastEventAgeMs: number | null;
-  };
-  recovery: {
-    recovering: boolean;
-    resumedWorkers: number;
-  };
-}
 
 // =======================================================================================
 // SECTION 16 — Module interfaces (dependency inversion; daemon wires concrete impls)
