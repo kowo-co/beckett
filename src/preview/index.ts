@@ -277,21 +277,3 @@ export class PreviewManager {
     return false;
   }
 }
-
-/**
- * The default reachability probe: a short-timeout GET that resolves true only on an actual HTTP
- * response below 500 (a 2xx/3xx/4xx means the tunnel + origin answered; a network error or 5xx
- * means it isn't really serving). Fails closed on any throw.
- */
-export async function fetchProbe(url: string, timeoutMs = 5000): Promise<boolean> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { method: "GET", redirect: "follow", signal: controller.signal });
-    return res.status < 500;
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timer);
-  }
-}

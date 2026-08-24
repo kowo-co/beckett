@@ -29,7 +29,6 @@ export const WATCH_SEEN_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 export const WATCH_POST_HISTORY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 
 export const WatchSeenItemSchema = z.object({ id: z.string(), firstSeenAt: z.string() });
-export type WatchSeenItem = z.infer<typeof WatchSeenItemSchema>;
 
 export const WatchPostRecordSchema = z.object({
   modelId: z.string(),

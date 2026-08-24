@@ -10,8 +10,6 @@
  * No deps; safe to import anywhere (it is owned by Foundation alongside types/config/paths).
  */
 
-import { appendFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
 import type { Logger, LogLevel } from "./types.ts";
 
 const LEVEL_ORDER: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40 };
@@ -93,25 +91,3 @@ export function makeLogger(component = "beckett"): Logger {
 
 /** The root logger. Most modules call `log.child("<component>")`. */
 export const log: Logger = makeLogger();
-
-/**
- * Append a prettified line to a worker's own log file under `<logsDir>/workers/<id>.log`.
- * Best-effort and synchronous (single-writer daemon); failures are swallowed so logging
- * never takes down the loop. Returns the file path written.
- */
-export function appendWorkerLog(
-  logsDir: string,
-  workerId: string,
-  line: string,
-): string {
-  const dir = join(logsDir, "workers");
-  const file = join(dir, `${workerId}.log`);
-  try {
-    mkdirSync(dir, { recursive: true });
-    const stamp = new Date().toISOString();
-    appendFileSync(file, `${stamp}  ${line}\n`);
-  } catch {
-    // swallow — per-worker pretty logs are a convenience, not a durability surface
-  }
-  return file;
-}

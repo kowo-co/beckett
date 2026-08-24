@@ -195,12 +195,10 @@ const RegistrySchema = z.object({
   startClaims: z.record(z.string(), z.object({ token: z.string().min(1), createdAt: z.string() })).default({}),
 });
 
-export type TaskCard = z.infer<typeof TaskCardSchema>;
 export type TaskRunLink = z.infer<typeof RunLinkSchema>;
 export type TaskGitLink = z.infer<typeof GitLinkSchema>;
 export type TaskPullRequestLink = z.infer<typeof PullRequestLinkSchema>;
 export type TaskPublicationLink = z.infer<typeof PublicationLinkSchema>;
-export type TaskPreviewLink = z.infer<typeof PreviewLinkSchema>;
 export type TaskDiffSummary = z.infer<typeof DiffSummarySchema>;
 export type TaskBranch = z.infer<typeof TaskBranchSchema>;
 export type WorkTask = z.infer<typeof TaskSchema>;

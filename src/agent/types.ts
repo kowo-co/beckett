@@ -24,7 +24,6 @@ import { z } from "zod";
  */
 export const AGENT_HARNESSES = ["claude", "codex", "pi"] as const;
 export const AgentHarnessSchema = z.enum(AGENT_HARNESSES);
-export type AgentHarness = z.infer<typeof AgentHarnessSchema>;
 
 /**
  * Reasoning depth. Mirrors `Effort` in `src/types.ts`. `""` means "let the harness default decide"
@@ -32,7 +31,6 @@ export type AgentHarness = z.infer<typeof AgentHarnessSchema>;
  */
 export const AGENT_EFFORTS = ["", "low", "medium", "high", "xhigh"] as const;
 export const AgentEffortSchema = z.enum(AGENT_EFFORTS);
-export type AgentEffort = z.infer<typeof AgentEffortSchema>;
 
 /** The harness seat: which CLI + model + reasoning depth the agent spawns with. */
 export const AgentModelSchema = z.object({
@@ -40,7 +38,6 @@ export const AgentModelSchema = z.object({
   model: z.string().min(1),
   effort: AgentEffortSchema.default("medium"),
 });
-export type AgentModel = z.infer<typeof AgentModelSchema>;
 
 export const AgentDefinitionSchema = z.object({
   /** Stable id/name, kebab-case (e.g. "release-notes-writer"). */

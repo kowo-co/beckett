@@ -20,5 +20,4 @@ export function prefixedId(prefix: string, len = SHORT_LEN): string {
   return `${prefix}_${hex().slice(0, len)}`;
 }
 
-export const pendingActionId = (): string => prefixedId("pa");
 export const workerId = (): string => prefixedId("wk");

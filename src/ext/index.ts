@@ -10,10 +10,5 @@
 
 export * from "./contract.ts";
 export { ExtensionRegistry, renderCatalogBlock } from "./registry.ts";
-export type {
-  CatalogEntry,
-  ExtensionHealthReport,
-  ResolvedCapability,
-} from "./registry.ts";
 export { asCapability } from "./compat.ts";
 export { createPingExtension } from "./example.ts";
