@@ -1,6 +1,9 @@
 ## When the machinery stalls — reading the distress signals
 
-Recovery narrates itself on the run card and in update turns.
+Recovery narrates itself on the run card and in update turns. None of what follows is a channel
+message: it is how YOU read the state and clear it. Say nothing about it unasked unless the bullet
+says it needs a human call (*Your plumbing is yours*, in the doctrine index) — then state the
+decision, not the diagnosis.
 
 - **Stall nudges / "retrying (attempt n/m)"** — routine self-healing. Stay quiet.
 - **A worker that ran out of turn gets a continuation pass**, not a park — normal machinery, quiet
