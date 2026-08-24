@@ -197,6 +197,16 @@ test("a plan never carries a secret value — only the jingle entry NAME", () =>
   expect(JSON.stringify(plan).toLowerCase()).not.toContain("password");
 });
 
+test("self-repair action → the SELF lane with selfRepair set: no agent, no browser, no creds", () => {
+  const plan = buildDispatchPlan(routine({ kind: "self-repair" }));
+  expect(plan.lane).toBe("self");
+  expect(plan.selfRepair).toBe(true);
+  expect(plan.freeTime).toBe(false);
+  expect(plan.agentId).toBeNull();
+  expect(plan.browserTask).toBeNull();
+  expect(plan.credsEntry).toBeNull();
+});
+
 test("free-time action → the SELF lane with freeTime set: no agent, no browser, no creds", () => {
   const plan = buildDispatchPlan(routine({ kind: "free-time" }));
   expect(plan.lane).toBe("self");
@@ -216,6 +226,7 @@ test("every non-free-time action plans with freeTime=false — only the free-tim
     { kind: "self", prompt: "sweep" },
     { kind: "spend-report", since: "7d" },
     { kind: "x-shitpost", account: "@a", credsEntry: "x-account" },
+    { kind: "self-repair" },
   ];
   for (const action of kinds) expect(buildDispatchPlan(routine(action)).freeTime).toBe(false);
 });

@@ -244,6 +244,17 @@ export const RoutineActionSchema = z.discriminatedUnion("kind", [
     /** Authenticated requester the fire is attributed to (optional; owner env fallback). */
     requesterId: z.string().optional(),
   }),
+  /**
+   * `self-repair` (docs/self-repair.md): nightly error clustering + capped run filing. Rides
+   * the SAME self-lane fork as free-time — no agent, no browser, no credentials — executed as
+   * `beckett self-repair run`. Does not defer when the machine is busy — a queue insert is not
+   * contention.
+   */
+  z.object({
+    kind: z.literal("self-repair"),
+    channelId: z.string().optional(),
+    requesterId: z.string().optional(),
+  }),
   z.object({
     kind: z.literal("spend-report"),
     /** Rolling window billed, as a `parseSince` string (e.g. "7d"). Default matches the weekly cadence. */

@@ -137,11 +137,15 @@ export interface RoutinesExtensionDeps {
    */
   spawnFreeTime?: (argv: string[]) => void;
   /**
+   * How the nightly self-repair pass (docs/self-repair.md) is launched. Default: a detached
+   * `beckett self-repair run` subprocess. Same injection reason as `spawnFreeTime`.
+   */
+  spawnSelfRepair?: (argv: string[]) => void;
+  /**
    * Is the worker fleet doing nothing right now? Bound by the daemon to the dispatcher's live
    * census. Free time is the ONLY consumer: an unprompted session must never compete with real
-   * work for the machine, so a busy fleet defers the fire (before the period is claimed) instead
-   * of running alongside it. Unwired ⇒ treated as idle: the CLI never arms a scheduler, and a
-   * daemon that somehow lacks the accessor should still get its free time rather than starve.
+   * work. Nightly self-repair does NOT consult this — filing a run is a queue insert (ro,
+   * 2026-08-24). Unwired ⇒ treated as idle.
    */
   isFleetIdle?: () => boolean;
   /** Is the concierge's turn queue empty? Second half of the same idle gate, same defaults. */
@@ -455,6 +459,29 @@ export const createRoutinesExtension =
       ctx.logger.info("free-time session launched off-process", { routineId: plan.routineId, pid: proc.pid });
     }
 
+    function spawnSelfRepair(
+      plan: RoutineDispatchPlan,
+      origin: { channelId: string; requesterId: string },
+    ): void {
+      const argv = [
+        "self-repair", "run",
+        "--routine", plan.routineId,
+        "--requester", origin.requesterId,
+      ];
+      if (deps.spawnSelfRepair) {
+        deps.spawnSelfRepair(argv);
+        return;
+      }
+      const proc = Bun.spawn([process.execPath, BECKETT_CLI_ENTRY, ...argv], {
+        cwd: ctx.paths.home,
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      proc.unref?.();
+      ctx.logger.info("self-repair pass launched off-process", { routineId: plan.routineId, pid: proc.pid });
+    }
+
     /**
      * The scheduler's pre-claim veto ({@link RoutineDispatcher.deferReason}), free time only.
      * Consulted BEFORE the period is claimed, so a deferral costs the window and not the week:
@@ -766,6 +793,14 @@ export const createRoutinesExtension =
           spawnFreeTime(plan, { channelId, requesterId });
           return;
         }
+        if (plan.selfRepair) {
+          if (!ctx.config.self_repair.enabled) {
+            ctx.logger.info("self-repair fire refused: [self_repair] enabled=false", { routineId: plan.routineId });
+            return;
+          }
+          spawnSelfRepair(plan, { channelId, requesterId });
+          return;
+        }
         if (!plan.selfPrompt) throw new Error("self-lane routine is missing its prompt");
         const post = { routineId: plan.routineId, prompt: plan.selfPrompt, channelId };
         if (deps.wakeSelf) {
@@ -860,6 +895,13 @@ export const createRoutinesExtension =
         freeTime: {
           weekday: WeekdaySchema.parse(ft.weekday),
           window: { start: ft.window_start, end: ft.window_end, tz: ft.tz },
+        },
+        selfRepair: {
+          window: {
+            start: ctx.config.self_repair.window_start,
+            end: ctx.config.self_repair.window_end,
+            tz: ctx.config.self_repair.tz,
+          },
         },
         proactiveSweep: { repos: ctx.config.proactive_sweep.repos },
       };

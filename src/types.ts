@@ -1242,6 +1242,25 @@ export interface Config {
     /** Channel the optional one-line share posts to. Empty = the session says nothing to anyone. */
     channel_id: string;
   };
+  /**
+   * Nightly self-repair (docs/self-repair.md): read error surfaces, cluster recurring
+   * failures, file a capped number of runs against Beckett's own source. Never edits the
+   * running tree, never merges, never restarts the daemon.
+   */
+  self_repair: {
+    enabled: boolean;
+    window_start: string;
+    window_end: string;
+    tz: string;
+    /** Cheap model reserved for optional triage ranking. Clustering itself is deterministic. */
+    model: string;
+    min_count: number;
+    min_occasions: number;
+    file_cap: number;
+    lookback_days: number;
+    /** Share channel. Empty = fall back to `[free_time] channel_id`. */
+    channel_id: string;
+  };
   /** The social-media agent's chilltext chill pass (W4A tune): reuses `concierge.chilltext`. */
   social: {
     /** Route composed X posts through chilltext before they reach the browser lane. Default

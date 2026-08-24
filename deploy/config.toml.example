@@ -204,6 +204,18 @@ output_token_budget = 80000
 memories_per_session_max = 5
 channel_id = ""
 
+[self_repair]
+enabled = true
+window_start = "00:00"
+window_end = "00:30"
+tz = "America/Los_Angeles"
+model = "claude-sonnet-5"
+min_count = 2
+min_occasions = 2
+file_cap = 2
+lookback_days = 7
+channel_id = ""
+
 [social]
 chill = true
 

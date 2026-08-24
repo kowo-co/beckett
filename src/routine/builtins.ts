@@ -171,6 +171,12 @@ export const WEEKLY_SPEND_REPORT_ID = "weekly-spend-report";
 export const FREE_TIME_ID = "weekly-free-time";
 
 /**
+ * Id of the nightly self-repair routine (docs/self-repair.md): once a day around midnight PT,
+ * cluster recurring errors and file a capped number of runs against Beckett's own source.
+ */
+const SELF_REPAIR_ID = "nightly-self-repair";
+
+/**
  * Config-sourced overrides for the built-in definitions. Free time's schedule ships in
  * `[free_time]` config so a fresh install can be retimed without editing source; every other
  * builtin's window is a code constant. After the seed the routine store owns the timing — that
@@ -181,6 +187,7 @@ export const FREE_TIME_ID = "weekly-free-time";
  */
 export interface BuiltinRoutineOverrides {
   freeTime?: { weekday: Weekday; window: FuzzWindow };
+  selfRepair?: { window: FuzzWindow };
   /**
    * The proactive-sweep routine's opt-in repo list, from `[proactive_sweep] repos` in config.
    * Unlike `freeTime` (seed-only), this override is applied on EVERY load, not just the first
@@ -194,6 +201,11 @@ export interface BuiltinRoutineOverrides {
 const FREE_TIME_DEFAULT_SCHEDULE: { cadence: Cadence; window: FuzzWindow } = {
   cadence: { kind: "weekly", weekday: "sunday" },
   window: { start: "02:00", end: "05:00", tz: "America/Los_Angeles" },
+};
+
+const SELF_REPAIR_DEFAULT_SCHEDULE: { cadence: Cadence; window: FuzzWindow } = {
+  cadence: { kind: "daily" },
+  window: { start: "00:00", end: "00:30", tz: "America/Los_Angeles" },
 };
 
 /**
@@ -244,6 +256,9 @@ export function builtinRoutineDefs(
   const freeTime = overrides.freeTime
     ? { cadence: { kind: "weekly" as const, weekday: overrides.freeTime.weekday }, window: overrides.freeTime.window }
     : FREE_TIME_DEFAULT_SCHEDULE;
+  const selfRepair = overrides.selfRepair
+    ? { cadence: { kind: "daily" as const }, window: overrides.selfRepair.window }
+    : SELF_REPAIR_DEFAULT_SCHEDULE;
   return [
     ...DAILY_SHITPOST_IDS.map((id) => ({
       id,
@@ -359,6 +374,15 @@ export function builtinRoutineDefs(
       // key doubles as the once-per-week guard; the idle gate defers a busy night's fire WITHOUT
       // claiming the period, so a fleet that works through the window costs the week, not the fire.
       schedule: freeTime,
+    },
+    {
+      id: SELF_REPAIR_ID,
+      name: "nightly self-repair",
+      builtin: true,
+      enabled: true,
+      // Fires whether the box is busy: filing a run is a queue insert, not contention.
+      action: { kind: "self-repair" },
+      schedule: selfRepair,
     },
   ];
 }
