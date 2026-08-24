@@ -48,6 +48,9 @@ test("different routines get independent state", async () => {
 });
 
 test("seen-set is capped so a feed that never stops growing can't grow the file without limit", async () => {
+  // Fixed clock, same reason as "update() persists..." above: `update()` prunes seenIds older
+  // than WATCH_SEEN_MAX_AGE_MS against `now()`, and every fixture entry here shares one fixed
+  // firstSeenAt — an unpinned real clock eventually ages the whole batch out from under this test.
   const NOW = () => new Date("2026-07-25T00:00:00.000Z");
   const { store } = makeStore(NOW);
   const many = Array.from({ length: WATCH_SEEN_CAP + 50 }, (_, i) => ({

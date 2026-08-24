@@ -208,12 +208,41 @@ export const MAINTENANCE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 /** First pass waits out the boot burst (pollers priming, concierge starting). */
 export const MAINTENANCE_BOOT_DELAY_MS = 90_000;
 
+/** The scheduling primitives `startRoutineMaintenance` needs — injectable so a test can drive
+ *  the boot pass / interval ticks / stop() deterministically instead of racing real wall-clock
+ *  timers (a `setTimeout(5ms)`/`setInterval(20ms)` pair asserted against real `setTimeout` waits
+ *  is exactly the kind of race that only shows up under CI contention). Defaults to the real
+ *  global timers, unreffed so neither a test process nor a shutting-down daemon is kept alive. */
+interface MaintenanceScheduler {
+  setTimeout(cb: () => void | Promise<void>, ms: number): unknown;
+  setInterval(cb: () => void | Promise<void>, ms: number): unknown;
+  clearTimeout(handle: unknown): void;
+  clearInterval(handle: unknown): void;
+}
+
+const REAL_SCHEDULER: MaintenanceScheduler = {
+  setTimeout(cb, ms) {
+    const t = setTimeout(cb, ms);
+    t.unref?.();
+    return t;
+  },
+  setInterval(cb, ms) {
+    const t = setInterval(cb, ms);
+    t.unref?.();
+    return t;
+  },
+  clearTimeout: (h) => clearTimeout(h as Parameters<typeof clearTimeout>[0]),
+  clearInterval: (h) => clearInterval(h as Parameters<typeof clearInterval>[0]),
+};
+
 export interface RoutineMaintenanceDeps {
   /** `MemoryStore.maintain` (or anything with its shape). */
   maintain: (opts?: { dryRun?: boolean }) => Promise<MaintainReport>;
   logger: Logger;
   intervalMs?: number;
   initialDelayMs?: number;
+  /** Test seam — see {@link MaintenanceScheduler}. Defaults to the real global timers. */
+  scheduler?: MaintenanceScheduler;
 }
 
 /** Run maintenance shortly after boot and then on a daily timer. Failures are logged and
@@ -221,6 +250,7 @@ export interface RoutineMaintenanceDeps {
 export function startRoutineMaintenance(deps: RoutineMaintenanceDeps): { stop(): void } {
   const interval = deps.intervalMs ?? MAINTENANCE_INTERVAL_MS;
   const initial = deps.initialDelayMs ?? MAINTENANCE_BOOT_DELAY_MS;
+  const scheduler = deps.scheduler ?? REAL_SCHEDULER;
 
   const run = async () => {
     try {
@@ -250,15 +280,12 @@ export function startRoutineMaintenance(deps: RoutineMaintenanceDeps): { stop():
     }
   };
 
-  const first = setTimeout(() => void run(), initial);
-  const timer = setInterval(() => void run(), interval);
-  // Timers must not keep a test process (or a shutting-down daemon) alive.
-  first.unref?.();
-  timer.unref?.();
+  const first = scheduler.setTimeout(run, initial);
+  const timer = scheduler.setInterval(run, interval);
   return {
     stop() {
-      clearTimeout(first);
-      clearInterval(timer);
+      scheduler.clearTimeout(first);
+      scheduler.clearInterval(timer);
     },
   };
 }

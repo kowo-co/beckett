@@ -72,13 +72,19 @@ interface Harness {
 }
 
 function harness(opts: { fetchFeed?: (url: string) => Promise<ModelNewsFetchResult>; now?: () => Date } = {}): Harness {
-  const stateStore = new WatchStateStore(tmpPath("beckett-watch-", "watch-state.json"));
+  const now = opts.now ?? (() => NOW);
+  // Inject the SAME clock the test uses into the store's own age-based pruning (`pruneState`
+  // reads `this.now()` on every write) — otherwise pruning runs against the real wall clock
+  // while everything else in the test is pinned to a fixed virtual `now`, and fixture posts
+  // silently age out of the 30-day window as real time marches on. That mismatch is exactly
+  // what caused the rate-limit test to flake in CI once real time passed 30 days post-2026-07-25.
+  const stateStore = new WatchStateStore(tmpPath("beckett-watch-", "watch-state.json"), { now });
   const dispatchCalls: Harness["dispatchCalls"] = [];
   const reportCalls: Harness["reportCalls"] = [];
   const deps: WatchDeps = {
     stateStore,
     fetchFeed: opts.fetchFeed ?? feedOf([]),
-    now: opts.now ?? (() => NOW),
+    now,
     dispatchAgent: async (agentId, agentInput, o) => {
       dispatchCalls.push({ agentId, agentInput, opts: o });
     },
