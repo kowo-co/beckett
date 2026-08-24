@@ -79,4 +79,13 @@ describe("concierge doctrine instance rendering", () => {
     expect(promptCorpus).toContain("~/.beckett/company.md");
     expect(promptCorpus).toContain('Never "if you want I could…"');
   });
+
+  test("the corpus flips memory writes to write-unless-noise, without claiming a write", () => {
+    expect(promptCorpus).toContain("Write it unless it's noise");
+    expect(promptCorpus).toContain("Uncertain → write it");
+    expect(promptCorpus).toContain("a decision anyone makes, and the reason behind it");
+    expect(promptCorpus).toContain('what did you eat');
+    expect(promptCorpus).toContain("beckett memory remember");
+    expect(promptCorpus).toContain("ran THIS turn and returned success");
+  });
 });
