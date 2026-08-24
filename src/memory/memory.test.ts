@@ -488,8 +488,39 @@ test("planMaintenance is pure and reports phantoms", async () => {
   expect(plan.archives).toEqual([]);
 });
 
-test("startRoutineMaintenance runs the pass on its timer and stop() halts it", async () => {
+// A fake `MaintenanceScheduler` (`maintain.ts`) that captures the boot-delay/interval callbacks
+// instead of arming real timers, so the test drives passes on demand — no real `setTimeout` wait,
+// no race against CI contention deciding how many real 20ms ticks land inside a real 60ms window.
+function fakeMaintenanceScheduler() {
+  let timeoutCb: (() => void | Promise<void>) | null = null;
+  let intervalCb: (() => void | Promise<void>) | null = null;
+  return {
+    setTimeout(cb: () => void | Promise<void>) {
+      timeoutCb = cb;
+      return "timeout";
+    },
+    setInterval(cb: () => void | Promise<void>) {
+      intervalCb = cb;
+      return "interval";
+    },
+    clearTimeout(h: unknown) {
+      if (h === "timeout") timeoutCb = null;
+    },
+    clearInterval(h: unknown) {
+      if (h === "interval") intervalCb = null;
+    },
+    async fireTimeout() {
+      await timeoutCb?.();
+    },
+    async fireInterval() {
+      await intervalCb?.();
+    },
+  };
+}
+
+test("startRoutineMaintenance runs the boot pass, then each interval tick, and stop() halts the schedule", async () => {
   let runs = 0;
+  const scheduler = fakeMaintenanceScheduler();
   const handle = startRoutineMaintenance({
     maintain: async () => {
       runs++;
@@ -498,13 +529,19 @@ test("startRoutineMaintenance runs the pass on its timer and stop() halts it", a
     logger: quietLog,
     initialDelayMs: 5,
     intervalMs: 20,
+    scheduler,
   });
-  await new Promise((r) => setTimeout(r, 60));
+
+  await scheduler.fireTimeout(); // the boot-delay pass
+  expect(runs).toBe(1);
+
+  await scheduler.fireInterval();
+  await scheduler.fireInterval();
+  expect(runs).toBe(3);
+
   handle.stop();
-  const after = runs;
-  expect(runs).toBeGreaterThanOrEqual(2);
-  await new Promise((r) => setTimeout(r, 40));
-  expect(runs).toBe(after);
+  await scheduler.fireInterval(); // cleared by stop() — a no-op now
+  expect(runs).toBe(3);
 });
 
 // ── maintenance: SEE the whole store, report accurately (issue #97) ──────────────────────
