@@ -50,7 +50,10 @@ beckett image "<description>" [--out <path>] [--size <s>] [--ref <file[,file]>] 
 
 Returns JSON: `{ path, bytes, size, prompt, edited, relocated }`. **`path` is the absolute file** —
 that's what you hand off or deploy. (`relocated:true` just means the wrapper moved the file from
-Codex's default dir to your `--out`; nothing to act on.)
+Codex's default dir to your `--out`; nothing to act on.) `path`'s extension always matches the
+file's real bytes: if a provider hands back a different format than `--out` named (e.g. a `.png`
+request that comes back JPEG), the wrapper renames the file to the correct extension and returns
+*that* path — always use the returned `path`, not the `--out` you passed in.
 
 ## How to write the description
 

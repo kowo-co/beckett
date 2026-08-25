@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CodexImageGen, FalMediaGen, OpenRouterImageGen } from "./imagegen.ts";
@@ -74,6 +74,79 @@ test("default image generation remains the Codex path and does not need a FAL ke
   expect(res.path).toBe(out);
   expect(res.relocated).toBe(false);
   expect(statSync(out).size).toBe(4);
+});
+
+test("Codex image generation renames the output when the bytes don't match the requested --out extension (png->jpg)", async () => {
+  const dir = tmp();
+  const fakeCodex = join(dir, "lying-codex");
+  writeFileSync(
+    fakeCodex,
+    [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      'last="${!#}"',
+      'out="$(printf \'%s\' "$last" | awk \'/Save the final image to EXACTLY this absolute path/{getline; print; exit}\')"',
+      'if [[ -z "$out" ]]; then echo "missing out path" >&2; exit 2; fi',
+      'mkdir -p "$(dirname "$out")"',
+      // Real JPEG magic bytes (FF D8 FF ...), even though the caller asked for a .png path —
+      // this reproduces the reported bug where a provider's actual bytes don't match --out.
+      "printf '\\xff\\xd8\\xffJFIF' > \"$out\"",
+      "printf '%s\\n' \"$out\"",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(fakeCodex, 0o755);
+
+  const requested = join(dir, "grug-400k.png");
+  const gen = new CodexImageGen({
+    imagesDir: join(dir, "images"),
+    logger: quiet,
+    codexBin: fakeCodex,
+    codexHome: join(dir, "codex-home"),
+  });
+  const res = await gen.generate({ prompt: "grug", out: requested });
+
+  expect(res.path).toBe(join(dir, "grug-400k.jpg"));
+  expect(existsSync(requested)).toBe(false);
+  const bytes = readFileSync(res.path);
+  expect(bytes[0]).toBe(0xff);
+  expect(bytes[1]).toBe(0xd8);
+  expect(bytes[2]).toBe(0xff);
+});
+
+test("Codex image generation renames the output when the bytes don't match the requested --out extension (jpg->png)", async () => {
+  const dir = tmp();
+  const fakeCodex = join(dir, "lying-codex-2");
+  writeFileSync(
+    fakeCodex,
+    [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      'last="${!#}"',
+      'out="$(printf \'%s\' "$last" | awk \'/Save the final image to EXACTLY this absolute path/{getline; print; exit}\')"',
+      'if [[ -z "$out" ]]; then echo "missing out path" >&2; exit 2; fi',
+      'mkdir -p "$(dirname "$out")"',
+      // Real PNG magic bytes, even though the caller asked for a .jpg path.
+      "printf '\\x89PNG\\r\\n\\x1a\\n' > \"$out\"",
+      "printf '%s\\n' \"$out\"",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(fakeCodex, 0o755);
+
+  const requested = join(dir, "grug.jpg");
+  const gen = new CodexImageGen({
+    imagesDir: join(dir, "images"),
+    logger: quiet,
+    codexBin: fakeCodex,
+    codexHome: join(dir, "codex-home"),
+  });
+  const res = await gen.generate({ prompt: "grug", out: requested });
+
+  expect(res.path).toBe(join(dir, "grug.png"));
+  expect(existsSync(requested)).toBe(false);
+  const bytes = readFileSync(res.path);
+  expect([...bytes.subarray(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 });
 
 test("Codex image generation rejects a nonzero exit instead of returning an old output", async () => {
@@ -224,6 +297,72 @@ test("CodexImageGen routes fal-ai model slugs through the fal async queue and do
     expect(statSync(out).size).toBe(3);
     expect(calls[0]).toMatchObject({ method: "POST", url: "https://queue.fal.run/fal-ai/flux/dev", auth: "Key fal-test" });
     expect(JSON.parse(calls[0]!.body!)).toEqual({ prompt: "a small robot", image_size: { width: 1024, height: 1024 } });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}, { timeout: 10_000 });
+
+test("fal path renames the downloaded asset when its bytes don't match the requested --out extension (png->jpg)", async () => {
+  // Reproduces the reported bug: fal-ai/flux-pro/v1.1 returned JPEG bytes for a --out ...png
+  // request, and the CLI reported success for a path whose contents lied about their format.
+  const dir = tmp();
+  const jpegBytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]);
+  const fetchImpl = (async (url: string | URL | Request) => {
+    const u = String(url);
+    if (u === "https://queue.fal.run/fal-ai/flux-pro/v1.1") {
+      return Response.json({ request_id: "req-1", status_url: "https://queue.test/status/req-1", response_url: "https://queue.test/result/req-1" });
+    }
+    if (u === "https://queue.test/status/req-1?logs=1") return Response.json({ status: "COMPLETED" });
+    if (u === "https://queue.test/result/req-1") return Response.json({ images: [{ url: "https://cdn.test/out.png" }] });
+    if (u === "https://cdn.test/out.png") return new Response(new Uint8Array(jpegBytes), { status: 200 });
+    return new Response("not found", { status: 404 });
+  }) as unknown as typeof fetch;
+
+  const gen = new CodexImageGen({ imagesDir: join(dir, "images"), logger: quiet });
+  process.env.FAL_KEY = "fal-test";
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = fetchImpl;
+  try {
+    const requested = join(dir, "grug-400k.png");
+    const res = await gen.generate({ prompt: "grug", model: "fal-ai/flux-pro/v1.1", out: requested, size: "1024x1024" });
+
+    expect(res.path).toBe(join(dir, "grug-400k.jpg"));
+    expect(existsSync(requested)).toBe(false);
+    const bytes = readFileSync(res.path);
+    expect(bytes[0]).toBe(0xff);
+    expect(bytes[1]).toBe(0xd8);
+    expect(bytes[2]).toBe(0xff);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}, { timeout: 10_000 });
+
+test("fal path renames the downloaded asset when its bytes don't match the requested --out extension (jpg->png)", async () => {
+  const dir = tmp();
+  const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]);
+  const fetchImpl = (async (url: string | URL | Request) => {
+    const u = String(url);
+    if (u === "https://queue.fal.run/fal-ai/flux/dev") {
+      return Response.json({ request_id: "req-2", status_url: "https://queue.test/status/req-2", response_url: "https://queue.test/result/req-2" });
+    }
+    if (u === "https://queue.test/status/req-2?logs=1") return Response.json({ status: "COMPLETED" });
+    if (u === "https://queue.test/result/req-2") return Response.json({ images: [{ url: "https://cdn.test/out.bin" }] });
+    if (u === "https://cdn.test/out.bin") return new Response(new Uint8Array(pngBytes), { status: 200 });
+    return new Response("not found", { status: 404 });
+  }) as unknown as typeof fetch;
+
+  const gen = new CodexImageGen({ imagesDir: join(dir, "images"), logger: quiet });
+  process.env.FAL_KEY = "fal-test";
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = fetchImpl;
+  try {
+    const requested = join(dir, "thing.jpg");
+    const res = await gen.generate({ prompt: "grug", model: "fal-ai/flux/dev", out: requested, size: "1024x1024" });
+
+    expect(res.path).toBe(join(dir, "thing.png"));
+    expect(existsSync(requested)).toBe(false);
+    const bytes = readFileSync(res.path);
+    expect([...bytes.subarray(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   } finally {
     globalThis.fetch = originalFetch;
   }

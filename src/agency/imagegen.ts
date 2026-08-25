@@ -28,6 +28,7 @@ import {
   statSync,
   copyFileSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -182,6 +183,75 @@ function parseSize(size: string | undefined): { width: number; height: number } 
   const m = /^(\d+)x(\d+)$/.exec(size);
   if (!m) return undefined;
   return { width: Number(m[1]), height: Number(m[2]) };
+}
+
+type SniffedImageFormat = "png" | "jpeg" | "webp" | "gif";
+
+/** Magic-byte sniff — the only ground truth for what format a file actually is. */
+function sniffImageFormat(buf: Buffer): SniffedImageFormat | undefined {
+  if (
+    buf.length >= 8 &&
+    buf[0] === 0x89 &&
+    buf[1] === 0x50 &&
+    buf[2] === 0x4e &&
+    buf[3] === 0x47 &&
+    buf[4] === 0x0d &&
+    buf[5] === 0x0a &&
+    buf[6] === 0x1a &&
+    buf[7] === 0x0a
+  ) {
+    return "png";
+  }
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "jpeg";
+  if (buf.length >= 12 && buf.toString("ascii", 0, 4) === "RIFF" && buf.toString("ascii", 8, 12) === "WEBP") {
+    return "webp";
+  }
+  if (buf.length >= 6 && (buf.toString("ascii", 0, 6) === "GIF87a" || buf.toString("ascii", 0, 6) === "GIF89a")) {
+    return "gif";
+  }
+  return undefined;
+}
+
+/** Extension families that count as "already correct" — no need to rename jpg <-> jpeg. */
+const EXT_FORMAT_FAMILY: Record<string, SniffedImageFormat> = {
+  png: "png",
+  jpg: "jpeg",
+  jpeg: "jpeg",
+  webp: "webp",
+  gif: "gif",
+};
+
+const CANONICAL_EXT_FOR_FORMAT: Record<SniffedImageFormat, string> = {
+  png: "png",
+  jpeg: "jpg",
+  webp: "webp",
+  gif: "gif",
+};
+
+/**
+ * A provider can hand back bytes in a different format than the extension we were asked to
+ * save under (fal.ai in particular: the queue result can be JPEG even when nothing in the
+ * request said so). Sniff the file we just wrote and, if its real format doesn't match the
+ * requested extension, rename it to the extension that matches — callers must never be handed
+ * a path whose contents lie about their own format. Returns the path actually on disk.
+ */
+function reconcilePathWithBytes(outPath: string, logger: Logger): string {
+  const detected = sniffImageFormat(readFileSync(outPath));
+  if (!detected) return outPath; // unrecognized bytes (e.g. tests) — nothing to reconcile against
+
+  const dot = outPath.lastIndexOf(".");
+  const currentExt = dot >= 0 ? outPath.slice(dot + 1).toLowerCase() : "";
+  if (EXT_FORMAT_FAMILY[currentExt] === detected) return outPath;
+
+  const base = dot >= 0 ? outPath.slice(0, dot) : outPath;
+  const correctedPath = `${base}.${CANONICAL_EXT_FOR_FORMAT[detected]}`;
+  renameSync(outPath, correctedPath);
+  logger.warn("image bytes did not match the requested --out extension; renamed to the real format", {
+    requested: outPath,
+    actual: correctedPath,
+    detectedFormat: detected,
+  });
+  return correctedPath;
 }
 
 function extractFalError(json: any, fallback = "unknown fal error"): string {
@@ -387,8 +457,9 @@ export class FalMediaGen {
       rmSync(outPath, { force: true });
       throw new ImageGenError(`fal wrote an empty file at ${outPath}`);
     }
+    const finalPath = media === "image" ? reconcilePathWithBytes(outPath, this.logger) : outPath;
     return {
-      path: outPath,
+      path: finalPath,
       bytes,
       size,
       prompt,
@@ -651,8 +722,9 @@ export class OpenRouterImageGen {
       rmSync(outPath, { force: true });
       throw new ImageGenError(`openrouter wrote an empty file at ${outPath}`);
     }
+    const finalPath = reconcilePathWithBytes(outPath, this.logger);
     return {
-      path: outPath,
+      path: finalPath,
       bytes,
       size,
       prompt,
@@ -817,7 +889,8 @@ export class CodexImageGen {
       rmSync(outPath, { force: true });
       throw new ImageGenError(`codex wrote an empty file at ${outPath} (exit ${code})`);
     }
-    return { path: outPath, bytes, size, prompt, edited, relocated };
+    const finalPath = reconcilePathWithBytes(outPath, this.logger);
+    return { path: finalPath, bytes, size, prompt, edited, relocated };
   }
 
   /** Is the resolved codex binary actually present and executable? */
