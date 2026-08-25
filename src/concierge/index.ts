@@ -238,19 +238,6 @@ export function cardsChannelId(): string | null {
   return configured || CARDS_CHANNEL_ID;
 }
 
-/**
- * Home for the training progress card (`../progress/training-card.ts`). A dedicated channel
- * rather than {@link CARDS_CHANNEL_ID}: that channel's cards are per-task and per-branch.
- */
-export const LIVE_PROGRESS_CHANNEL_ID = "1525690195234521179";
-
-/** Live-progress channel, overridable via `BECKETT_LIVE_PROGRESS_CHANNEL_ID`, same `disabled` seam as {@link cardsChannelId}. */
-export function liveProgressChannelId(): string | null {
-  const configured = process.env.BECKETT_LIVE_PROGRESS_CHANNEL_ID?.trim();
-  if (configured?.toLowerCase() === "disabled") return null;
-  return configured || LIVE_PROGRESS_CHANNEL_ID;
-}
-
 /** Discord shows "typing…" for ~10s; re-trigger inside this window while a turn runs. */
 const TYPING_INTERVAL_MS = 8_000;
 

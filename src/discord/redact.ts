@@ -6,12 +6,11 @@
  * re-exported from `../concierge/index.ts` for its existing callers/tests) for prose a page or a
  * model writes — LABEL-based: "Password: xyz", "generated api key is xyz", `{"token":"xyz"}`.
  *
- * The live-progress terminal window (`../progress/terminal-window.ts`) reuses this on a second
- * kind of text: raw shell/tool-journal lines, which speak in VALUE SHAPES rather than prose
- * labels — `export GITHUB_TOKEN=ghp_…`, `Authorization: Bearer eyJ…`. Neither pass needs to know
- * what the real secret IS; both only recognize the shapes credentials take, so a false positive
- * (redacting a harmless `PRIMARY_KEY=1`) is an acceptable cost against the alternative of a
- * leaked one.
+ * A second pass covers raw shell/tool-journal lines, which speak in VALUE SHAPES rather than
+ * prose labels — `export GITHUB_TOKEN=ghp_…`, `Authorization: Bearer eyJ…`. Neither pass needs
+ * to know what the real secret IS; both only recognize the shapes credentials take, so a false
+ * positive (redacting a harmless `PRIMARY_KEY=1`) is an acceptable cost against the alternative
+ * of a leaked one.
  */
 
 /** Human-written labels a secret is introduced by ("password:", "generated api key is", …). */
